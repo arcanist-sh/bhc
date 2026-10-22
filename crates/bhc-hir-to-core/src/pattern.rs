@@ -421,12 +421,18 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 *view_span,
             );
 
-            // Create a nested case: case (f tmp) of { result_pat -> rhs }
-            let inner_alt = lower_pat_to_alt(ctx, result_pat, rhs, span)?;
+            // Create a nested case: case (f tmp) of { result_pat -> rhs }. A
+            // result that does not match — at its head or in a nested
+            // sub-pattern — resumes at the enclosing fallthrough: pandoc's
+            // `case T.break p ln of { (_, T.uncons -> Just ('|', _)) -> …;
+            // _ -> mzero }` raised a pattern-match error on every line
+            // without a pipe.
+            let inner_alt =
+                lower_pat_to_alt_with_fallthrough(ctx, result_pat, rhs, span, fallthrough.clone())?;
             let default_alt = Alt {
                 con: AltCon::Default,
                 binders: vec![],
-                rhs: make_pattern_error(span),
+                rhs: fallthrough.unwrap_or_else(|| make_pattern_error(span)),
             };
 
             let inner_case = core::Expr::Case(
@@ -919,8 +925,39 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 };
 
                 // Create fresh variables for constructor fields
+                // Type them from the scrutinee where its shape says how: a
+                // `"lit" : _` row over a `[Text]` needs its head typed `Text`,
+                // or the literal is compared as a `[Char]` and never matches.
+                // Failing that, a constructor's ground declared field types
+                // (`Div Attr [Block]`) serve as well.
+                let field_tys = field_tys_from_scrutinee(
+                    &ctx.expand_type_aliases(&scrutinee.ty),
+                    *con_name,
+                    *arity as usize,
+                )
+                .or_else(|| {
+                    let declared = ctx.constructor_field_types(*con_name)?;
+                    (declared.len() == *arity as usize).then(|| {
+                        declared
+                            .iter()
+                            .map(|t| {
+                                let t = ctx.expand_type_aliases(t);
+                                if crate::expr::is_fully_concrete_ty(&t) {
+                                    t
+                                } else {
+                                    Ty::Error
+                                }
+                            })
+                            .collect()
+                    })
+                });
                 let field_vars: Vec<Var> = (0..*arity)
-                    .map(|i| ctx.fresh_var(&format!("_pat{col}_{i}"), Ty::Error, row_span))
+                    .map(|i| {
+                        let ty = field_tys
+                            .as_ref()
+                            .map_or(Ty::Error, |tys| tys[i as usize].clone());
+                        ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span)
+                    })
                     .collect();
 
                 // Register variable bindings for wild/var rows participating
@@ -937,6 +974,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                             // the binder is silently dropped and the RHS
                             // reference stubs at runtime.
                             register_as_outer_bindings(ctx, &row.pats[col], &scrutinee);
+                            record_con_binder_tys(ctx, &row.pats[col]);
                         }
                     }
                 }
@@ -1133,6 +1171,55 @@ fn register_as_outer_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee:
         }
         Pat::Ann(inner, _, _) => register_as_outer_bindings(ctx, inner, scrutinee),
         _ => {}
+    }
+}
+
+/// Record, for each variable directly under a constructor pattern, the
+/// constructor's declared field type when it is concrete (`Str t` binds
+/// `t :: Text`). Dispatch-only — see `LowerContext::record_pattern_binder_ty`:
+/// inside an instance method body typeck records no occurrence types, so this
+/// is how `t1 <> t2` there learns it is at `Text`.
+fn record_con_binder_tys(ctx: &mut LowerContext, pat: &hir::Pat) {
+    let (def_ref, sub_pats) = match pat {
+        Pat::Con(def_ref, sub_pats, _) => (def_ref, sub_pats),
+        Pat::As(_, _, inner, _) | Pat::Ann(inner, _, _) => {
+            return record_con_binder_tys(ctx, inner);
+        }
+        _ => return,
+    };
+    let Some(field_tys) = ctx
+        .lookup_constructor_or_by_name(def_ref.def_id)
+        .map(|info| info.name)
+        .and_then(|name| ctx.constructor_field_types(name).cloned())
+    else {
+        return;
+    };
+    for (sub_pat, fty) in sub_pats.iter().zip(field_tys) {
+        if let Pat::Var(_, def_id, _) = sub_pat {
+            if matches!(fty, Ty::Con(_)) || crate::expr::is_fully_concrete_ty(&fty) {
+                ctx.record_pattern_binder_ty(*def_id, fty);
+            }
+        }
+    }
+}
+
+/// Field types of constructor `con` read off a scrutinee type whose shape
+/// fixes them: `(:)` over `[t]` and an n-tuple over `(t1, .., tn)`. Returns
+/// `None` when the scrutinee type is unknown or not of that shape.
+fn field_tys_from_scrutinee(scrut_ty: &Ty, con: Symbol, arity: usize) -> Option<Vec<Ty>> {
+    match scrut_ty {
+        Ty::List(elem) if con.as_str() == ":" && arity == 2 => {
+            Some(vec![(**elem).clone(), scrut_ty.clone()])
+        }
+        Ty::App(head, elem)
+            if con.as_str() == ":"
+                && arity == 2
+                && matches!(head.as_ref(), Ty::Con(tc) if tc.name.as_str() == "[]") =>
+        {
+            Some(vec![(**elem).clone(), Ty::List(elem.clone())])
+        }
+        Ty::Tuple(tys) if tys.len() == arity && arity >= 2 => Some(tys.clone()),
+        _ => None,
     }
 }
 
@@ -1451,17 +1538,34 @@ fn compile_equations_linear(
             *view_span,
         );
 
-        let inner_alt = lower_pat_to_alt(ctx, result_pat, rhs, eq.span)?;
+        // The remaining equations, bound once: reached when the view's result
+        // does not match at its head AND when a nested sub-pattern fails
+        // (`f (T.uncons -> Just ('|', _)) = …` on "x" — the `'|'` misses
+        // inside the `Just`, which raised a pattern-match error instead of
+        // trying `f _ = …`).
+        let resume = ctx.fresh_var("$viewfail", Ty::Error, *view_span);
+        let resume_ref = core::Expr::Var(resume.clone(), *view_span);
+        let inner_alt = lower_pat_to_alt_with_fallthrough(
+            ctx,
+            result_pat,
+            rhs,
+            eq.span,
+            Some(resume_ref.clone()),
+        )?;
         let fallthrough_alt = Alt {
             con: AltCon::Default,
             binders: vec![],
-            rhs: fallthrough_expr,
+            rhs: resume_ref,
         };
 
-        let view_case = core::Expr::Case(
-            Box::new(applied),
-            vec![inner_alt, fallthrough_alt],
-            Ty::Error,
+        let view_case = core::Expr::Let(
+            Box::new(core::Bind::NonRec(resume, Box::new(fallthrough_expr))),
+            Box::new(core::Expr::Case(
+                Box::new(applied),
+                vec![inner_alt, fallthrough_alt],
+                Ty::Error,
+                *view_span,
+            )),
             *view_span,
         );
 
@@ -1536,16 +1640,24 @@ fn compile_equations_linear(
         // arguments, and casing arg0 against those alternatives matches a
         // tuple's alternatives against a single value:
         // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted.
-        let single_scrutinee = eq.pats.len() == 1;
-        let join_point_affordable = single_scrutinee
-            && (!eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET);
-        let fallthrough = match (&remaining_alts, args.first()) {
-            (Some(remaining), Some(arg)) if join_point_affordable => Some(core::Expr::Case(
-                Box::new(core::Expr::Var(arg.clone(), span)),
-                remaining.clone(),
-                Ty::Error,
-                span,
-            )),
+        // So a multi-argument join point re-cases on the argument TUPLE,
+        // the same scrutinee `compile_match_to_expr` dispatches on.
+        let join_point_affordable =
+            !eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET;
+        let fallthrough = match &remaining_alts {
+            Some(remaining) if join_point_affordable && !args.is_empty() => {
+                let scrutinee = if eq.pats.len() == 1 {
+                    core::Expr::Var(args[0].clone(), span)
+                } else {
+                    args_tuple(args, span)
+                };
+                Some(core::Expr::Case(
+                    Box::new(scrutinee),
+                    remaining.clone(),
+                    Ty::Error,
+                    span,
+                ))
+            }
             _ => None,
         };
 
@@ -1588,7 +1700,13 @@ fn compile_equations_linear(
             )?;
             these_alts.extend(expanded_alts);
         } else {
-            let tuple_alt = compile_tuple_pattern(ctx, &eq.pats, rhs, eq.span)?;
+            let tuple_alt = compile_tuple_pattern(
+                ctx,
+                &eq.pats,
+                rhs,
+                eq.span,
+                join_var.as_ref().map(|_| guard_failure.clone()),
+            )?;
             these_alts.push(tuple_alt);
         }
 
@@ -1657,6 +1775,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
             // Literals don't bind any variables
         }
         Pat::Con(_, sub_pats, _) => {
+            record_con_binder_tys(ctx, pat);
             // Recursively bind sub-pattern variables
             // Each sub-pattern will need its own fresh variable
             for sub_pat in sub_pats {
@@ -1746,11 +1865,16 @@ fn is_irrefutable_pat(pat: &Pat) -> bool {
 }
 
 /// Compile a tuple of patterns into a single alternative.
+/// A refutable sub-pattern that fails resumes at `fallthrough` (the next
+/// equation's join point) when there is one: the tuple itself always
+/// matches, so the alternatives after this one are never reached by
+/// matching.
 fn compile_tuple_pattern(
     ctx: &mut LowerContext,
     pats: &[hir::Pat],
     rhs: core::Expr,
     span: Span,
+    fallthrough: Option<core::Expr>,
 ) -> LowerResult<Alt> {
     // Create a tuple pattern that matches all the individual patterns
     let tuple_name = Symbol::intern(&format!("({})", ",".repeat(pats.len() - 1)));
@@ -1778,7 +1902,9 @@ fn compile_tuple_pattern(
             _ => {
                 // Complex sub-pattern: need nested case
                 let sub_alt = lower_pat_to_alt(ctx, pat, inner_rhs.clone(), span)?;
-                let default_rhs = make_pattern_error(span);
+                let default_rhs = fallthrough
+                    .clone()
+                    .unwrap_or_else(|| make_pattern_error(span));
                 let default_alt = Alt {
                     con: AltCon::Default,
                     binders: vec![],
@@ -1811,6 +1937,27 @@ fn compile_tuple_pattern(
         binders,
         rhs: inner_rhs,
     })
+}
+
+/// `(a0, a1, …)` over the function's arguments.
+fn args_tuple(args: &[Var], span: Span) -> core::Expr {
+    let tuple_con_name = Symbol::intern(&format!("({})", ",".repeat(args.len() - 1)));
+    let mut expr = core::Expr::Var(
+        Var {
+            name: tuple_con_name,
+            id: VarId::new(0),
+            ty: Ty::Error,
+        },
+        span,
+    );
+    for arg in args {
+        expr = core::Expr::App(
+            Box::new(expr),
+            Box::new(core::Expr::Var(arg.clone(), span)),
+            span,
+        );
+    }
+    expr
 }
 
 /// Create an if expression (case on Bool).
@@ -2328,6 +2475,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2341,6 +2489,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2395,6 +2544,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2408,6 +2558,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2459,6 +2610,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2472,6 +2624,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2612,6 +2765,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 

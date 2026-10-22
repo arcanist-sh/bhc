@@ -52,8 +52,8 @@ pub use report::ComprehensiveKernelReport;
 use bhc_ast::Module as AstModule;
 use bhc_codegen::{
     llvm::{
-        lower_core_module, lower_core_module_multimodule_with_constructors, CompiledSymbol,
-        ConstructorMeta, LlvmBackend, LlvmModuleExt,
+        lower_core_module, lower_core_module_multimodule_with_constructors,
+        shadows_codegen_builtin, CompiledSymbol, ConstructorMeta, LlvmBackend, LlvmModuleExt,
     },
     CodegenConfig, CodegenOutputType,
 };
@@ -296,6 +296,20 @@ pub struct CompiledModuleInfo {
     /// Inferred type schemes for exported values, keyed by symbol name.
     /// Propagated from type checking so downstream modules get correct types.
     pub value_schemes: FxHashMap<bhc_intern::Symbol, bhc_types::Scheme>,
+    /// Declared field types of this module's constructors, by constructor
+    /// name — the whole-program counterpart of an interface's constructor
+    /// fields, so an importer can pack an OverloadedStrings literal in an
+    /// imported `Text` field.
+    pub con_field_types: FxHashMap<bhc_intern::Symbol, Vec<bhc_types::Ty>>,
+    /// The module's interface, as `-c` would write it to its `.bhi`: whole-
+    /// program builds register its classes and instances for later modules
+    /// the way separate compilation reads them from disk.
+    pub interface: Option<Box<bhc_interface::ModuleInterface>>,
+    /// Core names of RE-exported values that differ from their bare name:
+    /// `Control.Monad.State` re-exports `modify` as the definition named
+    /// `Control.Monad.State.Class.modify`, because another module defines a
+    /// `modify` too. An importer must refer to that same definition.
+    pub reexport_core_names: FxHashMap<bhc_intern::Symbol, bhc_intern::Symbol>,
 }
 
 /// Accumulates compilation artifacts across modules during multi-module compilation.
@@ -309,6 +323,22 @@ pub struct ModuleRegistry {
 pub struct Compiler {
     session: SessionRef,
     callbacks: Arc<dyn CompileCallbacks>,
+    /// Core sidecars (see `write_core_sidecar`) of the modules compiled by
+    /// this compiler, by module name — the in-memory counterpart of the `.bhc`
+    /// files, so a whole-program build can monomorphize across its modules.
+    core_sidecars: std::sync::Mutex<FxHashMap<String, Vec<u8>>>,
+}
+
+/// A class method's declared scheme restricted to its OWN constraints (the
+/// method-level context, e.g. `Monoid c` in `query`), or `None` when it has
+/// only the class's. The interface records the class constraint first.
+fn method_level_scheme(scheme: &bhc_types::Scheme, class: Symbol) -> Option<bhc_types::Scheme> {
+    if !scheme.constraints.iter().any(|c| c.class != class) {
+        return None;
+    }
+    let mut own = scheme.clone();
+    own.constraints.retain(|c| c.class != class);
+    Some(own)
 }
 
 /// Which of a class's parameters each superclass constrains, by index.
@@ -332,6 +362,55 @@ fn superclass_param_indices(class: &bhc_interface::ExportedClass) -> Vec<Vec<usi
         .collect()
 }
 
+/// First of the reserved `DefId`s under which out-of-scope newtype
+/// representations are recorded for Core lowering (see
+/// `build_imported_constructor_map`). Far above any id a module allocates.
+const NEWTYPE_REP_DEF_ID_BASE: usize = 0x7000_0000;
+
+/// Record the representation of every known newtype whose constructor is NOT
+/// in scope, for Core lowering.
+///
+/// `import Text.Pandoc.Translations.Types (Translations)` brings only the
+/// type (the module exports it abstractly), yet `mempty :: Translations` must
+/// resolve to the wrapped `Map`'s instance — newtypes are erased. These
+/// entries sit under reserved ids no expression refers to, with no field names
+/// (so no selectors are registered for them).
+fn add_newtype_reps(
+    result: &mut bhc_hir_to_core::ConstructorInfoMap,
+    interface_constructors: &[bhc_lower::InterfaceConstructorEntry],
+    extra: Vec<(Symbol, Symbol, Vec<bhc_types::Ty>)>,
+) {
+    let mut covered: FxHashSet<Symbol> = result.values().map(|c| c.type_name).collect();
+    let from_interfaces =
+        interface_constructors
+            .iter()
+            .filter_map(|(name, _, _, type_name, is_newtype, tys)| {
+                let type_name = type_name.as_ref().filter(|_| *is_newtype)?;
+                Some((Symbol::intern(name), Symbol::intern(type_name), tys.clone()))
+            });
+    let mut next = NEWTYPE_REP_DEF_ID_BASE;
+    for (name, type_name, field_types) in from_interfaces.chain(extra) {
+        if field_types.len() != 1 || !covered.insert(type_name) {
+            continue;
+        }
+        result.insert(
+            <bhc_hir::DefId as bhc_index::Idx>::new(next),
+            bhc_hir_to_core::ConstructorInfo {
+                name,
+                type_name,
+                tag: 0,
+                arity: 1,
+                field_names: Vec::new(),
+                is_newtype: true,
+                existential_dict_count: 0,
+                existential_classes: vec![],
+                field_types,
+            },
+        );
+        next += 1;
+    }
+}
+
 impl Compiler {
     /// Create a new compiler with the given options.
     ///
@@ -343,6 +422,7 @@ impl Compiler {
         Ok(Self {
             session,
             callbacks: Arc::new(NoopCallbacks),
+            core_sidecars: std::sync::Mutex::new(FxHashMap::default()),
         })
     }
 
@@ -492,6 +572,7 @@ impl Compiler {
                 &ast,
                 &typed,
                 &class_params,
+                &lower_ctx.interface_class_method_names(),
             );
             let iface_path = bhc_interface::interface_path(hidir, &module_name);
             if let Some(parent) = iface_path.parent() {
@@ -528,17 +609,28 @@ impl Compiler {
             ]
             .into_iter()
             .collect();
-            lower_ctx
-                .interface_constructors
-                .iter()
-                .filter(|(name, _, _, _, _, _)| !builtins.contains(name.as_str()))
-                .filter_map(|(name, tag, arity, type_name, is_newtype, _)| {
-                    let sym = Symbol::intern(name);
-                    let def_id = lower_ctx.lookup_constructor(sym)?;
+            // Each entry is registered under the id its bare name resolves to
+            // and under the id it was bound with at load time: a qualified-only
+            // import (`A.Done`) binds no bare name, and its patterns then got
+            // a made-up tag and never matched.
+            let mut map = bhc_hir_to_core::ConstructorInfoMap::default();
+            for (i, (name, tag, arity, type_name, is_newtype, field_types)) in
+                lower_ctx.interface_constructors.iter().enumerate()
+            {
+                if builtins.contains(name.as_str()) {
+                    continue;
+                }
+                let sym = Symbol::intern(name);
+                let by_name = lower_ctx.lookup_constructor(sym);
+                let recorded = lower_ctx.interface_constructor_ids.get(i).copied();
+                for def_id in [by_name, recorded.filter(|r| Some(*r) != by_name)]
+                    .into_iter()
+                    .flatten()
+                {
                     let field_names = lower_ctx
                         .get_constructor_field_names(def_id)
                         .unwrap_or_default();
-                    Some((
+                    map.insert(
                         def_id,
                         bhc_hir_to_core::ConstructorInfo {
                             name: sym,
@@ -549,11 +641,19 @@ impl Compiler {
                             is_newtype: *is_newtype,
                             existential_dict_count: 0,
                             existential_classes: vec![],
+                            field_types: field_types.clone(),
                         },
-                    ))
-                })
-                .collect()
+                    );
+                }
+            }
+            map
         };
+        let mut imported_ctors = imported_ctors;
+        add_newtype_reps(
+            &mut imported_ctors,
+            &lower_ctx.interface_constructors,
+            Vec::new(),
+        );
         let core =
             self.core_lower_with_constructors(&hir, &lower_ctx, &typed, Some(&imported_ctors))?;
         self.callbacks
@@ -1180,6 +1280,7 @@ impl Compiler {
         // Resolve Hackage package dependencies and add their source directories
         let package_paths = self.resolve_hackage_packages()?;
         search_paths.extend(package_paths);
+        push_transformer_library(&mut search_paths);
 
         let config = bhc_lower::LowerConfig {
             include_builtins: true,
@@ -1261,11 +1362,17 @@ impl Compiler {
         // Pass lower context's defs directly - bhc_typeck now uses the same
         // DefMap type. Interface-loaded type synonyms ride along so aliases
         // like AnnotatedTable's `type RowHead = [Cell]` expand cross-module.
-        match bhc_typeck::type_check_module_full(
+        match bhc_typeck::type_check_module_with_imports(
             hir,
             file_id,
             Some(&lower_ctx.defs),
             &lower_ctx.interface_type_aliases,
+            &bhc_typeck::ImportedClasses {
+                classes: &lower_ctx.interface_classes,
+                fundeps: Some(&lower_ctx.interface_class_fundeps),
+                instances: &lower_ctx.interface_instances,
+                record_field_types: Some(&lower_ctx.interface_record_field_types),
+            },
         ) {
             Ok(typed) => Ok(typed),
             Err(diagnostics) => {
@@ -1375,6 +1482,13 @@ impl Compiler {
             }
         }
 
+        bhc_hir_to_core::set_imported_class_fundeps(
+            lower_ctx
+                .interface_class_fundeps
+                .iter()
+                .map(|(class, deps)| (*class, deps.clone()))
+                .collect(),
+        );
         let mut core = bhc_hir_to_core::lower_module_with_imports(
             hir,
             Some(&def_map),
@@ -1424,10 +1538,10 @@ impl Compiler {
         // that imports it and pins a concrete monad (defined here, e.g. PandocIO)
         // can specialize these polymorphic bodies and unfold that monad locally
         // (cross-module monomorphization, BHC-BRIEF-0004).
-        if let Some(ref hidir) = self.session.options.output_interface_dir {
+        {
             let imports: Vec<String> = hir.imports.iter().map(|i| i.module.to_string()).collect();
-            Self::write_core_sidecar(
-                hidir,
+            self.write_core_sidecar(
+                self.session.options.output_interface_dir.as_deref(),
                 hir.name.as_str(),
                 &core.bindings,
                 &newtypes,
@@ -1445,12 +1559,23 @@ impl Compiler {
             !Self::ty_has_free_var(t)
                 && matches!(Self::ultimate_result_ty(t), bhc_types::Ty::App(..))
         });
-        let mono = if maybe_concrete_monad {
+        // `BHC_NO_MONO=1` skips the pass (diagnosis: does a wrong answer come
+        // from a specialized clone?).
+        let mono = if maybe_concrete_monad && std::env::var_os("BHC_NO_MONO").is_none() {
             // Load the transported bodies and type expansions of imported modules,
             // so the pass can specialize an imported writer at an imported newtype.
-            let (imported_bodies, imported_newtypes) = self.load_imported_core_bodies(hir);
+            let (imported_bodies, imported_newtypes, imported_cons) =
+                self.load_imported_core_bodies(hir);
             for (name, def) in imported_newtypes {
                 newtypes.entry(name).or_insert(def);
+            }
+            // A specialized clone of an imported body can build that module's
+            // PRIVATE constructors (`evalStateT go (WS [k] True)` in a writer
+            // whose `WS` is not exported); codegen needs their layout here.
+            for con in imported_cons {
+                if !core.constructors.iter().any(|c| c.name == con.name) {
+                    core.constructors.push(con);
+                }
             }
             // Runs on the freshly-lowered Core (original Var spans still match
             // `resolved_expr_types`), before the simplifier. (BHC-BRIEF-0004.)
@@ -1582,23 +1707,30 @@ impl Compiler {
     /// concrete monad (cross-module monomorphization). Best-effort: a failure
     /// just means cross-module specialization will not fire for this module.
     fn write_core_sidecar(
-        hidir: &Utf8Path,
+        &self,
+        hidir: Option<&Utf8Path>,
         module_name: &str,
         bindings: &[Bind],
         newtypes: &FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
         imports: &[String],
         constructors: &[bhc_core::CoreConstructor],
     ) {
-        let path = Self::core_sidecar_path(hidir, module_name);
         let expansions: Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)> = newtypes
             .iter()
             .map(|(name, (params, ty))| (*name, params.clone(), ty.clone()))
             .collect();
-        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions, imports, constructors)) {
+        let Ok(bytes) = bincode::serialize(&(bindings, &expansions, imports, constructors)) else {
+            return;
+        };
+        if let Some(hidir) = hidir {
+            let path = Self::core_sidecar_path(hidir, module_name);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent.as_std_path());
             }
-            let _ = std::fs::write(path.as_std_path(), bytes);
+            let _ = std::fs::write(path.as_std_path(), &bytes);
+        }
+        if let Ok(mut mem) = self.core_sidecars.lock() {
+            mem.insert(module_name.to_string(), bytes);
         }
     }
 
@@ -1693,11 +1825,27 @@ impl Compiler {
                     Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
                 };
                 for (v, body) in pairs {
-                    if seen.insert(v.name) {
+                    // Keyed by the QUALIFIED name: a bare `p`/`a`/`div` defined
+                    // by an earlier module in the walk must not hide blaze's.
+                    let llvm_name = format!("{}.{}", module, v.name.as_str());
+                    if seen.insert(bhc_intern::Symbol::intern(&llvm_name)) {
+                        let param_count = lambda_arity(body);
+                        // Also under the module-qualified name: a specialized
+                        // clone keeps the defining module's references, which
+                        // the lowerer spells qualified when the bare name is
+                        // ambiguous (`Text.Blaze.XHtml1.Transitional.p`). Only
+                        // the bare key was declared, so pandoc's HTML writer
+                        // specialized into a caller lowered every blaze element
+                        // to a local "not implemented" stub.
+                        out.push(CompiledSymbol {
+                            name: bhc_intern::Symbol::intern(&llvm_name),
+                            llvm_name: llvm_name.clone(),
+                            param_count,
+                        });
                         out.push(CompiledSymbol {
                             name: v.name,
-                            llvm_name: format!("{}.{}", module, v.name.as_str()),
-                            param_count: lambda_arity(body),
+                            llvm_name,
+                            param_count,
                         });
                     }
                 }
@@ -1731,6 +1879,7 @@ impl Compiler {
     ) -> (
         FxHashMap<String, (bhc_core::Var, Expr)>,
         FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+        Vec<bhc_core::CoreConstructor>,
     ) {
         type Sidecar = (
             Vec<Bind>,
@@ -1741,6 +1890,7 @@ impl Compiler {
         let mut out: FxHashMap<String, (bhc_core::Var, Expr)> = FxHashMap::default();
         let mut expansions: FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)> =
             FxHashMap::default();
+        let mut constructors: Vec<bhc_core::CoreConstructor> = Vec::new();
         let mut dirs: Vec<&Utf8PathBuf> = Vec::new();
         if let Some(ref hidir) = self.session.options.output_interface_dir {
             dirs.push(hidir);
@@ -1759,8 +1909,12 @@ impl Compiler {
             if !visited.insert(module.clone()) {
                 continue;
             }
-            let mut found = None;
-            for dir in &dirs {
+            let mut found = self
+                .core_sidecars
+                .lock()
+                .ok()
+                .and_then(|mem| mem.get(&module).cloned());
+            for dir in dirs.iter().filter(|_| found.is_none()) {
                 let path = Self::core_sidecar_path(dir, &module);
                 if let Ok(bytes) = std::fs::read(path.as_std_path()) {
                     found = Some(bytes);
@@ -1768,10 +1922,11 @@ impl Compiler {
                 }
             }
             let Some(bytes) = found else { continue };
-            let Ok((mut binds, nts, imports, _cons)) = bincode::deserialize::<Sidecar>(&bytes)
+            let Ok((mut binds, nts, imports, cons)) = bincode::deserialize::<Sidecar>(&bytes)
             else {
                 continue;
             };
+            constructors.extend(cons);
             for imp in imports {
                 if !visited.contains(&imp) {
                     queue.push_back(imp);
@@ -1798,7 +1953,7 @@ impl Compiler {
                 }
             }
         }
-        (out, expansions)
+        (out, expansions, constructors)
     }
 
     fn check_escape_analysis(&self, core: &CoreModule) -> CompileResult<()> {
@@ -1868,6 +2023,7 @@ impl Compiler {
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
         // Lower Core IR to LLVM IR
+        supply_io_primitives();
         lower_core_module(&ctx, &module, core)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
@@ -2010,14 +2166,27 @@ impl Compiler {
             .values()
             .flat_map(|info| {
                 info.exports.constructors.iter().map(|(name, con_info)| {
+                    // The field types are the constructor's argument types. An
+                    // imported NEWTYPE needs them: a monad written as one
+                    // (`newtype App a = App (ExceptT e (StateT s IO) a)`) has
+                    // its transformer layer in what it wraps, and without
+                    // them `StateT s App` compiled as `StateT s IO`.
+                    let mut field_types = Vec::new();
+                    if let Some(scheme) = &con_info.type_scheme {
+                        let mut ty = &scheme.ty;
+                        while let bhc_types::Ty::Fun(arg, rest) = ty {
+                            field_types.push(arg.as_ref().clone());
+                            ty = rest;
+                        }
+                    }
                     (
                         name.as_str().to_string(),
                         ConstructorMeta {
                             tag: con_info.tag,
                             arity: con_info.arity as u32,
-                            type_name: None,
+                            type_name: Some(con_info.type_con_name.as_str().to_string()),
                             is_newtype: con_info.is_newtype,
-                            field_types: Vec::new(),
+                            field_types,
                         },
                     )
                 })
@@ -2073,12 +2242,70 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
 
+        // Exported values' schemes, attached to the importers' DefIds by
+        // `lower_with_registry`.
+        // A RE-exported value (`Control.Monad.State` re-exporting the
+        // `MonadState` methods) is not this module's definition: its scheme is
+        // the one its import was given.
+        let value_schemes = exports
+            .values
+            .iter()
+            .filter_map(|(&name, def_id)| {
+                typed
+                    .def_schemes
+                    .get(def_id)
+                    .or_else(|| lower_ctx.defs.get(def_id)?.type_scheme.as_ref())
+                    .map(|scheme| (name, scheme.clone()))
+            })
+            .collect();
+
+        // This module's type synonyms, plus the imported ones it re-exports
+        // (`Control.Monad.State` re-exports the transformers' `State`).
+        let mut type_aliases: Vec<_> = hir
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                bhc_hir::Item::TypeAlias(alias) => {
+                    Some((alias.name, alias.params.clone(), alias.ty.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for alias in &lower_ctx.interface_type_aliases {
+            if exports.types.contains_key(&alias.0) && !type_aliases.iter().any(|a| a.0 == alias.0)
+            {
+                type_aliases.push(alias.clone());
+            }
+        }
+
+        let reexport_core_names = exports
+            .values
+            .iter()
+            .filter_map(|(&name, def_id)| {
+                let info = lower_ctx.defs.get(def_id)?;
+                (info.kind == bhc_lower::DefKind::ImportedValue && info.name != name)
+                    .then_some((name, info.name))
+            })
+            .collect();
         let compiled_info = CompiledModuleInfo {
             module_name: module_name.to_string(),
             symbols: compiled_symbols,
             exports,
-            type_aliases: Vec::new(),
-            value_schemes: FxHashMap::default(),
+            type_aliases,
+            value_schemes,
+            con_field_types: hir_con_field_types(&hir),
+            interface: Some(Box::new(bhc_interface::generate::generate_interface(
+                module_name,
+                &ast,
+                &typed,
+                &lower_ctx
+                    .all_class_param_counts()
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), *v))
+                    .collect(),
+                &lower_ctx.interface_class_method_names(),
+            ))),
+            reexport_core_names,
         };
 
         Ok((object_path, compiled_info))
@@ -2249,12 +2476,53 @@ impl Compiler {
             (names, con_names)
         });
 
+        // Instance methods share their class method's name but are not
+        // importable values. Exported under that name, `kv` from `module C
+        // (K(..))` could resolve to `instance K Int`'s `kv` — monomorphic,
+        // with no class constraint — instead of the class method.
+        let instance_method_ids: FxHashSet<bhc_hir::DefId> = hir
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                bhc_hir::Item::Instance(inst) => Some(inst.methods.iter().map(|m| m.id)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // Only where the name has another definition to export: a class
+        // method whose own def was never registered (seen with an associated
+        // type family in the class) is reachable only through its instance.
+        let names_defined_elsewhere: FxHashSet<Symbol> = lower_ctx
+            .defs
+            .values()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    bhc_lower::DefKind::Value
+                        | bhc_lower::DefKind::StubValue
+                        | bhc_lower::DefKind::ImportedValue
+                ) && !instance_method_ids.contains(&d.id)
+            })
+            .map(|d| d.name)
+            .collect();
+        let instance_method_ids: FxHashSet<bhc_hir::DefId> = instance_method_ids
+            .into_iter()
+            .filter(|id| {
+                lower_ctx
+                    .defs
+                    .get(id)
+                    .is_some_and(|d| names_defined_elsewhere.contains(&d.name))
+            })
+            .collect();
+
         // Export values, types, and constructors from the lowering context
         for def_info in lower_ctx.defs.values() {
             match def_info.kind {
                 bhc_lower::DefKind::Value
                 | bhc_lower::DefKind::StubValue
-                | bhc_lower::DefKind::ImportedValue => {
+                | bhc_lower::DefKind::ImportedValue
+                    if !instance_method_ids.contains(&def_info.id) =>
+                {
                     // Check export filter.
                     // Some imported stub names are stored as qualified (e.g. "Text.Parsec.many1")
                     // due to has_typed_sigs.  We must also check the unqualified portion
@@ -2376,13 +2644,11 @@ impl Compiler {
                                 }
                             })
                         });
-                    let is_newtype = hir.items.iter().any(|item| {
-                        if let bhc_hir::Item::Newtype(nt) = item {
-                            nt.con.id == def_info.id
-                        } else {
-                            false
-                        }
+                    let newtype_def = hir.items.iter().find_map(|item| match item {
+                        bhc_hir::Item::Newtype(nt) if nt.con.id == def_info.id => Some(nt),
+                        _ => None,
                     });
+                    let is_newtype = newtype_def.is_some();
                     let con_info = bhc_lower::loader::ConstructorInfo {
                         def_id: def_info.id,
                         arity,
@@ -2391,7 +2657,7 @@ impl Compiler {
                         tag,
                         field_names,
                         is_newtype,
-                        type_scheme: None,
+                        type_scheme: newtype_def.and_then(newtype_con_scheme),
                     };
                     exports.constructors.insert(export_con_name, con_info);
                     // Also export constructor as a value (constructors are
@@ -2429,6 +2695,32 @@ impl Compiler {
                         .entry(*name)
                         .or_insert_with(|| con_info.clone());
                     exports.values.entry(*name).or_insert(con_info.def_id);
+                }
+            }
+        }
+
+        // A listed value that is IN SCOPE is the definition the module means.
+        // The loop above walks every definition the lowering context knows —
+        // including the values of every already-compiled module, which a
+        // whole-program build pre-seeds — so two same-named definitions
+        // (`Control.Monad.State.Class.modify` and
+        // `Control.Monad.Trans.State.Strict.modify`) both matched `modify` and
+        // the hash order chose. The scope binding is the import's.
+        if let Some((ref names, _)) = export_filter {
+            for &name in names {
+                let Some(id) = lower_ctx.lookup_value(name) else {
+                    continue;
+                };
+                let is_value = lower_ctx.defs.get(&id).is_some_and(|d| {
+                    matches!(
+                        d.kind,
+                        bhc_lower::DefKind::Value
+                            | bhc_lower::DefKind::StubValue
+                            | bhc_lower::DefKind::ImportedValue
+                    )
+                });
+                if is_value && exports.values.contains_key(&name) {
+                    exports.values.insert(name, id);
                 }
             }
         }
@@ -2823,6 +3115,7 @@ impl Compiler {
 
         // If there were type errors, return both the compiled info and the error.
         // The caller can still register exports while reporting the failure.
+        let con_field_types = hir_con_field_types(&hir);
         if let Some(count) = type_errors {
             return Err(CompileError::TypeErrorWithInfo {
                 count,
@@ -2832,6 +3125,9 @@ impl Compiler {
                     exports,
                     type_aliases,
                     value_schemes: FxHashMap::default(),
+                    con_field_types,
+                    interface: None,
+                    reexport_core_names: FxHashMap::default(),
                 },
             });
         }
@@ -2842,6 +3138,9 @@ impl Compiler {
             exports,
             type_aliases,
             value_schemes,
+            con_field_types,
+            interface: None,
+            reexport_core_names: FxHashMap::default(),
         })
     }
 
@@ -2865,6 +3164,16 @@ impl Compiler {
         ]
         .into_iter()
         .collect();
+
+        // Field types, keyed by constructor name, come from the interface loader
+        // (populated for every constructor, monomorphic ones included, where the
+        // export scheme may be absent). Used to fill `field_types` so a call site
+        // can pack an OverloadedStrings literal in an imported `Text` field.
+        let field_types_by_name: rustc_hash::FxHashMap<&str, &Vec<bhc_types::Ty>> = lower_ctx
+            .interface_constructors
+            .iter()
+            .map(|(name, _, _, _, _, tys)| (name.as_str(), tys))
+            .collect();
 
         for info in registry.modules.values() {
             for (&con_name, con_info) in &info.exports.constructors {
@@ -2896,11 +3205,38 @@ impl Compiler {
                             is_newtype: con_info.is_newtype,
                             existential_dict_count: 0,
                             existential_classes: vec![],
+                            field_types: field_types_by_name
+                                .get(con_name.as_str())
+                                .map(|tys| (*tys).clone())
+                                .or_else(|| info.con_field_types.get(&con_name).cloned())
+                                .unwrap_or_default(),
                         },
                     );
                 }
             }
         }
+
+        let registry_reps: Vec<(bhc_intern::Symbol, bhc_intern::Symbol, Vec<bhc_types::Ty>)> =
+            registry
+                .modules
+                .values()
+                .flat_map(|info| {
+                    info.exports
+                        .constructors
+                        .iter()
+                        .filter(|(_, c)| c.is_newtype)
+                        .filter_map(|(&name, c)| {
+                            info.con_field_types
+                                .get(&name)
+                                .map(|tys| (name, c.type_con_name, tys.clone()))
+                        })
+                })
+                .collect();
+        add_newtype_reps(
+            &mut result,
+            &lower_ctx.interface_constructors,
+            registry_reps,
+        );
 
         result
     }
@@ -2931,6 +3267,7 @@ impl Compiler {
         // Parity with `lower`: include Hackage `--package` source dirs so the
         // registry path resolves the same imports the single-module path does.
         search_paths.extend(self.resolve_hackage_packages()?);
+        push_transformer_library(&mut search_paths);
 
         // Pre-seed module cache with already-compiled modules.
         // IMPORTANT: We must remap DefIds from the exporting module to fresh IDs
@@ -2972,14 +3309,30 @@ impl Compiler {
                 let core_name = if ambiguous {
                     Symbol::intern(&format!("{}.{}", name, val_name.as_str()))
                 } else {
-                    val_name
+                    info.reexport_core_names
+                        .get(&val_name)
+                        .copied()
+                        .unwrap_or(val_name)
                 };
-                ctx.define(
-                    fresh_id,
-                    core_name,
-                    bhc_lower::DefKind::ImportedValue,
-                    bhc_span::Span::default(),
-                );
+                // The exporter's inferred scheme, as an interface file would
+                // carry it in separate compilation. Without it typeck typed
+                // the import fresh, and Core lowering could not tell a class
+                // method (`kv` of `class K`) from a same-named function.
+                match info.value_schemes.get(&val_name) {
+                    Some(scheme) => ctx.define_with_type(
+                        fresh_id,
+                        core_name,
+                        bhc_lower::DefKind::ImportedValue,
+                        bhc_span::Span::default(),
+                        scheme.clone(),
+                    ),
+                    None => ctx.define(
+                        fresh_id,
+                        core_name,
+                        bhc_lower::DefKind::ImportedValue,
+                        bhc_span::Span::default(),
+                    ),
+                }
                 new_values.insert(val_name, fresh_id);
             }
             remapped_exports.values = new_values;
@@ -3019,6 +3372,71 @@ impl Compiler {
             remapped_exports.constructors = new_constructors;
 
             cache.insert(sym, remapped_exports);
+        }
+
+        // Classes and instances of the modules compiled earlier in this
+        // whole-program build, from their in-memory interfaces — what separate
+        // compilation reads from `.bhi` files. Without them a class method
+        // imported from another module (`kv` from `module C (K(..))`) was not
+        // a method here at all and lowered to a stub.
+        {
+            let current_module = ast
+                .name
+                .as_ref()
+                .map(|n| {
+                    n.parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .unwrap_or_default();
+            let mut names: Vec<&String> = registry.modules.keys().collect();
+            names.sort();
+            for name in names {
+                let Some(iface) = registry.modules[name].interface.as_deref() else {
+                    continue;
+                };
+                let known_classes: FxHashSet<Symbol> =
+                    ctx.interface_classes.iter().map(|c| c.0).collect();
+                let known_symbols: FxHashSet<(Symbol, String)> = ctx
+                    .interface_symbols
+                    .iter()
+                    .map(|(n, m, _)| (*n, m.clone()))
+                    .collect();
+                let known_instances: FxHashSet<String> = ctx
+                    .interface_instances
+                    .iter()
+                    .map(|(class, types, _, _)| format!("{class:?}|{types:?}"))
+                    .collect();
+                Self::register_interface_class_data(
+                    iface,
+                    &current_module,
+                    &mut ctx,
+                    &known_classes,
+                    &known_symbols,
+                    &known_instances,
+                );
+            }
+        }
+
+        // Type synonyms of directly imported, already compiled modules, so
+        // an imported signature written with one (`runState :: State s a ->
+        // ...`) expands here. Without it, `State s a` unified structurally with
+        // `StateT Int Identity Int` and took `s := Identity`. Check mode
+        // collects these itself (`check_unit_for_multimodule`).
+        for import in &ast.imports {
+            let name = import
+                .module
+                .parts
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            if let Some(info) = registry.modules.get(&name) {
+                ctx.interface_type_aliases
+                    .extend(info.type_aliases.iter().cloned());
+            }
         }
 
         // Load interface files (.bhi) for imported modules not in the registry.
@@ -3239,7 +3657,7 @@ impl Compiler {
         let known_classes: FxHashSet<Symbol> = ctx
             .interface_classes
             .iter()
-            .map(|(name, _, _, _, _, _, _)| *name)
+            .map(|(name, _, _, _, _, _, _, _)| *name)
             .collect();
         let known_symbols: FxHashSet<(Symbol, String)> = ctx
             .interface_symbols
@@ -3259,103 +3677,133 @@ impl Compiler {
             let Ok(iface) = bhc_interface::ModuleInterface::read_from_file(&utf8_path) else {
                 continue;
             };
-            let module_name = iface.header.module_name.clone();
-            // Never ingest the interface of the module being compiled: its
-            // instance methods are LOCAL bindings here, and registering them
-            // as imported symbols makes codegen rename the local definitions
-            // (`$instance_x_T` would be emitted as `$instance_x_T.3`).
-            if module_name == current_module {
+            Self::register_interface_class_data(
+                &iface,
+                current_module,
+                ctx,
+                &known_classes,
+                &known_symbols,
+                &known_instances,
+            );
+        }
+    }
+
+    /// Register one interface's class layouts, instance-method and class-
+    /// default extern symbols, and instance metadata on `ctx` (deduplicated
+    /// against the `known_*` sets). Shared by the package-DB sweep and by
+    /// whole-program builds, whose modules carry their interface in memory.
+    fn register_interface_class_data(
+        iface: &bhc_interface::ModuleInterface,
+        current_module: &str,
+        ctx: &mut LowerContext,
+        known_classes: &FxHashSet<Symbol>,
+        known_symbols: &FxHashSet<(Symbol, String)>,
+        known_instances: &FxHashSet<String>,
+    ) {
+        let module_name = iface.header.module_name.clone();
+        // Never ingest the interface of the module being compiled: its
+        // instance methods are LOCAL bindings here, and registering them
+        // as imported symbols makes codegen rename the local definitions
+        // (`$instance_x_T` would be emitted as `$instance_x_T.3`).
+        if module_name == current_module {
+            return;
+        }
+        let mut converter = bhc_interface::convert::TypeConverter::new(95000);
+
+        for class in &iface.classes {
+            let class_name = Symbol::intern(&class.name);
+            if known_classes.contains(&class_name) {
                 continue;
             }
-            let mut converter = bhc_interface::convert::TypeConverter::new(95000);
+            let mut method_names = Vec::with_capacity(class.methods.len());
+            let mut method_arities: Vec<(Symbol, usize)> = Vec::with_capacity(class.methods.len());
+            let mut defaulted_names = Vec::new();
+            let mut method_level: Vec<(Symbol, bhc_types::Scheme)> = Vec::new();
+            for method in &class.methods {
+                let name = Symbol::intern(&method.name);
+                let scheme = converter.convert_type_signature(&method.signature);
+                if let Some(own) = method_level_scheme(&scheme, class_name) {
+                    method_level.push((name, own));
+                }
+                let mut arrows = 0;
+                let mut t = &scheme.ty;
+                while let bhc_types::Ty::Fun(_, r) = t {
+                    arrows += 1;
+                    t = r.as_ref();
+                }
+                method_arities.push((name, arrows));
+                method_names.push(name);
+                if method.has_default {
+                    defaulted_names.push(name);
+                }
+            }
+            let superclass_names: Vec<Symbol> = class
+                .superclasses
+                .iter()
+                .map(|c| Symbol::intern(&c.class))
+                .collect();
+            // Multi-parameter classes: `lower_instance_decl` splits the
+            // parsed single-type instance head by the class's parameter
+            // count (defaulting to 1). Without this an importing module's
+            // `instance Stream Sources m Char` records a FLATTENED
+            // one-element head `(Sources m) Char` into its own interface,
+            // and no downstream consumer can ever match the instance.
+            ctx.register_class_param_count(class_name, class.params.len().max(1));
+            if !class.fundeps.is_empty() {
+                ctx.interface_class_fundeps
+                    .insert(class_name, class.fundeps.clone());
+            }
+            ctx.interface_classes.push((
+                class_name,
+                method_names,
+                superclass_names,
+                defaulted_names,
+                method_arities,
+                class.params.len().max(1),
+                superclass_param_indices(class),
+                method_level,
+            ));
+        }
 
-            for class in &iface.classes {
-                let class_name = Symbol::intern(&class.name);
-                if known_classes.contains(&class_name) {
-                    continue;
-                }
-                let mut method_names = Vec::with_capacity(class.methods.len());
-                let mut method_arities: Vec<(Symbol, usize)> =
-                    Vec::with_capacity(class.methods.len());
-                let mut defaulted_names = Vec::new();
-                for method in &class.methods {
-                    let name = Symbol::intern(&method.name);
-                    let scheme = converter.convert_type_signature(&method.signature);
-                    let mut arrows = 0;
-                    let mut t = &scheme.ty;
-                    while let bhc_types::Ty::Fun(_, r) = t {
-                        arrows += 1;
-                        t = r.as_ref();
-                    }
-                    method_arities.push((name, arrows));
-                    method_names.push(name);
-                    if method.has_default {
-                        defaulted_names.push(name);
-                    }
-                }
-                let superclass_names: Vec<Symbol> = class
-                    .superclasses
-                    .iter()
-                    .map(|c| Symbol::intern(&c.class))
-                    .collect();
-                // Multi-parameter classes: `lower_instance_decl` splits the
-                // parsed single-type instance head by the class's parameter
-                // count (defaulting to 1). Without this an importing module's
-                // `instance Stream Sources m Char` records a FLATTENED
-                // one-element head `(Sources m) Char` into its own interface,
-                // and no downstream consumer can ever match the instance.
-                ctx.register_class_param_count(class_name, class.params.len().max(1));
-                ctx.interface_classes.push((
-                    class_name,
-                    method_names,
-                    superclass_names,
-                    defaulted_names,
-                    method_arities,
-                    class.params.len().max(1),
-                    superclass_param_indices(class),
-                ));
+        for im in &iface.instance_methods {
+            let name = Symbol::intern(&im.name);
+            if known_symbols.contains(&(name, module_name.clone())) {
+                continue;
             }
+            ctx.interface_symbols
+                .push((name, module_name.clone(), im.arity));
+        }
+        for cd in &iface.class_defaults {
+            let name = Symbol::intern(&cd.name);
+            if known_symbols.contains(&(name, module_name.clone())) {
+                continue;
+            }
+            ctx.interface_symbols
+                .push((name, module_name.clone(), cd.arity));
+        }
 
-            for im in &iface.instance_methods {
-                let name = Symbol::intern(&im.name);
-                if known_symbols.contains(&(name, module_name.clone())) {
-                    continue;
-                }
-                ctx.interface_symbols
-                    .push((name, module_name.clone(), im.arity));
+        for inst in &iface.instances {
+            converter.reset_vars();
+            let types: Vec<bhc_types::Ty> = inst
+                .types
+                .iter()
+                .map(|t| converter.convert_type(t))
+                .collect();
+            let class_sym = Symbol::intern(&inst.class);
+            let key = format!("{class_sym:?}|{types:?}");
+            if known_instances.contains(&key) {
+                continue;
             }
-            for cd in &iface.class_defaults {
-                let name = Symbol::intern(&cd.name);
-                if known_symbols.contains(&(name, module_name.clone())) {
-                    continue;
-                }
-                ctx.interface_symbols
-                    .push((name, module_name.clone(), cd.arity));
-            }
-
-            for inst in &iface.instances {
-                converter.reset_vars();
-                let types: Vec<bhc_types::Ty> = inst
-                    .types
-                    .iter()
-                    .map(|t| converter.convert_type(t))
-                    .collect();
-                let class_sym = Symbol::intern(&inst.class);
-                let key = format!("{class_sym:?}|{types:?}");
-                if known_instances.contains(&key) {
-                    continue;
-                }
-                let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
-                // Converted after the types and without resetting the variable
-                // map, so the instance head and its constraints share one `m`.
-                let constraints: Vec<bhc_types::Constraint> = inst
-                    .constraints
-                    .iter()
-                    .map(|c| converter.convert_constraint(c))
-                    .collect();
-                ctx.interface_instances
-                    .push((class_sym, types, methods, constraints));
-            }
+            let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
+            // Converted after the types and without resetting the variable
+            // map, so the instance head and its constraints share one `m`.
+            let constraints: Vec<bhc_types::Constraint> = inst
+                .constraints
+                .iter()
+                .map(|c| converter.convert_constraint(c))
+                .collect();
+            ctx.interface_instances
+                .push((class_sym, types, methods, constraints));
         }
     }
 
@@ -3408,8 +3856,16 @@ impl Compiler {
         );
         let mut exports = Self::interface_to_module_exports(&iface, module_name, ctx);
 
+        // `reexports` is a std HashMap, whose iteration order changes from
+        // run to run; resolve in a fixed order so the same interfaces always
+        // bind the same definitions.
+        let mut reexports: Vec<(&String, &String)> = iface.reexports.iter().collect();
+        // Types first: a re-exported `ExceptT (..)` brings its record fields
+        // (`runExceptT`), which a later name-level entry then finds present.
+        reexports.sort_by_key(|(key, _)| (!key.starts_with("type:"), (*key).clone()));
+
         // Whole-module re-exports: merge the origin module's full surface.
-        for (origin, kind) in &iface.reexports {
+        for &(origin, kind) in &reexports {
             if kind != "*" {
                 continue;
             }
@@ -3438,7 +3894,7 @@ impl Compiler {
         // package (Text.Pandoc.Highlighting re-exporting Skylighting's
         // `pygments`) would drop the name and every dependent fails lowering.
         let mut chased: FxHashMap<&str, Option<ModuleExports>> = FxHashMap::default();
-        for (key, origin) in &iface.reexports {
+        for &(key, origin) in &reexports {
             if origin == "*" {
                 continue;
             }
@@ -3541,6 +3997,34 @@ impl Compiler {
                     }
                 }
             }
+            // Not found among the name's own candidates: it may have come in as
+            // a child of another re-export's origin (a field of `ExceptT (..)`
+            // imported from `Control.Monad.Trans.Except`). Look there before
+            // binding an untyped placeholder.
+            let resolved = resolved.or_else(|| {
+                if is_type {
+                    return None;
+                }
+                let mut origins: Vec<&str> = reexports
+                    .iter()
+                    .flat_map(|(_, o)| o.split(';'))
+                    .filter(|c| !c.is_empty() && *c != "*")
+                    .collect();
+                origins.sort_unstable();
+                origins.dedup();
+                origins.into_iter().find_map(|candidate| {
+                    if !chased.contains_key(candidate) {
+                        let sub = self.load_interface_exports_chasing(
+                            candidate, flat_dirs, packages, ctx, visited, memo,
+                        );
+                        chased.insert(candidate, sub);
+                    }
+                    chased
+                        .get(candidate)
+                        .and_then(|sub| sub.as_ref())
+                        .and_then(|sub| sub.values.get(&sym).copied())
+                })
+            });
             let def_id = resolved.unwrap_or_else(|| {
                 let fresh = ctx.fresh_def_id();
                 let def_kind = if is_type {
@@ -3623,17 +4107,49 @@ impl Compiler {
             // call — otherwise every use resolves to the first declaration and
             // calls a different function, with a different arity, whose leading
             // dictionary parameter the caller never passes.
+            // A bare name that is ALSO a codegen builtin gets a module-qualified
+            // Core name too, for the same reason a collision does: otherwise
+            // every use resolves to the builtin (`A.id` → Prelude `id`, `H.div`
+            // → integer `div`) instead of the import. Qualifying makes the name
+            // not-a-builtin everywhere — typeck won't hand it the builtin scheme,
+            // and codegen's extern table (keyed on this Core name) resolves the
+            // import. The qualified spelling matches the definition's mangled LLVM
+            // symbol, so the call still links. Harmless for a non-builtin name,
+            // but restricted to builtins to leave ordinary imports untouched.
+            let shadows_builtin = shadows_codegen_builtin(value.name.as_str());
             let core_name = match ctx.interface_value_modules.get(&name) {
                 Some(owner) if owner != module_name => {
                     Symbol::intern(&format!("{}.{}", module_name, value.name))
                 }
+                // The same module's interface converted again (it was already
+                // loaded for another import's dependencies) must name a builtin-
+                // shadowing value the same way as the first time. The bare name
+                // made it the builtin: in pandoc's Readers.HTML, importing
+                // Readers.LaTeX first left `try` as the permissive builtin, so
+                // `endAngle = try $ do char '>' …` got no type and its `char`
+                // no dictionaries.
+                Some(_) if shadows_builtin => {
+                    Symbol::intern(&format!("{}.{}", module_name, value.name))
+                }
                 Some(_) => name,
+                None if shadows_builtin => {
+                    let qualified = Symbol::intern(&format!("{}.{}", module_name, value.name));
+                    ctx.interface_value_modules
+                        .insert(name, module_name.to_string());
+                    qualified
+                }
                 None => {
                     ctx.interface_value_modules
                         .insert(name, module_name.to_string());
                     name
                 }
             };
+            if std::env::var("BHC_DBG_IFACE").is_ok_and(|w| w == value.name) {
+                eprintln!(
+                    "[iface] {module_name} exports {} as core `{core_name}` arity={:?}",
+                    value.name, value.arity
+                );
+            }
             ctx.define_with_type(
                 fresh_id,
                 core_name,
@@ -3733,6 +4249,47 @@ impl Compiler {
                             }
                         })
                         .collect();
+                    // Selector schemes for the fields that mention a parameter
+                    // (`runExceptT :: ExceptT e m a -> m (Either e a)`), filled
+                    // below and used under the closure IO model only.
+                    let mut accessor_schemes: Vec<Option<bhc_types::Scheme>> =
+                        vec![None; con.fields.len()];
+                    // Under the closure IO model the real type of each field of
+                    // a parameterless record is kept for record updates only
+                    // (`def { stateOptions = def }` must type the inner `def`);
+                    // the constructor itself keeps the fresh variables below.
+                    if bhc_types::io_closure_mode() && exported_type.params.is_empty() {
+                        if let Some(ref names) = con.field_names {
+                            converter.reset_vars();
+                            for (i, (name, f)) in names.iter().zip(&con.fields).enumerate() {
+                                let ty = converter.convert_type(f);
+                                // The selector's real type too, for a field of
+                                // a `Text`-bearing type with no type variable:
+                                // with a fresh one, `"translations/" <>
+                                // langLanguage lang` typed its OverloadedStrings
+                                // literals as `String` and appended a Text to a
+                                // char list. Not for every field: pinning
+                                // `TextProperties`' `Bool`/`Maybe UnderlineMode`
+                                // selectors broke ODT.ContentReader's checking.
+                                // An `Integer` field likewise: a fresh variable
+                                // left `print (toModifiedJulianDay d)` unable to
+                                // tell the bignum from a machine int.
+                                if !ty_has_vars(&ty)
+                                    && (ty_mentions_text(&ty) || ty_is_integer(&ty))
+                                {
+                                    let record = bhc_types::Ty::Con(bhc_types::TyCon::new(
+                                        type_name,
+                                        bhc_types::Kind::Star,
+                                    ));
+                                    accessor_schemes[i] = Some(bhc_types::Scheme::mono(
+                                        bhc_types::Ty::fun(record, ty.clone()),
+                                    ));
+                                }
+                                ctx.interface_record_field_types
+                                    .insert(Symbol::intern(name), (type_name, ty));
+                            }
+                        }
+                    }
                     let con_scheme = if con_param_vars.len() == exported_type.params.len()
                         && !con_param_vars.is_empty()
                     {
@@ -3741,6 +4298,10 @@ impl Compiler {
                         for (i, f) in con.fields.iter().enumerate() {
                             let converted = converter.convert_type(f);
                             if ty_mentions_any(&converted, &con_param_vars) {
+                                accessor_schemes[i] = Some(bhc_types::Scheme::poly(
+                                    con_param_vars.clone(),
+                                    converted.clone(),
+                                ));
                                 field_tys.push(converted);
                             } else {
                                 #[allow(clippy::cast_possible_truncation)]
@@ -3769,6 +4330,51 @@ impl Compiler {
                                 )
                             },
                         );
+                        for s in accessor_schemes.iter_mut().flatten() {
+                            s.ty = bhc_types::Ty::fun(head.clone(), s.ty.clone());
+                        }
+                        let ty = field_tys
+                            .into_iter()
+                            .rev()
+                            .fold(head, |acc, f| bhc_types::Ty::fun(f, acc));
+                        Some(bhc_types::Scheme::poly(quantified, ty))
+                    } else if bhc_types::io_closure_mode()
+                        && exported_type.params.is_empty()
+                        && con.fields.iter().any(|f| {
+                            pinnable_field(&expand_interface_alias(
+                                &converter.convert_type(f),
+                                &ctx.interface_type_aliases,
+                            ))
+                        })
+                    {
+                        // A parameterless type's constructor keeps fresh field
+                        // types (pinning them all broke checking elsewhere) —
+                        // except an `Integer` field (a literal argument must
+                        // be typed `Integer` to be built as a bignum:
+                        // `ModifiedJulianDay 0` stored a raw 0) and a ground
+                        // field mentioning `Text` (pandoc's `Header _ attr _`
+                        // pattern left `attr`'s key-value list untyped, and
+                        // its comparison fell back to comparing pointers).
+                        let mut quantified = Vec::new();
+                        let mut field_tys = Vec::with_capacity(con.fields.len());
+                        for (i, f) in con.fields.iter().enumerate() {
+                            let converted = expand_interface_alias(
+                                &converter.convert_type(f),
+                                &ctx.interface_type_aliases,
+                            );
+                            if pinnable_field(&converted) {
+                                field_tys.push(converted);
+                            } else {
+                                #[allow(clippy::cast_possible_truncation)]
+                                let v = bhc_types::TyVar::new_star(0xFFFD_0000 + i as u32);
+                                quantified.push(v.clone());
+                                field_tys.push(bhc_types::Ty::Var(v));
+                            }
+                        }
+                        let head = bhc_types::Ty::Con(bhc_types::TyCon::new(
+                            type_name,
+                            bhc_types::Kind::Star,
+                        ));
                         let ty = field_tys
                             .into_iter()
                             .rev()
@@ -3805,6 +4411,7 @@ impl Compiler {
                     // Record for codegen constructor metadata (tag/arity for
                     // cross-module constructor applications and matches).
                     #[allow(clippy::cast_possible_truncation)]
+                    ctx.interface_constructor_ids.push(fresh_con_id);
                     ctx.interface_constructors.push((
                         con.name.clone(),
                         tag as u32,
@@ -3823,18 +4430,32 @@ impl Compiler {
                     // scheme is instantiated fresh per use, which is the same
                     // treatment imported values without signatures get.
                     if let Some(ref names) = con.field_names {
-                        for field in names {
+                        for (field_ix, field) in names.iter().enumerate() {
                             let field_sym = Symbol::intern(field);
                             if exports.values.contains_key(&field_sym) {
                                 continue;
                             }
                             let accessor_id = ctx.fresh_def_id();
-                            ctx.define(
-                                accessor_id,
-                                field_sym,
-                                bhc_lower::DefKind::Value,
-                                bhc_span::Span::default(),
-                            );
+                            // Under the closure IO model a parameterized
+                            // field's selector carries its real type: with a
+                            // fresh one, `flip evalStateT def $ runExceptT m`
+                            // lost the state type and `def` stubbed.
+                            match accessor_schemes.get(field_ix).cloned().flatten() {
+                                Some(scheme) if bhc_types::io_closure_mode() => ctx
+                                    .define_with_type(
+                                        accessor_id,
+                                        field_sym,
+                                        bhc_lower::DefKind::Value,
+                                        bhc_span::Span::default(),
+                                        scheme,
+                                    ),
+                                _ => ctx.define(
+                                    accessor_id,
+                                    field_sym,
+                                    bhc_lower::DefKind::Value,
+                                    bhc_span::Span::default(),
+                                ),
+                            }
                             exports.values.insert(field_sym, accessor_id);
                             // The defining module EMITS the selector as a
                             // 1-ary function (`FI.RecMod.fx`); extern it so a
@@ -3858,10 +4479,14 @@ impl Compiler {
             let class_name = Symbol::intern(&class.name);
             let mut method_names = Vec::with_capacity(class.methods.len());
             let mut method_arities: Vec<(Symbol, usize)> = Vec::with_capacity(class.methods.len());
+            let mut method_level: Vec<(Symbol, bhc_types::Scheme)> = Vec::new();
             for method in &class.methods {
                 let name = Symbol::intern(&method.name);
                 let fresh_id = ctx.fresh_def_id();
                 let scheme = converter.convert_type_signature(&method.signature);
+                if let Some(own) = method_level_scheme(&scheme, class_name) {
+                    method_level.push((name, own));
+                }
                 // Arrow count of the declared method type — the arity an
                 // instance's point-free method binding must be eta-expanded
                 // to (see `eta_expand_point_free_method`).
@@ -3914,6 +4539,10 @@ impl Compiler {
                 .collect();
             // See the flat-dir loader: instance heads split by this count.
             ctx.register_class_param_count(class_name, class.params.len().max(1));
+            if !class.fundeps.is_empty() {
+                ctx.interface_class_fundeps
+                    .insert(class_name, class.fundeps.clone());
+            }
             ctx.interface_classes.push((
                 class_name,
                 method_names,
@@ -3922,6 +4551,7 @@ impl Compiler {
                 method_arities,
                 class.params.len().max(1),
                 superclass_param_indices(class),
+                method_level,
             ));
         }
 
@@ -4068,6 +4698,7 @@ impl Compiler {
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
         // Use multi-module lowering with name mangling and extern declarations
+        supply_io_primitives();
         lower_core_module_multimodule_with_constructors(
             &ctx,
             &module,
@@ -4623,10 +5254,25 @@ impl Compiler {
         &self,
         paths: impl IntoIterator<Item = impl AsRef<Utf8Path>>,
     ) -> CompileResult<Vec<CompileOutput>> {
-        let paths: Vec<Utf8PathBuf> = paths
+        let mut paths: Vec<Utf8PathBuf> = paths
             .into_iter()
             .map(|p| p.as_ref().to_path_buf())
             .collect();
+
+        // The transformers library (closure IO model) is source the user did
+        // not list: add the library modules the given files import.
+        if let Some(lib_dir) = transformer_library_dir() {
+            if !self.session.options.compile_only {
+                let given = paths.clone();
+                for path in &given {
+                    for found in self.discover_modules(path, std::slice::from_ref(&lib_dir))? {
+                        if !paths.contains(&found) {
+                            paths.insert(0, found);
+                        }
+                    }
+                }
+            }
+        }
 
         if paths.len() <= 1 {
             // Single file or empty — no ordering needed. In compile-only mode use
@@ -4697,6 +5343,9 @@ impl Compiler {
                         exports: stub_exports,
                         type_aliases: Vec::new(),
                         value_schemes: FxHashMap::default(),
+                        con_field_types: FxHashMap::default(),
+                        interface: None,
+                        reexport_core_names: FxHashMap::default(),
                     },
                 );
             }
@@ -4758,6 +5407,7 @@ impl Compiler {
                             &ast,
                             &typed,
                             &class_params,
+                            &lower_ctx.interface_class_method_names(),
                         );
                         let iface_path = bhc_interface::interface_path(hidir, mod_name);
                         if let Some(parent) = iface_path.parent() {
@@ -4893,6 +5543,9 @@ impl Compiler {
                     exports,
                     type_aliases: Vec::new(),
                     value_schemes: FxHashMap::default(),
+                    con_field_types: FxHashMap::default(),
+                    interface: None,
+                    reexport_core_names: FxHashMap::default(),
                 },
             );
 
@@ -5082,6 +5735,8 @@ impl Compiler {
                 search_paths.push(p);
             }
         }
+
+        push_transformer_library(&mut search_paths);
 
         // Discover all modules recursively
         let all_paths = self.discover_modules(&entry_path, &search_paths)?;
@@ -5615,6 +6270,7 @@ impl Compiler {
             "Options.Applicative.Types",
         ]
         .into_iter()
+        .filter(|m| !(bhc_types::io_closure_mode() && TRANSFORMER_LIBRARY_MODULES.contains(m)))
         .collect()
     }
 
@@ -5784,6 +6440,9 @@ impl Compiler {
                                     exports,
                                     type_aliases: Vec::new(),
                                     value_schemes: FxHashMap::default(),
+                                    con_field_types: FxHashMap::default(),
+                                    interface: None,
+                                    reexport_core_names: FxHashMap::default(),
                                 },
                             );
                         }
@@ -6276,7 +6935,131 @@ impl CompilerBuilder {
     }
 }
 
+/// The type of a local newtype's constructor, `field -> T a…`, for a module
+/// that imports it in a whole-program build. Mirrors what the `.bhi` path
+/// builds (only when the field mentions a type parameter): codegen reads the
+/// field off it to see what an imported monad newtype wraps — without it,
+/// `StateT s App` over an imported `newtype App a = App (ExceptT e (StateT s
+/// IO) a)` compiled as `StateT s IO`.
+fn newtype_con_scheme(nt: &bhc_hir::NewtypeDef) -> Option<bhc_types::Scheme> {
+    let field = match &nt.con.fields {
+        bhc_hir::ConFields::Positional(tys) if tys.len() == 1 => tys[0].clone(),
+        bhc_hir::ConFields::Named(fields) if fields.len() == 1 => fields[0].ty.clone(),
+        _ => return None,
+    };
+    if nt.params.is_empty() || !ty_mentions_any(&field, &nt.params) {
+        return None;
+    }
+    let kind = nt.params.iter().fold(bhc_types::Kind::Star, |k, _| {
+        bhc_types::Kind::Arrow(Box::new(bhc_types::Kind::Star), Box::new(k))
+    });
+    let head = nt.params.iter().fold(
+        bhc_types::Ty::Con(bhc_types::TyCon::new(nt.name, kind)),
+        |acc, p| bhc_types::Ty::App(Box::new(acc), Box::new(bhc_types::Ty::Var(p.clone()))),
+    );
+    Some(bhc_types::Scheme::poly(
+        nt.params.clone(),
+        bhc_types::Ty::fun(field, head),
+    ))
+}
+
+/// Each constructor's declared field types, by constructor name, from a
+/// module's data and newtype declarations.
+fn hir_con_field_types(hir: &HirModule) -> FxHashMap<bhc_intern::Symbol, Vec<bhc_types::Ty>> {
+    fn field_tys(fields: &bhc_hir::ConFields) -> Vec<bhc_types::Ty> {
+        match fields {
+            bhc_hir::ConFields::Positional(tys) => tys.clone(),
+            bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+        }
+    }
+    let mut out = FxHashMap::default();
+    for item in &hir.items {
+        match item {
+            bhc_hir::Item::Data(d) => {
+                for c in &d.cons {
+                    out.insert(c.name, field_tys(&c.fields));
+                }
+            }
+            bhc_hir::Item::Newtype(nt) => {
+                out.insert(nt.con.name, field_tys(&nt.con.fields));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Whether `ty` mentions any of `vars`.
+/// Whether `Text` (bare or qualified) appears anywhere in a type.
+fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
+    use bhc_types::Ty;
+    match ty {
+        Ty::Con(c) => c.name.as_str() == "Text" || c.name.as_str().ends_with(".Text"),
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_mentions_text(f) || ty_mentions_text(a),
+        Ty::List(e) => ty_mentions_text(e),
+        Ty::Tuple(es) => es.iter().any(ty_mentions_text),
+        _ => false,
+    }
+}
+
+/// Whether an imported constructor field's real type is kept (see the
+/// parameterless-type constructor scheme): ground and `Integer`, or ground and
+/// mentioning `Text`.
+fn pinnable_field(ty: &bhc_types::Ty) -> bool {
+    // Only plain data shapes: pinning a field that mentions another data
+    // type (a `[Block]`, an external package's type) rejected
+    // Text.Pandoc.Parsing.GridTable, which the placeholder let through.
+    fn plain_shape(ty: &bhc_types::Ty) -> bool {
+        use bhc_types::Ty;
+        match ty {
+            Ty::Con(c) => {
+                matches!(
+                    c.name.as_str(),
+                    "Text" | "Int" | "Integer" | "Bool" | "Char" | "Double"
+                ) || c.name.as_str().ends_with(".Text")
+            }
+            Ty::List(e) => plain_shape(e),
+            Ty::Tuple(es) => es.iter().all(plain_shape),
+            _ => false,
+        }
+    }
+    !ty_has_vars(ty) && (ty_is_integer(ty) || (ty_mentions_text(ty) && plain_shape(ty)))
+}
+
+/// Expand a parameterless interface type synonym (`Attr`), once.
+fn expand_interface_alias(
+    ty: &bhc_types::Ty,
+    aliases: &[(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)],
+) -> bhc_types::Ty {
+    if let bhc_types::Ty::Con(c) = ty {
+        if let Some((_, _, body)) = aliases
+            .iter()
+            .find(|(name, params, _)| *name == c.name && params.is_empty())
+        {
+            return body.clone();
+        }
+    }
+    ty.clone()
+}
+
+/// Whether a type is exactly `Integer`.
+fn ty_is_integer(ty: &bhc_types::Ty) -> bool {
+    matches!(ty, bhc_types::Ty::Con(c) if c.name.as_str() == "Integer")
+}
+
+/// Whether a type mentions any type variable.
+fn ty_has_vars(ty: &bhc_types::Ty) -> bool {
+    use bhc_types::Ty;
+    match ty {
+        Ty::Var(_) => true,
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_has_vars(f) || ty_has_vars(a),
+        Ty::List(e) => ty_has_vars(e),
+        Ty::Tuple(es) => es.iter().any(ty_has_vars),
+        Ty::Forall(..) => true,
+        _ => false,
+    }
+}
+
 fn ty_mentions_any(ty: &bhc_types::Ty, vars: &[bhc_types::TyVar]) -> bool {
     use bhc_types::Ty;
     match ty {
@@ -6285,6 +7068,78 @@ fn ty_mentions_any(ty: &bhc_types::Ty, vars: &[bhc_types::TyVar]) -> bool {
         Ty::List(a) => ty_mentions_any(a, vars),
         Ty::Tuple(ts) => ts.iter().any(|t| ty_mentions_any(t, vars)),
         _ => false,
+    }
+}
+
+/// Modules that `stdlib/bhc-transformers/hs` provides as ordinary Haskell
+/// source. Under the closure IO model they are compiled like a user library
+/// instead of being treated as builtins (spec/BHC-BRIEF-0005, Phase 2).
+const TRANSFORMER_LIBRARY_MODULES: &[&str] = &[
+    "Data.Functor.Identity",
+    "Control.Monad.Identity",
+    "Control.Monad.Trans",
+    "Control.Monad.Trans.Class",
+    "Control.Monad.IO.Class",
+    "Control.Monad.Trans.State",
+    "Control.Monad.Trans.State.Strict",
+    "Control.Monad.Trans.Reader",
+    "Control.Monad.Trans.Writer",
+    "Control.Monad.Trans.Writer.Strict",
+    "Control.Monad.Trans.Except",
+    "Control.Monad.Trans.Maybe",
+    "Control.Monad.State",
+    "Control.Monad.State.Strict",
+    "Control.Monad.State.Class",
+    "Control.Monad.Reader",
+    "Control.Monad.Reader.Class",
+    "Control.Monad.Writer",
+    "Control.Monad.Writer.Strict",
+    "Control.Monad.Writer.Class",
+    "Control.Monad.Except",
+    "Control.Monad.Error.Class",
+    "Control.Monad.Trans.RWS.Strict",
+    "Control.Monad.RWS",
+    "Control.Monad.RWS.Strict",
+];
+
+/// The directory holding the transformers library sources, when the closure
+/// IO model is on.
+///
+/// `BHC_TRANSFORMERS_PATH` overrides it; otherwise it is the in-tree
+/// `stdlib/bhc-transformers/hs`. Installed compilers do not ship the sources
+/// yet, so outside a checkout the override is required.
+fn transformer_library_dir() -> Option<Utf8PathBuf> {
+    if !bhc_types::io_closure_mode() {
+        return None;
+    }
+    if let Ok(p) = std::env::var("BHC_TRANSFORMERS_PATH") {
+        return Some(Utf8PathBuf::from(p));
+    }
+    let in_tree =
+        Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/bhc-transformers/hs");
+    in_tree.is_dir().then_some(in_tree)
+}
+
+/// Append the transformers library directory (closure IO model only) after
+/// the user's search paths, so a user module of the same name still wins.
+fn push_transformer_library(search_paths: &mut Vec<Utf8PathBuf>) {
+    if let Some(dir) = transformer_library_dir() {
+        if !search_paths.contains(&dir) {
+            search_paths.push(dir);
+        }
+    }
+}
+
+/// Hand codegen the builtin IO primitives under the closure IO model
+/// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005): it lowers an application of
+/// one as an action, and only the type checker's builtin schemes say which.
+fn supply_io_primitives() {
+    if bhc_codegen::io_closure_mode() {
+        bhc_codegen::set_io_primitives(
+            bhc_typeck::io_primitive_names()
+                .into_iter()
+                .map(|s| s.as_str().to_string()),
+        );
     }
 }
 
@@ -6717,6 +7572,47 @@ exposed-modules: Data.Text Data.Text.Internal
 
     /// Test that interface_to_module_exports correctly creates DefInfos
     /// with type schemes from a ModuleInterface.
+    /// A value whose name is also a codegen builtin keeps its module-qualified
+    /// Core name when its module's interface is converted a second time (once
+    /// while chasing another import's re-exports, once for the module's own
+    /// import). The bare name made it the builtin: in pandoc's Readers.HTML,
+    /// importing Readers.LaTeX before Text.Pandoc.Parsing left `try` as the
+    /// permissive builtin, so `endAngle = try $ do char '>' …` was untyped and
+    /// its `char` got no dictionaries.
+    #[test]
+    fn test_reconverted_interface_keeps_builtin_shadowing_name() {
+        use bhc_interface::{ExportedValue, ModuleInterface, Type as IfaceType, TypeSignature};
+
+        let mut iface = ModuleInterface::new("Owner");
+        iface.add_value(ExportedValue {
+            name: "try".to_string(),
+            signature: TypeSignature {
+                type_vars: vec![],
+                constraints: vec![],
+                ty: IfaceType::Fun(
+                    Box::new(IfaceType::Con("Int".to_string())),
+                    Box::new(IfaceType::Con("Int".to_string())),
+                ),
+            },
+            inline: bhc_interface::InlineInfo::None,
+            arity: Some(1),
+        });
+
+        let mut ctx = bhc_lower::LowerContext::new();
+        let core_name = |ctx: &bhc_lower::LowerContext, exports: &ModuleExports| {
+            let id = exports.values[&Symbol::intern("try")];
+            ctx.lookup_def(id).expect("try has a DefInfo").name
+        };
+        let first = Compiler::interface_to_module_exports(&iface, "Owner", &mut ctx);
+        let second = Compiler::interface_to_module_exports(&iface, "Owner", &mut ctx);
+        assert_eq!(core_name(&ctx, &first).as_str(), "Owner.try");
+        assert_eq!(
+            core_name(&ctx, &second).as_str(),
+            "Owner.try",
+            "a second conversion must not hand out the builtin's bare name"
+        );
+    }
+
     #[test]
     fn test_interface_to_module_exports_preserves_types() {
         use bhc_interface::{ExportedValue, ModuleInterface, Type as IfaceType, TypeSignature};

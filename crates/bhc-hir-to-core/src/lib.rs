@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod binding;
+mod builtin_dicts;
 mod context;
 pub mod deriving;
 pub mod dictionary;
@@ -80,6 +81,19 @@ pub enum LowerError {
 
 /// Result type for lowering operations.
 pub type LowerResult<T> = Result<T, LowerError>;
+
+thread_local! {
+    static IMPORTED_CLASS_FUNDEPS: std::cell::RefCell<dictionary::ClassFunDeps> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Record the functional dependencies of the classes the next module imports
+/// (from their interfaces), for [`lower_module_with_imports`] to read.
+/// Dictionary construction uses them to fill a class argument only in the
+/// direction a dependency allows (`MonadError e m | m -> e`).
+pub fn set_imported_class_fundeps(fundeps: dictionary::ClassFunDeps) {
+    IMPORTED_CLASS_FUNDEPS.with(|f| *f.borrow_mut() = fundeps);
+}
 
 /// Lower a HIR module to Core IR.
 ///
@@ -171,6 +185,7 @@ pub fn lower_module_with_imports(
             Vec<(bhc_intern::Symbol, usize)>,
             usize,
             Vec<Vec<usize>>,
+            Vec<(bhc_intern::Symbol, bhc_types::Scheme)>,
         )],
         &[(
             bhc_intern::Symbol,
@@ -184,6 +199,9 @@ pub fn lower_module_with_imports(
     >,
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
+    ctx.class_registry_mut()
+        .fundeps
+        .extend(IMPORTED_CLASS_FUNDEPS.with(|f| f.borrow().clone()));
 
     // Type-synonym definitions (local + imported, from typeck): the
     // signature-fallback in dictionary resolution must see through synonyms
@@ -244,6 +262,11 @@ pub fn lower_module_with_imports(
                     );
                 }
             }
+            // Imported field types let a call site recover a field's expected
+            // type (e.g. to pack an OverloadedStrings literal in a `Text` field).
+            if !info.field_types.is_empty() {
+                ctx.register_constructor_field_types(info.name, info.field_types.clone());
+            }
             ctx.register_constructor(*def_id, info.clone());
         }
     }
@@ -257,7 +280,18 @@ pub fn lower_module_with_imports(
             };
             for (v, e) in pairs {
                 if v.name.as_str().contains(&filter) {
-                    eprintln!("=== CORE BIND {} ===\n{:#?}", v.name.as_str(), e);
+                    // `BHC_DUMP_BIND_PRETTY` prints the Core pretty form
+                    // instead of the full `Debug` tree.
+                    if std::env::var_os("BHC_DUMP_BIND_PRETTY").is_some() {
+                        eprintln!("=== CORE BIND {} ===\n{e}", v.name.as_str());
+                    } else {
+                        eprintln!(
+                            "=== CORE BIND {} :: {:?} ===\n{:#?}",
+                            v.name.as_str(),
+                            v.ty,
+                            e
+                        );
+                    }
                 }
             }
         }

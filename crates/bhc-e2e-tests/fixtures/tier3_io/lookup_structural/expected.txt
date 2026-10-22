@@ -1,0 +1,8 @@
+Just 2
+Just 1
+Nothing
+Just "B"
+Just "b"
+Nothing
+Just "two"
+Just True

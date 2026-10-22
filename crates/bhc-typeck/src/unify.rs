@@ -106,6 +106,32 @@ fn try_expand_type_alias(ctx: &TyCtxt, ty: &Ty) -> Option<Ty> {
     Some(expanded)
 }
 
+/// Expand every type synonym in `ty`, at every depth (`ExceptT String IO`
+/// becomes `ExceptT [Char] IO`), and spell `[] t` as `[t]`, so structural
+/// instance matching sees the same type the unifier does.
+pub(crate) fn expand_aliases_deep(ctx: &TyCtxt, ty: &Ty) -> Ty {
+    fn go(ctx: &TyCtxt, ty: &Ty, fuel: u32) -> Ty {
+        if fuel == 0 {
+            return ty.clone();
+        }
+        if let Some(expanded) = try_expand_type_alias(ctx, ty) {
+            return go(ctx, &expanded, fuel - 1);
+        }
+        match ty {
+            // `[] t` and `[t]` are one type; instance matching is structural.
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                Ty::List(Box::new(go(ctx, a, fuel)))
+            }
+            Ty::App(f, a) => Ty::App(Box::new(go(ctx, f, fuel)), Box::new(go(ctx, a, fuel))),
+            Ty::Fun(a, b) => Ty::Fun(Box::new(go(ctx, a, fuel)), Box::new(go(ctx, b, fuel))),
+            Ty::List(a) => Ty::List(Box::new(go(ctx, a, fuel))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| go(ctx, t, fuel)).collect()),
+            _ => ty.clone(),
+        }
+    }
+    go(ctx, ty, 32)
+}
+
 /// Collect a type application spine: `App(App(Con(F), a), b)` → `(Con(F), [a, b])`.
 fn collect_type_app(ty: &Ty) -> (Ty, Vec<Ty>) {
     let mut args = Vec::new();
@@ -214,6 +240,11 @@ fn same_type_name(name1: &str, name2: &str) -> bool {
         return true;
     }
     normalize_qualified_tyname(name1) == normalize_qualified_tyname(name2)
+}
+
+/// Whether `ty` is the `Many` type constructor (pandoc-types' Builder).
+fn is_many_con(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if normalize_qualified_tyname(c.name.as_str()) == "Many")
 }
 
 /// Get the element type of a list, if this is a list type.
@@ -593,6 +624,20 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
         // List types: unify element types
         (Ty::List(elem1), Ty::List(elem2)) => {
             unify_inner(ctx, elem1, elem2, span);
+        }
+
+        // pandoc-types' `Many a` (a newtype over `Seq a`) against `[a]`.
+        // `Many` stays a distinct type so occurrence types — and with them
+        // instance selection for `Inlines`/`Blocks` — see `Many Inline`, not
+        // a list (whose `<>` is list append, applied to a Seq at runtime).
+        // But the Foldable/Traversable builtins are list-specialized, so
+        // `toList = F.toList :: Many a -> [a]` must still check: unify the
+        // elements.
+        (Ty::App(f, a), Ty::List(elem)) if is_many_con(f) => {
+            unify_inner(ctx, a, elem, span);
+        }
+        (Ty::List(elem), Ty::App(f, a)) if is_many_con(f) => {
+            unify_inner(ctx, elem, a, span);
         }
 
         // Cross-type: App(f, a) vs List(elem) — treat List(elem) as App([], elem)
@@ -1038,9 +1083,46 @@ fn occurs_check_ty_list(var: &TyVar, l: &TyList) -> bool {
 
 /// Bind a type variable to a type after occurs check.
 fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
+    // Resolve the target through the substitution first: a single-pass apply
+    // leaves `w := v` chains, and binding `v := w` on top of them made cycles
+    // in which a variable never resolved (a `get` in a `State` do-block lost
+    // its monad).
+    let ty = &ctx.subst.apply_resolved(ty);
     // Skip if binding to self
     if let Ty::Var(v) = ty {
         if v.id == var.id {
+            return;
+        }
+    }
+
+    // Already bound: an earlier component of the same unification bound it,
+    // and the compound cases do not re-apply the substitution to a fixpoint.
+    // Unify the binding with the new type instead of overwriting it when one
+    // of them is still a variable — overwriting lost `y := Integer` from
+    // `case trip n of (y, _, _) -> y >= 1601`, and the literal's defaulting
+    // then made `y` an `Int`. Two different concrete types keep the old
+    // overwrite: bhc's lenient typing of rank-2 record fields (pandoc's
+    // `engineLoadCustom`) binds a monad variable to `IO` and later to
+    // `PandocIO`, and reconciling those rejected a module that checks.
+    if let Some(existing) = ctx.subst.get(var).cloned() {
+        thread_local! {
+            static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        let existing = ctx.subst.apply_resolved(&existing);
+        if existing == *ty {
+            return;
+        }
+        let is_self = |t: &Ty| matches!(t, Ty::Var(v) if v.id == var.id);
+        let one_side_var = matches!(existing, Ty::Var(_)) || matches!(ty, Ty::Var(_));
+        if one_side_var
+            && !is_self(&existing)
+            && !occurs_check(var, &existing)
+            && !occurs_check(var, ty)
+            && DEPTH.with(|d| d.get()) < 32
+        {
+            DEPTH.with(|d| d.set(d.get() + 1));
+            unify_inner(ctx, &existing, ty, span);
+            DEPTH.with(|d| d.set(d.get() - 1));
             return;
         }
     }

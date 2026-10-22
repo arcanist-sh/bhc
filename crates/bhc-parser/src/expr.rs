@@ -628,7 +628,12 @@ impl<'src> Parser<'src> {
             let y = Ident::from_str("$section_arg");
             let y_pat = Pat::Var(y, Span::DUMMY);
             let y_expr = Expr::Var(y, Span::DUMMY);
-            let body = Expr::Infix(Box::new(y_expr), func, Box::new(rhs), span);
+            let body = Expr::Infix(
+                Box::new(y_expr),
+                func,
+                Box::new(rhs),
+                section_body_span(span),
+            );
             return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
         }
 
@@ -667,7 +672,12 @@ impl<'src> Parser<'src> {
                 let y = Ident::from_str("$section_arg");
                 let y_pat = Pat::Var(y, Span::DUMMY);
                 let y_expr = Expr::Var(y, Span::DUMMY);
-                let body = Expr::Infix(Box::new(first), op, Box::new(y_expr), span);
+                let body = Expr::Infix(
+                    Box::new(first),
+                    op,
+                    Box::new(y_expr),
+                    section_body_span(span),
+                );
                 return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
             }
 
@@ -745,7 +755,12 @@ impl<'src> Parser<'src> {
                 let y = Ident::from_str("$section_arg");
                 let y_pat = Pat::Var(y, Span::DUMMY);
                 let y_expr = Expr::Var(y, Span::DUMMY);
-                let body = Expr::Infix(Box::new(first), func, Box::new(y_expr), span);
+                let body = Expr::Infix(
+                    Box::new(first),
+                    func,
+                    Box::new(y_expr),
+                    section_body_span(span),
+                );
                 return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
             }
 
@@ -1723,7 +1738,7 @@ impl<'src> Parser<'src> {
         let y = Ident::from_str("$section_arg");
         let y_pat = Pat::Var(y, Span::DUMMY);
         let y_expr = Expr::Var(y, Span::DUMMY);
-        let body = Expr::Infix(Box::new(y_expr), op, Box::new(arg), span);
+        let body = Expr::Infix(Box::new(y_expr), op, Box::new(arg), section_body_span(span));
         Ok(Expr::Lam(vec![y_pat], Box::new(body), span))
     }
 
@@ -1734,6 +1749,19 @@ impl<'src> Parser<'src> {
         let ty = self.parse_type()?;
         let span = start.to(ty.span());
         Ok(Expr::Ann(Box::new(expr), ty, span))
+    }
+}
+
+/// The span given to the infix body of a desugared section: the section's
+/// span without its parentheses. Sharing the lambda's span made the two
+/// collide in span-keyed type tables, so the operator of `(x <>)` was recorded
+/// with the SECTION's type (`F -> F`) instead of its own (`F -> F -> F`), and
+/// its class dictionary was resolved at the wrong type.
+fn section_body_span(span: Span) -> Span {
+    if span.hi.0 > span.lo.0 + 1 {
+        Span::from_raw(span.lo.0 + 1, span.hi.0 - 1)
+    } else {
+        span
     }
 }
 

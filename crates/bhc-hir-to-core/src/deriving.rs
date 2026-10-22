@@ -151,7 +151,7 @@ impl DerivingContext {
     /// interface harvest externs it (driver `instance_methods`). A suffixed
     /// name breaks both. The `{method}_{Type}` portion is unique per instance,
     /// so no collision results from dropping the id.
-    fn named_instance_var(&mut self, name: &str, ty: Ty) -> Var {
+    pub(crate) fn named_instance_var(&mut self, name: &str, ty: Ty) -> Var {
         let n = self.fresh_counter;
         self.fresh_counter += 1;
         Var {
@@ -1059,16 +1059,12 @@ impl DerivingContext {
             },
         };
         let eq_expr = core::Expr::Var(eq_var, span);
-        let app1 = core::Expr::App(
-            Box::new(eq_expr),
-            Box::new(core::Expr::Var(x.clone(), span)),
-            span,
+        let (x, y) = (
+            Self::typed_operand(x, field_ty),
+            Self::typed_operand(y, field_ty),
         );
-        core::Expr::App(
-            Box::new(app1),
-            Box::new(core::Expr::Var(y.clone(), span)),
-            span,
-        )
+        let app1 = core::Expr::App(Box::new(eq_expr), Box::new(core::Expr::Var(x, span)), span);
+        core::Expr::App(Box::new(app1), Box::new(core::Expr::Var(y, span)), span)
     }
 
     /// Make a call to (&&) for two boolean expressions.
@@ -1112,7 +1108,8 @@ impl DerivingContext {
         };
 
         // case x of { Con inner_x -> case y of { Con inner_y -> inner_x == inner_y } }
-        let eq_call = self.make_eq_call(&inner_x, &inner_y, None, span);
+        let field_tys = Self::con_field_types(&newtype_def.con.fields);
+        let eq_call = self.make_eq_call(&inner_x, &inner_y, field_tys.first(), span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),
@@ -1439,16 +1436,30 @@ impl DerivingContext {
             },
         };
         let compare_expr = core::Expr::Var(compare_var, span);
+        let (x, y) = (
+            Self::typed_operand(x, field_ty),
+            Self::typed_operand(y, field_ty),
+        );
         let app1 = core::Expr::App(
             Box::new(compare_expr),
-            Box::new(core::Expr::Var(x.clone(), span)),
+            Box::new(core::Expr::Var(x, span)),
             span,
         );
-        core::Expr::App(
-            Box::new(app1),
-            Box::new(core::Expr::Var(y.clone(), span)),
-            span,
-        )
+        core::Expr::App(Box::new(app1), Box::new(core::Expr::Var(y, span)), span)
+    }
+
+    /// A compared field variable carries its field type when that is
+    /// `Integer`: codegen picks the bignum comparison from the operand types,
+    /// and the binders of a derived instance are otherwise untyped (a
+    /// `newtype Day = Day Integer` compared its fields as pointers).
+    fn typed_operand(v: &Var, field_ty: Option<&Ty>) -> Var {
+        match field_ty {
+            Some(t @ Ty::Con(c)) if c.name.as_str() == "Integer" => Var {
+                ty: t.clone(),
+                ..v.clone()
+            },
+            _ => v.clone(),
+        }
     }
 
     /// Derive Ord for a newtype.
@@ -1474,7 +1485,8 @@ impl DerivingContext {
             arity: 1,
         };
 
-        let compare_call = self.make_compare_call(&inner_x, &inner_y, None, span);
+        let field_tys = Self::con_field_types(&newtype_def.con.fields);
+        let compare_call = self.make_compare_call(&inner_x, &inner_y, field_tys.first(), span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),
@@ -2264,27 +2276,103 @@ impl DerivingContext {
 
     /// Derive Functor for a newtype.
     fn derive_functor_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        // Functor requires exactly one type parameter
-        if newtype_def.params.len() != 1 {
-            return None;
-        }
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let type_param = newtype_def.params.last().cloned()?;
 
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
 
         // Check if the wrapped type contains the type parameter
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
+
+        // When the field is itself a functor IN the parameter — `F s a`
+        // wrapping `Reader s a`, pandoc's `Future` — `fmap` delegates to the
+        // inner one, exactly as the Applicative and Monad derivers do. A
+        // newtype is representationally identity, so the body needs no
+        // wrap/unwrap and the method var's field type is what makes codegen
+        // choose the inner implementation. Applying `f` to the field instead
+        // (the body below, right for `newtype Id a = Id a`) handed the
+        // function the whole Reader action: `fmap (* 2) prog` segfaulted.
+        let field_is_functor = match &field_ty {
+            Ty::App(_, last) => matches!(last.as_ref(), Ty::Var(v) if *v == type_param),
+            Ty::List(elem) => matches!(elem.as_ref(), Ty::Var(v) if *v == type_param),
+            _ => false,
+        };
+        if field_is_functor {
+            let fmap_var = self.named_instance_var(
+                &format!("$instance_fmap_{inst_enc}"),
+                Ty::Fun(
+                    Box::new(Ty::Fun(
+                        Box::new(Ty::Var(type_param.clone())),
+                        Box::new(Ty::Var(type_param.clone())),
+                    )),
+                    Box::new(Ty::Fun(
+                        Box::new(field_ty.clone()),
+                        Box::new(field_ty.clone()),
+                    )),
+                ),
+            );
+            let f = self.fresh_var("f", Ty::Error);
+            let m = self.fresh_var("m", Ty::Error);
+            let body = core::Expr::Lam(
+                f.clone(),
+                Box::new(core::Expr::Lam(
+                    m.clone(),
+                    Box::new(self.make_fmap(
+                        core::Expr::Var(f, span),
+                        core::Expr::Var(m, span),
+                        span,
+                    )),
+                    span,
+                )),
+                span,
+            );
+            let mut methods = FxHashMap::default();
+            methods.insert(
+                Symbol::intern("fmap"),
+                bhc_hir::DefId::new(fmap_var.id.index()),
+            );
+            let instance = InstanceInfo {
+                class: Symbol::intern("Functor"),
+                instance_types: vec![instance_type],
+                methods,
+                superclass_instances: Vec::new(),
+                assoc_type_impls: FxHashMap::default(),
+                instance_constraints: Vec::new(),
+            };
+            return Some(DerivedInstance {
+                instance,
+                bindings: vec![Bind::NonRec(fmap_var, Box::new(body))],
+            });
+        }
 
         // fmap f (Con x) = Con (f x)
-        let fmap_var = self.named_instance_var(
-            &format!("$instance_fmap_{}", newtype_def.name.as_str()),
-            Ty::Error,
-        );
+        let fmap_var = self.named_instance_var(&format!("$instance_fmap_{inst_enc}"), Ty::Error);
 
         let f_var = self.fresh_var("f", Ty::Error);
         let x_var = self.fresh_var("x", Ty::Error);
@@ -2350,24 +2438,42 @@ impl DerivingContext {
     /// transformer builtins instead of re-dispatching to this same instance
     /// (which would loop).
     fn derive_applicative_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        // Applicative is `f :: * -> *`, so the newtype needs exactly one param.
-        if newtype_def.params.len() != 1 {
-            return None;
-        }
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let type_param = newtype_def.params.last().cloned()?;
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
         // Only derive when the field actually wraps the type parameter (`T .. a`);
         // otherwise the field isn't an applicative in `a`.
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
 
         // pure x = pure x  (inner `pure` resolved at the underlying field type)
         let pure_var = self.named_instance_var(
-            &format!("$instance_pure_{}", newtype_def.name.as_str()),
+            &format!("$instance_pure_{inst_enc}"),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2382,7 +2488,7 @@ impl DerivingContext {
 
         // f <*> x = f <*> x  (inner `<*>` at the underlying field type)
         let ap_var = self.named_instance_var(
-            &format!("$instance_<*>_{}", newtype_def.name.as_str()),
+            &format!("$instance_<*>_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2446,21 +2552,40 @@ impl DerivingContext {
     /// vars carry the underlying field type so codegen lowers the inner
     /// `return`/`>>=` via the transformer builtins.
     fn derive_monad_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        if newtype_def.params.len() != 1 {
-            return None;
-        }
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let type_param = newtype_def.params.last().cloned()?;
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
 
         // return x = return x  (inner `return` at the underlying field type)
         let return_var = self.named_instance_var(
-            &format!("$instance_return_{}", newtype_def.name.as_str()),
+            &format!("$instance_return_{inst_enc}"),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2476,7 +2601,7 @@ impl DerivingContext {
         // m >>= f = m >>= f  (inner `>>=` at the underlying field type; the
         // continuation's `N b` is representationally the field's `T b`).
         let bind_var = self.named_instance_var(
-            &format!("$instance_>>=_{}", newtype_def.name.as_str()),
+            &format!("$instance_>>=_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2506,7 +2631,7 @@ impl DerivingContext {
         // real code using `>>` (statement without binding) otherwise fails to
         // dispatch. Delegate through the same `>>=` the derived `>>=` uses.
         let seq_var = self.named_instance_var(
-            &format!("$instance_>>_{}", newtype_def.name.as_str()),
+            &format!("$instance_>>_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2692,7 +2817,17 @@ impl DerivingContext {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
 
         // foldr f z (Con x) = f x z
         let foldr_var = self.fresh_var(
@@ -2922,6 +3057,9 @@ impl DerivingContext {
         let mut body = self.make_pure(fully_applied, span);
 
         // Wrap with let-bindings in reverse order: let r_i = f a_i in ...
+        // Under the closure IO model (spec/BHC-BRIEF-0005) `f a_i` is an
+        // action, not its result, so sequence instead: `f a_i >>= \r_i -> …`.
+        let sequence = crate::expr::io_closure_mode();
         for (opt_r, field_var) in result_vars.iter().rev() {
             if let Some(r) = opt_r {
                 let f_applied = core::Expr::App(
@@ -2929,6 +3067,18 @@ impl DerivingContext {
                     Box::new(core::Expr::Var((*field_var).clone(), span)),
                     span,
                 );
+                if sequence {
+                    let bind = core::Expr::Var(
+                        Var::new(Symbol::intern(">>="), VarId::new(0), Ty::Error),
+                        span,
+                    );
+                    body = core::Expr::App(
+                        Box::new(core::Expr::App(Box::new(bind), Box::new(f_applied), span)),
+                        Box::new(core::Expr::Lam(r.clone(), Box::new(body), span)),
+                        span,
+                    );
+                    continue;
+                }
                 body = core::Expr::Let(
                     Box::new(Bind::NonRec(r.clone(), Box::new(f_applied))),
                     Box::new(body),
@@ -2953,7 +3103,17 @@ impl DerivingContext {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
 
         // traverse f (Con x) = Con <$> f x
         let traverse_var = self.fresh_var(
@@ -3286,6 +3446,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Eq"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3323,6 +3484,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Eq"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3377,6 +3539,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Ord"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3422,6 +3585,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Show"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3476,6 +3640,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Enum"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3530,6 +3695,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Enum"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3580,6 +3746,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Bounded"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3622,6 +3789,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Functor"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3659,6 +3827,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Functor"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3689,6 +3858,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Foldable"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3726,6 +3896,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Traversable"),
+                args: vec![],
             }],
             span: Span::default(),
         };

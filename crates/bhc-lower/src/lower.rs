@@ -371,6 +371,220 @@ fn process_imports(
     }
 }
 
+/// What `Prelude` exports, as far as bhc models it. An unqualified import
+/// never displaces one of these builtins (see `is_prelude_export`).
+pub(crate) const PRELUDE_EXPORTS: &[&str] = &[
+    // Numeric
+    "+",
+    "-",
+    "*",
+    "negate",
+    "abs",
+    "signum",
+    "fromInteger",
+    "fromIntegral",
+    "div",
+    "mod",
+    "even",
+    "odd",
+    "sum",
+    "product",
+    // Comparison
+    "==",
+    "/=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "compare",
+    "min",
+    "max",
+    // Boolean
+    "&&",
+    "||",
+    "not",
+    "otherwise",
+    // List operations
+    "map",
+    "filter",
+    "head",
+    "tail",
+    "last",
+    "init",
+    "null",
+    "length",
+    "reverse",
+    "foldl",
+    "foldl'",
+    "foldr",
+    "concat",
+    "concatMap",
+    "zip",
+    "zipWith",
+    "unzip",
+    "take",
+    "drop",
+    "splitAt",
+    "takeWhile",
+    "dropWhile",
+    "span",
+    "break",
+    "elem",
+    "notElem",
+    "lookup",
+    "replicate",
+    "iterate",
+    "repeat",
+    "cycle",
+    "any",
+    "all",
+    "and",
+    "or",
+    "lines",
+    "unlines",
+    "words",
+    "unwords",
+    "++",
+    // Tuple
+    "fst",
+    "snd",
+    "curry",
+    "uncurry",
+    "swap",
+    // Function
+    "id",
+    "const",
+    "flip",
+    "$",
+    "$!",
+    ".",
+    "seq",
+    "error",
+    "undefined",
+    // Maybe
+    "maybe",
+    "fromMaybe",
+    "isJust",
+    "isNothing",
+    // Either
+    "either",
+    // IO
+    "putStrLn",
+    "putStr",
+    "print",
+    "getLine",
+    "readLn",
+    ">>",
+    ">>=",
+    "return",
+    // Show
+    "show",
+    "showString",
+    "showChar",
+    "showParen",
+    // Enum
+    "enumFromTo",
+    "succ",
+    "pred",
+    "toEnum",
+    "fromEnum",
+    // Integral
+    "gcd",
+    "lcm",
+    "quot",
+    "rem",
+    "quotRem",
+    "divMod",
+    "subtract",
+    "realToFrac",
+    // List extras
+    "maximum",
+    "minimum",
+    "scanl",
+    "scanr",
+    "scanl1",
+    "scanr1",
+    "zip3",
+    "zipWith3",
+    "unzip3",
+    // Function
+    "until",
+    "asTypeOf",
+    // IO
+    "getChar",
+    "getContents",
+    "readFile",
+    "writeFile",
+    "appendFile",
+    "interact",
+    // Read/lex
+    "lex",
+    "read",
+    "reads",
+    "readParen",
+    // MonadFail
+    "fail",
+    // Error
+    "userError",
+    "ioError",
+];
+
+/// Whether `name` is exported by Haskell's `Prelude`: bhc's own list plus the
+/// class methods and combinators it models elsewhere.
+pub(crate) fn is_prelude_export(name: &str) -> bool {
+    const MORE: &[&str] = &[
+        "fmap",
+        "<$>",
+        "<$",
+        "<*>",
+        "pure",
+        "*>",
+        "<*",
+        "mapM",
+        "mapM_",
+        "sequence",
+        "sequence_",
+        "=<<",
+        "<>",
+        "mempty",
+        "mappend",
+        "mconcat",
+        "traverse",
+        "sequenceA",
+        "foldMap",
+        "foldl1",
+        "foldr1",
+        "!!",
+        "^",
+        "^^",
+        "**",
+        "sqrt",
+        "exp",
+        "log",
+        "sin",
+        "cos",
+        "tan",
+        "pi",
+        "truncate",
+        "round",
+        "ceiling",
+        "floor",
+        "toInteger",
+        "fromRational",
+        "toRational",
+        "minBound",
+        "maxBound",
+        "showsPrec",
+        "showList",
+        "readsPrec",
+        "readIO",
+        "shows",
+        "words",
+        "unwords",
+    ];
+    PRELUDE_EXPORTS.contains(&name) || MORE.contains(&name)
+}
+
 /// Register standard module exports.
 ///
 /// This is a temporary solution until we have proper module loading.
@@ -383,160 +597,7 @@ fn register_standard_module_exports(
     import_decl: Option<&ast::ImportDecl>,
 ) {
     let exports: &[&str] = match module_name {
-        "Prelude" => &[
-            // Numeric
-            "+",
-            "-",
-            "*",
-            "negate",
-            "abs",
-            "signum",
-            "fromInteger",
-            "fromIntegral",
-            "div",
-            "mod",
-            "even",
-            "odd",
-            "sum",
-            "product",
-            // Comparison
-            "==",
-            "/=",
-            "<",
-            "<=",
-            ">",
-            ">=",
-            "compare",
-            "min",
-            "max",
-            // Boolean
-            "&&",
-            "||",
-            "not",
-            "otherwise",
-            // List operations
-            "map",
-            "filter",
-            "head",
-            "tail",
-            "last",
-            "init",
-            "null",
-            "length",
-            "reverse",
-            "foldl",
-            "foldl'",
-            "foldr",
-            "concat",
-            "concatMap",
-            "zip",
-            "zipWith",
-            "unzip",
-            "take",
-            "drop",
-            "splitAt",
-            "takeWhile",
-            "dropWhile",
-            "span",
-            "break",
-            "elem",
-            "notElem",
-            "lookup",
-            "replicate",
-            "iterate",
-            "repeat",
-            "cycle",
-            "any",
-            "all",
-            "and",
-            "or",
-            "lines",
-            "unlines",
-            "words",
-            "unwords",
-            "++",
-            // Tuple
-            "fst",
-            "snd",
-            "curry",
-            "uncurry",
-            "swap",
-            // Function
-            "id",
-            "const",
-            "flip",
-            "$",
-            ".",
-            "seq",
-            "error",
-            "undefined",
-            // Maybe
-            "maybe",
-            "fromMaybe",
-            "isJust",
-            "isNothing",
-            // Either
-            "either",
-            // IO
-            "putStrLn",
-            "putStr",
-            "print",
-            "getLine",
-            "readLn",
-            ">>",
-            ">>=",
-            "return",
-            // Show
-            "show",
-            "showString",
-            "showChar",
-            "showParen",
-            // Enum
-            "enumFromTo",
-            "succ",
-            "pred",
-            "toEnum",
-            "fromEnum",
-            // Integral
-            "gcd",
-            "lcm",
-            "quot",
-            "rem",
-            "quotRem",
-            "divMod",
-            "subtract",
-            "realToFrac",
-            // List extras
-            "maximum",
-            "minimum",
-            "scanl",
-            "scanr",
-            "scanl1",
-            "scanr1",
-            "zip3",
-            "zipWith3",
-            "unzip3",
-            // Function
-            "until",
-            "asTypeOf",
-            // IO
-            "getChar",
-            "getContents",
-            "readFile",
-            "writeFile",
-            "appendFile",
-            "interact",
-            // Read/lex
-            "lex",
-            "read",
-            "reads",
-            "readParen",
-            // MonadFail
-            "fail",
-            // Error
-            "userError",
-            "ioError",
-        ],
+        "Prelude" => PRELUDE_EXPORTS,
         "Data.Map"
         | "Data.Map.Strict"
         | "Data.Map.Lazy"
@@ -5960,6 +6021,12 @@ fn register_standard_module_exports(
 
     // Build a set of explicitly imported names, if the import has an explicit list.
     // This prevents `import Data.Text (Text)` from overriding Prelude's `foldr` etc.
+    // Names admitted ONLY by a `T(..)` wildcard, not listed by name. The
+    // wildcard admits every export of a stubbed module, so without this
+    // `import Data.Sequence (ViewL (..), viewl)` — pandoc's Shared.hs — rebound
+    // bare `zipWith` to the unimplemented `Data.Sequence.zipWith`, and
+    // `makeSectionsWithOffsets` aborted on a stub.
+    let mut wildcard_only: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     let explicit_imports: Option<rustc_hash::FxHashSet<&str>> = import_decl.and_then(|imp| {
         if let Some(ast::ImportSpec::Only(items)) = &imp.spec {
             let mut names = rustc_hash::FxHashSet::default();
@@ -6000,7 +6067,9 @@ fn register_standard_module_exports(
             // `walkM`, `query`), so we must allow all names, not just uppercase.
             if has_dotdot_import {
                 for export in exports {
-                    names.insert(export);
+                    if names.insert(export) {
+                        wildcard_only.insert(*export);
+                    }
                 }
             }
             Some(names)
@@ -6018,6 +6087,33 @@ fn register_standard_module_exports(
             .and_then(|s| s.strip_suffix(')'))
             .unwrap_or(raw_export);
         let unqualified = Symbol::intern(export);
+
+        // `fmapDefault`/`foldMapDefault` ARE `fmap`/`foldMap` for every lawful
+        // Traversable: bind them to those definitions, so dispatch (and, in
+        // a function generic in the container, the dictionary) is fmap's.
+        // pandoc-types' `Walkable a (t b)` walks with `T.fmapDefault`; as a
+        // stub, its partial application miscompiled `walk` over lists.
+        //
+        // Likewise `nubOrd`/`nubInt` are `nub` (same result, only faster for
+        // `Ord` keys); stubbed, pandoc's header identifiers aborted on them.
+        if matches!(
+            module_name,
+            "Data.Traversable" | "Data.Containers.ListUtils"
+        ) {
+            let target = match export {
+                "fmapDefault" => Some("fmap"),
+                "foldMapDefault" => Some("foldMap"),
+                "nubOrd" | "nubInt" => Some("nub"),
+                _ => None,
+            };
+            if let Some(def) = target.and_then(|t| ctx.lookup_value(Symbol::intern(t))) {
+                ctx.bind_value(Symbol::intern(&format!("{qualifier}.{export}")), def);
+                if !is_qualified_import {
+                    ctx.bind_value(unqualified, def);
+                }
+                continue;
+            }
+        }
 
         // Detect if this export is a constructor (starts with uppercase or ':')
         let is_constructor = export
@@ -6267,6 +6363,14 @@ fn register_standard_module_exports(
         let is_explicitly_imported = explicit_imports
             .as_ref()
             .is_none_or(|names| names.contains(export));
+        // A lowercase name only the wildcard let through must not displace a
+        // name that is already bound (a Prelude builtin): it cannot be a
+        // constructor of the `T(..)` type, and a class method of the same
+        // name would be the builtin anyway.
+        let is_explicitly_imported = is_explicitly_imported
+            && !(!is_constructor
+                && (wildcard_only.contains(raw_export) || wildcard_only.contains(export))
+                && ctx.lookup_value(unqualified).is_some());
         // A `qualified` import must not leak the module's *typed* scheme into the
         // unqualified namespace. Historically the bare stub was registered even
         // for `import qualified Data.Text as T`, and with `has_typed_sigs` it got
@@ -6390,6 +6494,26 @@ fn register_standard_module_exports(
                     if ctx.lookup_constructor(full_qual_sym).is_none() {
                         ctx.bind_constructor(full_qual_sym, def_id);
                     }
+                }
+            }
+        } else if is_constructor {
+            // The bare name is already some OTHER module's constructor
+            // (`Text.Pandoc.Definition.Cell` when `import qualified
+            // Text.GridTable as GT` follows it). The qualified name must not
+            // fall back to it: `GT.Cell c rs cs` then matched pandoc's `Cell`
+            // and typed `c` as its `Attr`. Give the qualified name its own
+            // stub constructor.
+            let aliased_qual_sym = Symbol::intern(&format!("{qualifier}.{export}"));
+            if ctx.lookup_constructor(aliased_qual_sym).is_none() {
+                let def_id = ctx.fresh_def_id();
+                let full = Symbol::intern(&format!("{module_name}.{export}"));
+                ctx.define(def_id, full, DefKind::StubConstructor, Span::default());
+                ctx.bind_constructor(aliased_qual_sym, def_id);
+                if ctx.lookup_value(aliased_qual_sym).is_none() {
+                    ctx.bind_value(aliased_qual_sym, def_id);
+                }
+                if qualifier != module_name && ctx.lookup_constructor(full).is_none() {
+                    ctx.bind_constructor(full, def_id);
                 }
             }
         }
@@ -6645,7 +6769,11 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
 /// Lower a top-level pattern binding to multiple value definitions.
 ///
 /// Look up (or dynamically register) a tuple constructor of the given arity.
-fn ensure_tuple_constructor(ctx: &mut LowerContext, arity: usize, span: Span) -> hir::DefId {
+pub(crate) fn ensure_tuple_constructor(
+    ctx: &mut LowerContext,
+    arity: usize,
+    span: Span,
+) -> hir::DefId {
     let tuple_sym = Symbol::intern(&format!("({})", ",".repeat(arity.saturating_sub(1))));
     if let Some(id) = ctx.lookup_constructor(tuple_sym) {
         return id;
@@ -6791,8 +6919,9 @@ fn lower_fun_bind(ctx: &mut LowerContext, fun_bind: &ast::FunBind) -> LowerResul
         .expect("function should be pre-bound");
 
     let mut equations = Vec::new();
+    let sole = fun_bind.clauses.len() == 1;
     for clause in &fun_bind.clauses {
-        let eq = lower_clause(ctx, clause)?;
+        let eq = lower_clause_in(ctx, clause, sole)?;
         equations.push(eq);
     }
 
@@ -6824,8 +6953,9 @@ fn lower_instance_method(
     let name = fun_bind.name.name;
 
     let mut equations = Vec::new();
+    let sole = fun_bind.clauses.len() == 1;
     for clause in &fun_bind.clauses {
-        let eq = lower_clause(ctx, clause)?;
+        let eq = lower_clause_in(ctx, clause, sole)?;
         equations.push(eq);
     }
 
@@ -6845,7 +6975,12 @@ fn lower_instance_method(
 }
 
 /// Lower a function clause.
-fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir::Equation> {
+/// [`lower_clause`] for a clause that may be its function's only one (`sole`).
+fn lower_clause_in(
+    ctx: &mut LowerContext,
+    clause: &ast::Clause,
+    sole: bool,
+) -> LowerResult<hir::Equation> {
     ctx.in_scope(|ctx| {
         // Bind pattern variables
         let mut pats = Vec::new();
@@ -6903,7 +7038,22 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                 // failure into those crashed the program —
                 // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted where
                 // desugaring the guards here works.
-                let single_scrutinee = clause.pats.len() == 1;
+                // A SOLE clause with `where` bindings has nothing to fall
+                // through to, and the HIR guard below is tested OUTSIDE the
+                // `where` (only the RHS is wrapped), so a guard calling a
+                // where-bound helper hit a "not implemented" stub — pandoc's
+                // `strToHtml` (`| T.any isSpecial t = … where isSpecial …`)
+                // aborted the HTML writer. Desugar into the RHS instead.
+                let sole_with_wheres = sole && !clause.wheres.is_empty();
+                // A multi-argument clause keeps its guards too when it has no
+                // `where` (whose bindings the HIR guard would sit outside of):
+                // the equation compiler resumes at the next equation by
+                // re-casing on the argument tuple. Desugared, pandoc's
+                // `strToHtml` helper `go h txt | T.length txt == 1 && … = …`
+                // raised "Non-exhaustive patterns" for every other
+                // one-character text instead of reaching `go h txt = …`.
+                let single_scrutinee = (clause.pats.len() == 1 && !sole_with_wheres)
+                    || (clause.pats.len() > 1 && clause.wheres.is_empty());
                 let single_boolean = guarded_rhss.len() == 1
                     && guarded_rhss[0]
                         .guards
@@ -7247,7 +7397,13 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                             for i in 0..arity {
                                 let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
-                                ctx.define(param_def_id, name, DefKind::Value, fb.span);
+                                // A lambda parameter is a pattern variable: as a
+                                // `Value` the type checker pre-registered it with a
+                                // polymorphic placeholder scheme, so each use got a
+                                // fresh type and the clauses' constructor patterns
+                                // never fixed the parameter's type (pandoc's local
+                                // `getLevel (Header …) = …` stayed `t -> Min Int`).
+                                ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
                                 ctx.bind_value(name, param_def_id);
                                 param_names.push((name, param_def_id));
                                 param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));
@@ -7280,8 +7436,11 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                 };
 
                                 // Handle per-clause where bindings
+                                let mut clause_guards = Vec::new();
                                 let body = if clause.wheres.is_empty() {
-                                    lower_rhs(ctx, &clause.rhs)
+                                    let (body, guards) = lower_alt_rhs_and_guards(ctx, &clause.rhs);
+                                    clause_guards = guards;
+                                    body
                                 } else {
                                     ctx.enter_scope();
                                     // Pre-bind where names
@@ -7390,7 +7549,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,
-                                    guards: Vec::new(),
+                                    guards: clause_guards,
                                     rhs: body,
                                     span: clause.span,
                                 });
@@ -7431,6 +7590,8 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                     None
                 })
                 .collect();
+            let mut bindings = bindings;
+            attach_local_sigs(ctx, &clause.wheres, &mut bindings);
 
             ctx.exit_scope();
 
@@ -7535,8 +7696,40 @@ fn lower_body_with_wheres(
             None
         })
         .collect();
+    let mut nested_bindings = nested_bindings;
+    attach_local_sigs(ctx, wheres, &mut nested_bindings);
     ctx.exit_scope();
     hir::Expr::Let(nested_bindings, Box::new(rhs_expr), span)
+}
+
+/// Attach each local (`where`/`let`) type signature to its binding.
+///
+/// Local signatures were dropped, so typeck generalised a local function
+/// from its body alone — `where go :: Int -> Parsec String () String` came
+/// out as `a -> ParsecT s u m [Char]`, and every `Stream` dictionary inside
+/// it went unresolved (silently shifting arguments).
+///
+/// Signature type variables are keyed by NAME and typeck unifies a local
+/// signature without instantiating it, so a local `m` is the enclosing
+/// signature's `m` — ScopedTypeVariables behaviour, which is what pandoc's
+/// `go :: PandocMonad m => Int -> MarkdownParser m ()` helpers rely on. The
+/// full pandoc sweep type-checks with them attached.
+fn attach_local_sigs(ctx: &mut LowerContext, decls: &[ast::Decl], bindings: &mut [hir::Binding]) {
+    for decl in decls {
+        let ast::Decl::TypeSig(sig) = decl else {
+            continue;
+        };
+        let scheme = lower_type_to_scheme(ctx, &sig.ty);
+        for name in &sig.names {
+            for binding in bindings.iter_mut() {
+                if let hir::Pat::Var(bound, _, _) = &binding.pat {
+                    if *bound == name.name && binding.sig.is_none() {
+                        binding.sig = Some(scheme.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Lower a clause's RHS, threading its own `where` clause (if any). This keeps
@@ -7549,6 +7742,89 @@ fn lower_clause_rhs_with_wheres(ctx: &mut LowerContext, clause: &ast::Clause) ->
     } else {
         lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, clause.span)
     }
+}
+
+/// A local multi-clause function's clause RHS as a case alternative's RHS and
+/// guards. Boolean guards stay in the HIR, so a clause whose guards all fail
+/// resumes at the NEXT clause (`lower_case` routes guard failure to its
+/// resume point); desugared, they could only end in "Non-exhaustive
+/// patterns". Several boolean alternatives become one guard, their
+/// disjunction, over the desugared nested ifs. A pattern guard keeps the old
+/// desugaring.
+fn lower_alt_rhs_and_guards(
+    ctx: &mut LowerContext,
+    rhs: &ast::Rhs,
+) -> (hir::Expr, Vec<hir::Guard>) {
+    let ast::Rhs::Guarded(guarded_rhss, span) = rhs else {
+        return (lower_rhs(ctx, rhs), Vec::new());
+    };
+    let all_boolean = !guarded_rhss.is_empty()
+        && guarded_rhss.iter().all(|g| {
+            !g.guards.is_empty() && g.guards.iter().all(|x| matches!(x, ast::Guard::Expr(_, _)))
+        });
+    if !all_boolean {
+        return (lower_rhs(ctx, rhs), Vec::new());
+    }
+    if guarded_rhss.len() == 1 {
+        let grhs = &guarded_rhss[0];
+        let guards = grhs
+            .guards
+            .iter()
+            .filter_map(|g| match g {
+                ast::Guard::Expr(e, sp) => Some(hir::Guard {
+                    cond: lower_expr(ctx, e),
+                    span: *sp,
+                }),
+                ast::Guard::Pattern(..) => None,
+            })
+            .collect();
+        return (lower_expr(ctx, &grhs.body), guards);
+    }
+    let mk_bool = |ctx: &mut LowerContext, name: &str| -> hir::Expr {
+        let sym = Symbol::intern(name);
+        match ctx
+            .lookup_constructor(sym)
+            .or_else(|| ctx.lookup_value(sym))
+        {
+            Some(id) => hir::Expr::Con(ctx.def_ref(id, *span)),
+            None => {
+                let id = ctx.fresh_def_id();
+                ctx.define(id, sym, DefKind::Constructor, *span);
+                hir::Expr::Con(ctx.def_ref(id, *span))
+            }
+        }
+    };
+    let mut disjunction: Option<hir::Expr> = None;
+    for grhs in guarded_rhss.iter().rev() {
+        let mut conj: Option<hir::Expr> = None;
+        for g in grhs.guards.iter().rev() {
+            let ast::Guard::Expr(e, gsp) = g else {
+                continue;
+            };
+            let cond = lower_expr(ctx, e);
+            conj = Some(match conj {
+                None => cond,
+                Some(rest) => {
+                    let f = mk_bool(ctx, "False");
+                    hir::Expr::If(Box::new(cond), Box::new(rest), Box::new(f), *gsp)
+                }
+            });
+        }
+        if let Some(c) = conj {
+            disjunction = Some(match disjunction {
+                None => c,
+                Some(rest) => {
+                    let t = mk_bool(ctx, "True");
+                    hir::Expr::If(Box::new(c), Box::new(t), Box::new(rest), *span)
+                }
+            });
+        }
+    }
+    let body = lower_rhs(ctx, rhs);
+    let guards = disjunction
+        .map(|cond| vec![hir::Guard { cond, span: *span }])
+        .unwrap_or_default();
+    (body, guards)
 }
 
 fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
@@ -7690,6 +7966,71 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
         }
 
         ast::Expr::Infix(lhs, op, rhs, span) => {
+            // `f =<< m` IS `m >>= f` (Haskell report: `(=<<) = flip (>>=)`).
+            // Carried through as its own operator, every later stage needs a
+            // flipped twin of whatever it does for `>>=` — and the monad
+            // dispatch in hir-to-core has none, so a parser bind written this
+            // way fell through to the generic builtin bind and
+            // `(\c -> return [c,c]) =<< letter` returned "" instead of "aa".
+            // Rewriting here, ahead of typeck, means there is one bind to
+            // support rather than two.
+            if op.name.as_str() == "=<<" && operator_is_builtin(ctx, op.name) {
+                if let Some(bind) = ctx.lookup_value(Symbol::intern(">>=")) {
+                    let bind_expr = hir::Expr::Var(ctx.def_ref(bind, *span));
+                    let action = lower_expr(ctx, rhs);
+                    let k = lower_expr(ctx, lhs);
+                    let app1 = hir::Expr::App(Box::new(bind_expr), Box::new(action), *span);
+                    return hir::Expr::App(Box::new(app1), Box::new(k), *span);
+                }
+            }
+            // `f $ x` IS `f x`, and keeping the operator hides the head: every
+            // later stage sees an application of `$`, so a CLASS METHOD on the
+            // left is never dispatched. `return $ return $ B.str t` in pandoc's
+            // `symbol` left both `return`s as the builtin's identity and the
+            // parser's action became the `Text` itself ("not a closure").
+            // pandoc writes `$` 7755 times, so this is not a corner.
+            //
+            // `$!` goes the same way: bhc evaluates a call's arguments eagerly
+            // unless `arg_should_thunk` finds the argument can diverge — and
+            // forcing one of those is exactly what must not happen — so direct
+            // application already gives `$!` its strictness. (The `$!` builtin
+            // stays for the non-infix spellings, `($!) f x` and sections.)
+            // `m $> x` IS `fmap (const x) m`, and `$>` has no implementation at
+            // all — the RTS aborts with `stub: $> not implemented`, which is
+            // where `readMarkdown` stops on a one-line document. `fmap` is
+            // implemented for every functor, builtin and user-defined, and its
+            // dispatch reads the LAST operand — the action, which keeps its own
+            // span here. pandoc writes `$>` 33 times.
+            // Only `$>`: `<$` has a dispatch path of its own for user instances
+            // (`is_fmap_like_method`, rewritten through the instance's `fmap`),
+            // and routing its 407 pandoc call sites through synthesized nodes
+            // would lose the element type that `show`/`==` need.
+            if op.name.as_str() == "$>" && operator_is_builtin(ctx, op.name) {
+                let (value, action) = (rhs, lhs);
+                if let (Some(fmap_id), Some(const_id)) = (
+                    ctx.lookup_value(Symbol::intern("fmap")),
+                    ctx.lookup_value(Symbol::intern("const")),
+                ) {
+                    let value_core = lower_expr(ctx, value);
+                    let action_core = lower_expr(ctx, action);
+                    let const_fn = hir::Expr::App(
+                        Box::new(hir::Expr::Var(ctx.def_ref(const_id, *span))),
+                        Box::new(value_core),
+                        *span,
+                    );
+                    let fmapped = hir::Expr::App(
+                        Box::new(hir::Expr::Var(ctx.def_ref(fmap_id, *span))),
+                        Box::new(const_fn),
+                        *span,
+                    );
+                    return hir::Expr::App(Box::new(fmapped), Box::new(action_core), *span);
+                }
+            }
+            if matches!(op.name.as_str(), "$" | "$!") && operator_is_builtin(ctx, op.name) {
+                let f = lower_expr(ctx, lhs);
+                let a = lower_expr(ctx, rhs);
+                return hir::Expr::App(Box::new(f), Box::new(a), *span);
+            }
             // Desugar infix to prefix: a `op` b -> op a b
             // For qualified names like "E.catch", check the last part (after the last dot)
             let op_name_str = op.name.as_str();
@@ -7719,6 +8060,16 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     .next()
                     .is_some_and(|c| c.is_uppercase() || c == ':')
             };
+            // The operator gets a span of its own — the text between its
+            // operands — under the closure IO model (spec/BHC-BRIEF-0005).
+            // Sharing the application's span, its recorded type was the
+            // application's RESULT, so a class method written infix
+            // (``m `catchError` h``) could not be dispatched from its type.
+            let op_span = if bhc_types::io_closure_mode() && lhs.span().hi < rhs.span().lo {
+                Span::new(lhs.span().hi, rhs.span().lo)
+            } else {
+                *span
+            };
             let op_expr = if is_con {
                 // Constructor
                 if let Some(def_id) = resolve_constructor(ctx, op.name, *span) {
@@ -7732,7 +8083,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let base_name = Symbol::intern(&op_name_str[dot_pos + 1..]);
                 if let Some(def_id) = ctx.resolve_qualified_var(qualifier, base_name) {
                     ctx.warn_if_stub(def_id, op_name_str, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 } else {
                     ctx.error(crate::LowerError::UnboundVar {
                         name: op_name_str.to_string(),
@@ -7740,17 +8091,17 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     });
                     let def_id = ctx.fresh_def_id();
                     ctx.define(def_id, op.name, DefKind::Value, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 }
             } else {
                 // Unqualified variable/operator
                 if let Some(def_id) = resolve_var(ctx, op.name, *span) {
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 } else {
                     // Create placeholder
                     let def_id = ctx.fresh_def_id();
                     ctx.define(def_id, op.name, DefKind::Value, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 }
             };
             let l = lower_expr(ctx, lhs);
@@ -7878,7 +8229,13 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                             for i in 0..arity {
                                 let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
-                                ctx.define(param_def_id, name, DefKind::Value, fb.span);
+                                // A lambda parameter is a pattern variable: as a
+                                // `Value` the type checker pre-registered it with a
+                                // polymorphic placeholder scheme, so each use got a
+                                // fresh type and the clauses' constructor patterns
+                                // never fixed the parameter's type (pandoc's local
+                                // `getLevel (Header …) = …` stayed `t -> Min Int`).
+                                ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
                                 ctx.bind_value(name, param_def_id);
                                 param_names.push((name, param_def_id));
                                 param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));
@@ -7903,20 +8260,21 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                                         fb.span,
                                     )
                                 };
-                                let clause_body = if clause.wheres.is_empty() {
-                                    lower_rhs(ctx, &clause.rhs)
+                                let (clause_body, clause_guards) = if clause.wheres.is_empty() {
+                                    lower_alt_rhs_and_guards(ctx, &clause.rhs)
                                 } else {
-                                    lower_body_with_wheres(
+                                    let body = lower_body_with_wheres(
                                         ctx,
                                         &clause.rhs,
                                         &clause.wheres,
                                         fb.span,
-                                    )
+                                    );
+                                    (body, Vec::new())
                                 };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,
-                                    guards: Vec::new(),
+                                    guards: clause_guards,
                                     rhs: clause_body,
                                     span: clause.span,
                                 });
@@ -7954,6 +8312,8 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     None
                 })
                 .collect();
+            let mut bindings = bindings;
+            attach_local_sigs(ctx, decls, &mut bindings);
 
             let e = lower_expr(ctx, body);
             hir::Expr::Let(bindings, Box::new(e), *span)
@@ -7968,7 +8328,15 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 
         ast::Expr::Case(scrutinee, alts, span) => {
             let s = lower_expr(ctx, scrutinee);
-            let hir_alts: Vec<hir::CaseAlt> = alts.iter().map(|alt| lower_alt(ctx, alt)).collect();
+            let guarded_before_last = alts.len() > 1
+                && alts[..alts.len() - 1]
+                    .iter()
+                    .any(|alt| matches!(alt.rhs, ast::Rhs::Guarded(..)));
+            if guarded_before_last {
+                return lower_case_with_guard_fallthrough(ctx, s, alts, *span);
+            }
+            let hir_alts: Vec<hir::CaseAlt> =
+                alts.iter().map(|alt| lower_alt(ctx, alt, None)).collect();
             hir::Expr::Case(Box::new(s), hir_alts, *span)
         }
 
@@ -8135,7 +8503,90 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 }
 
 /// Lower a case alternative.
-fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
+/// Lower a `case` in which a guarded alternative is not the last one.
+///
+/// When every guard of an alternative fails, matching continues with the
+/// NEXT alternative: `case s of { (x:_) | x == c -> Just x; _ -> Nothing }`
+/// is `Nothing` for a non-matching `x`. Guards are desugared to `if`
+/// chains here, so each alternative becomes its own case whose guard
+/// failure — and whose pattern failure — resumes at the next one:
+///
+/// ```text
+/// let s = e
+///     f2 = case s of { p2 … ; _ -> error }
+///     f1 = case s of { p1 | g -> e1 | otherwise-fail -> f2 ; _ -> f2 }
+/// in case s of { p0 … -> … f1 … ; _ -> f1 }
+/// ```
+///
+/// Each resume point is a `let`, so later alternatives are shared rather
+/// than copied into every failure branch.
+fn lower_case_with_guard_fallthrough(
+    ctx: &mut LowerContext,
+    scrutinee: hir::Expr,
+    alts: &[ast::Alt],
+    span: Span,
+) -> hir::Expr {
+    let scrut_name = Symbol::intern("$cscrut");
+    let scrut_id = ctx.fresh_def_id();
+    ctx.define(scrut_id, scrut_name, DefKind::Value, span);
+    let scrut_ref = || {
+        hir::Expr::Var(hir::DefRef {
+            def_id: scrut_id,
+            span,
+        })
+    };
+
+    let mut resume: Option<hir::Expr> = None;
+    let mut resume_binds: Vec<hir::Binding> = Vec::new(); // f_{n-1} first
+    let mut body = None;
+    for (i, alt) in alts.iter().enumerate().rev() {
+        let mut case_alts = vec![lower_alt(ctx, alt, resume.clone())];
+        if let Some(next) = &resume {
+            case_alts.push(hir::CaseAlt {
+                pat: hir::Pat::Wild(span),
+                guards: vec![],
+                rhs: next.clone(),
+                span,
+            });
+        }
+        let case_i = hir::Expr::Case(Box::new(scrut_ref()), case_alts, span);
+        if i == 0 {
+            body = Some(case_i);
+        } else {
+            let name = Symbol::intern(&format!("$caseresume{i}"));
+            let id = ctx.fresh_def_id();
+            ctx.define(id, name, DefKind::Value, span);
+            resume_binds.push(hir::Binding {
+                pat: hir::Pat::Var(name, id, span),
+                sig: None,
+                rhs: case_i,
+                span,
+            });
+            resume = Some(hir::Expr::Var(hir::DefRef { def_id: id, span }));
+        }
+    }
+    let mut result = body.unwrap_or_else(|| hir::Expr::Case(Box::new(scrut_ref()), vec![], span));
+    // f_1 innermost, f_{n-1} outermost: each f_i sees f_{i+1}. The vector
+    // holds f_{n-1} first, so wrap from its far end.
+    for bind in resume_binds.into_iter().rev() {
+        result = hir::Expr::Let(vec![bind], Box::new(result), span);
+    }
+    let scrut_bind = hir::Binding {
+        pat: hir::Pat::Var(scrut_name, scrut_id, span),
+        sig: None,
+        rhs: scrutinee,
+        span,
+    };
+    hir::Expr::Let(vec![scrut_bind], Box::new(result), span)
+}
+
+/// Lower one `case` alternative. `guard_fallback` is the result when every
+/// guard fails (the next alternative); `None` keeps the pattern-match error.
+fn lower_alt(
+    ctx: &mut LowerContext,
+    alt: &ast::Alt,
+    guard_fallback: Option<hir::Expr>,
+) -> hir::CaseAlt {
     ctx.in_scope(|ctx| {
         // Bind pattern variables first
         bind_pattern(ctx, &alt.pat);
@@ -8164,7 +8615,17 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
         }
 
         // Lower the RHS (where clause bindings are now in scope)
-        let rhs_expr = lower_rhs(ctx, &alt.rhs);
+        let rhs_expr = match (&alt.rhs, guard_fallback) {
+            (ast::Rhs::Guarded(guards, gspan), Some(fallback)) => desugar::desugar_guarded_rhs_or(
+                ctx,
+                guards,
+                fallback,
+                *gspan,
+                &|ctx, e| lower_expr(ctx, e),
+                &|ctx, p| lower_pat(ctx, p),
+            ),
+            (rhs, _) => lower_rhs(ctx, rhs),
+        };
 
         // Wrap in let if there are where bindings
         let final_rhs = if alt.wheres.is_empty() {
@@ -8526,7 +8987,19 @@ fn desugar_list_pat(ctx: &mut LowerContext, pats: &[ast::Pat], span: Span) -> hi
         })
 }
 
-/// Lower a literal.
+/// Whether an operator name still resolves to bhc's own builtin, rather than to
+/// a definition from the module being compiled or one of its imports. The
+/// desugarings of `$`, `$!` and `=<<` below rest on their standard meanings, so
+/// they must not fire for a module that defines an operator of the same name.
+fn operator_is_builtin(ctx: &LowerContext, name: Symbol) -> bool {
+    // Builtins (and interface imports) are defined with a dummy span; a
+    // definition in the module being compiled has a real one. DefId ranges do
+    // not answer this — `$` is allocated above `BUILTIN_DEF_LIMIT`.
+    ctx.lookup_value(name)
+        .and_then(|d| ctx.lookup_def(d))
+        .is_some_and(|info| info.span == Span::DUMMY)
+}
+
 /// Whether `name` is a MagicHash boxing constructor (`I#`, `C#`, `D#`, `F#`,
 /// `W#`). Under the boxed approximation these are identity wrappers: `I# x` is
 /// `x` and the pattern `I# n` binds `n` to the scrutinee.
@@ -8534,6 +9007,7 @@ fn is_magic_hash_box_con(name: &str) -> bool {
     matches!(name, "I#" | "C#" | "D#" | "F#" | "W#")
 }
 
+/// Lower a literal.
 fn lower_lit(lit: &ast::Lit) -> hir::Lit {
     match lit {
         ast::Lit::Int(n) => hir::Lit::Int(i128::from(*n)),
@@ -9045,6 +9519,7 @@ fn lower_data_decl(ctx: &mut LowerContext, data: &ast::DataDecl) -> LowerResult<
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 
@@ -9195,6 +9670,7 @@ fn lower_newtype_decl_with_accessors(
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 
@@ -9393,6 +9869,7 @@ fn lower_data_instance_decl(
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 
@@ -9775,6 +10252,22 @@ fn lower_foreign_decl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prelude_exports_cover_the_names_an_import_must_not_displace() {
+        // An unqualified import may shadow a codegen builtin whose name is not
+        // a Prelude export (`try` from parsec); using an imported Prelude name
+        // bare would be ambiguous in Haskell, so those stay with the builtin.
+        for name in ["map", "foldr", "show", "fmap", "<>", "mapM", "mempty"] {
+            assert!(is_prelude_export(name), "{name} is a Prelude export");
+        }
+        for name in ["try", "catch", "when", "unless", "viewl", "manyTill"] {
+            assert!(
+                !is_prelude_export(name),
+                "{name} is not exported by Prelude, so an import of it must win"
+            );
+        }
+    }
 
     #[test]
     fn test_lower_simple_var() {

@@ -1,7 +1,10 @@
+import Control.Monad.State
+
 main = do
-    let val = evalStateT computation 0
+    val <- evalStateT computation 0
     putStrLn (show val)
 
+computation :: StateT Int IO Int
 computation = do
     put 10
     n <- get

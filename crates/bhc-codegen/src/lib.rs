@@ -68,6 +68,26 @@ use thiserror::Error;
 // Re-export the LLVM backend as the default
 pub use llvm::{LlvmBackend, LlvmContext, LlvmModule};
 
+pub use bhc_types::io_closure_mode;
+
+static IO_PRIMITIVES: std::sync::OnceLock<rustc_hash::FxHashSet<String>> =
+    std::sync::OnceLock::new();
+
+/// Record which builtin names are IO primitives (their type ends in `IO _`).
+///
+/// The driver supplies them from the type checker's builtin schemes; codegen
+/// cannot read them off Core, whose types are mostly erased. Only the first
+/// call takes effect.
+pub fn set_io_primitives(names: impl IntoIterator<Item = String>) {
+    let _ = IO_PRIMITIVES.set(names.into_iter().collect());
+}
+
+/// Whether `name` is a builtin IO primitive (see [`set_io_primitives`]).
+#[must_use]
+pub fn is_io_primitive(name: &str) -> bool {
+    IO_PRIMITIVES.get().is_some_and(|set| set.contains(name))
+}
+
 /// Errors that can occur during code generation.
 #[derive(Debug, Error)]
 pub enum CodegenError {

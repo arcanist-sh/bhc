@@ -19,6 +19,165 @@ reverting anything non-trivial.
 
 ---
 
+## 0. STATE AS OF 2026-10-10 — read this first
+
+The operator SPELLINGS were hiding the dispatch head. Four fixes, each with a
+minimal repro and an e2e fixture (see `tier2_functions/`
+`applicative_user_instance`, `nested_return_user_monads`,
+`flipped_bind_user_monad`):
+
+1. **`<$>`/`fmap` dispatched on their FIRST operand**, which is the plain
+   function — `two <$> letter` resolved `Functor (Char -> Char -> String)`,
+   named no instance, and stayed a BUILTIN fmap that walked the parser closure
+   as a list. `<*>` then received a non-closure and the CPS apply died ("PAP:
+   applied 5 args … word0=0x1"). 7-line repro. `<$>` appears all over pandoc's
+   readers, so this one was load-bearing.
+2. **`f =<< m` never reached the monad dispatch at all** (`=<<` is not a
+   registered class method), so a ParsecT bind written that way fell to the
+   generic builtin and `(\c -> return [c,c]) =<< letter` returned `""` instead
+   of `"aa"`. Rewritten in bhc-lower to `m >>= f`, ahead of typeck.
+3. **`f $ x` hides the head the same way** — and pandoc writes `$` 7755 times.
+   `return $ return $ B.str t` in `symbol` left both `return`s as the builtin's
+   identity, so the parser's action WAS the `Text` ("closure call: the action …
+   is not a closure", words = the BhcText header). `$` and `$!` now lower to
+   direct application in bhc-lower.
+4. **A nested `return` took the enclosing do-block's monad.** `return (return
+   x)` has a different monad at each level (pandoc's `symbol`: a `Future`
+   inside a parser); the monad the surrounding `>>=` pushed answered for both.
+   `return`/`pure` now prefer the type recorded for their OWN application, and
+   a monad codegen implements itself (IO, the transformers, `Maybe`/`Either`/
+   list) stops the search instead of falling through to the ambient one.
+
+Fixing (3) made three modules fail to COMPILE, each a latent codegen bug the
+`$` builtin had been hiding: `exitWith` and `undefined` left a terminated basic
+block as the insertion point (pandoc's `handleError` ends `exitWith (ExitFailure
+c); return undefined`), and `bhc_except_t_then` was only DECLARED on the
+pre-lowered-values path, which LLVM rejects for an internal-linkage global.
+
+Then the reader climbed as far as `inlines1` = `mconcat <$> many1 inline`,
+which needs `Monoid (Future s Inlines)` — and pandoc writes that instance as
+`(<>) = liftA2 (<>)` over a GND newtype. That took four more fixes:
+`deriving (Functor, Applicative, Monad)` was declined for any newtype with a
+parameter before the monad's own (`Future s a` over `Reader s a`), so the
+instance came out EMPTY; the derived methods were keyed and named at the bare
+type rather than the applied head `F s`, so an importing module called a symbol
+the producer never defined; the derived `fmap` applied the function to the whole
+wrapped action instead of delegating to the inner functor; and `liftA2`/`liftA3`
+had no implementation at all (an RTS stub) and a typeck scheme of `forall a b.
+a`, which left their operands unconstrained. They now desugar to a bind chain in
+bhc-lower, at the application so the operands keep their own spans.
+
+Later the same day: `$>` turned out to have no implementation at all, and that
+is where `readMarkdown` stops on a one-line document. `m $> x` now lowers to
+`fmap (const x) m`. `<$` was deliberately left alone — it has a dispatch path
+for user instances, and routing its 407 pandoc call sites through synthesized
+nodes loses the element type `show`/`==` need. `liftA2` moved out of bhc-lower
+into hir-to-core for the same reason (synthesized nodes share one span, so a
+class method passed as `f` never gets its dictionary).
+
+**The frontier, with repros in `tools/pandoc-harness/repros/`:**
+- `GND2.hs`/`GND3.hs`: `instance Semigroup a => Semigroup (F s a) where (<>) =
+  liftA2 (<>)` still segfaults — inside an instance method the eta-expanded
+  parameters carry no type, so the desugared binds stay the generic builtins.
+  Dispatching them at the ENCLOSING instance type was tried and reverted (it
+  did not fix the target and is unverifiable without it). This is what
+  `inlines1` — and therefore `readMarkdown` — is waiting on.
+- `GND5.hs` passes, so the lambda itself is right: a handwritten bind chain and
+  `liftA2 (++)` both print `ab`. `GND3` now reaches a segfault rather than the
+  `<>` stub, so the method dispatches and something downstream of it does not.
+- `POINTFREE_CON.hs`: FIXED — a point-free method of a BUILTIN class looked
+  nullary, because nothing declares a builtin class's method arities, so
+  `pure = Outer "o"` stayed a partial application of the constructor (which
+  codegen resolves by name). The arities are stated now.
+- The `<>` BUILTIN on two Strings with no Core type prepends a NUL (`\0ab`),
+  which is how the `liftA2 (<>)` path reads at the top level.
+- An explicitly imported Prelude name (`import Control.Applicative (liftA2)`)
+  gets a def with NO scheme, so typeck cannot type its operands; the same name
+  from the Prelude works.
+- `mapM char "ab"` at ParsecT crashes in `bhc_force` on `0x1` (pre-existing —
+  identical with the dispatch fixes off), and `trace`'s argument is evaluated
+  eagerly where GHC never evaluates it at all.
+- `BHC_DBG_NULLDICT=1` now names every dictionary that resolved to nothing.
+  That placeholder is a zero literal, which reaches the runtime as the tagged
+  small int `0x1` — the signature of most crashes in this campaign.
+
+## 0-old. STATE AS OF 2026-09-19
+
+A session of dictionary-correctness work landed on
+`integration/pandoc-html-writer` (see the two commits whose subjects start
+`fix(lower): an import whose bare name shadows a codegen builtin` and
+`feat(hir-to-core): dictionary-pass a class method's own constraints`). Gates at
+those commits: `cargo test --all-targets --no-fail-fast` **2829/0**, clippy
+clean on every touched crate, pandoc sweep **221/221 on four from-scratch DBs**,
+parser ladder **30/31** (was 24/31 that morning, 31/31 on 2026-09-02 before the
+monomorphizer regressed it).
+
+What it fixed, in order of how much pandoc it unblocks:
+
+1. **`try` was `Control.Exception.try`.** An unqualified import never shadowed a
+   same-named codegen builtin, so every backtracking parser in pandoc ran its
+   argument as an IO action and `readMarkdown` returned a garbage `Left` for any
+   input. `register_imported_names` now lets a genuine import win over a
+   non-Prelude builtin.
+2. **A class method's OWN constraints are dictionary-passed** (`query :: Monoid c
+   => …`, `getOption :: Stream s m t => …`): interface → registry → instance
+   methods and class defaults take the dict lambdas → every use applies them.
+3. **Semigroup/Monoid are dict-passed constraints** on ordinary bindings, plus
+   Monoid class defaults, `foldMap` over a non-list Monoid, applied `mconcat`
+   dispatch, and value-class in-scope dictionary matching.
+4. **Several dictionaries of one class in scope** no longer collapse to the last
+   one (pandoc's `queryBlock` has nine `Walkable a X`).
+5. **The monomorphizer** no longer rewrites a dictionary selection on a Monad
+   dictionary the body CONSTRUCTED for another monad (it was routing the
+   reader's `ParsecT` binds through the writer's PandocIO stack);
+   **`>>=`'s continuation** now gets an expected type, so a `do` block's tail
+   keeps its stream type; **`T(..)` import wildcards** no longer rebind bare
+   names like `zipWith` to an unimplemented module export.
+
+Full write-up: memory `project_method_level_dicts.md`.
+
+### ⚠️ The pandoc harness is GONE
+
+`~/Development/pandoc-harness`, `pandoc-3.6.4`, `pandoc-types-1.23.1.2` and
+`pandoc-vendor` were deleted on 2026-10-08, so the sweep, ladder, battery and
+every probe binary must be rebuilt before any of the pandoc-facing tasks below
+can be measured again. Rebuild notes (all learned 2026-09-19) are in
+`project_pandoc_link.md`: compile the vendored OVERRIDE modules last (a DB
+module overrides bhc's stub list for its whole export surface, and the vendored
+`Data.Semigroup` lacks `sconcat`/`stimes` that parsec's `Prim` imports); vendored
+`Paths_pandoc` must export `getDataFileName`; and localize `_show_desc_*` once
+per DB build rather than per probe link — that alone takes a probe link from
+~4 minutes to 3 seconds (`flink.sh`), which is what makes bisecting
+`parseMarkdown` practical (~15 s per iteration).
+
+## 0a. NEXT pandoc blocker: typeck loses a local multi-equation function's argument type
+
+`makeSectionsWithOffsets` does `getMin $ query getLevel bs` where `getLevel` is a
+multi-equation `where`-binding. typeck records that occurrence as
+`t -> Min t'` — the constructor patterns (`getLevel (Header l _) = …`) do not pin
+the argument — so `Walkable ?a [Block]` and `Monoid (Min ?t)` both resolve to
+null placeholders and the HTML writer crashes inside `Walk`'s `query`.
+
+Established by experiment: a **single** equation written with an explicit `case`
+infers correctly; the same function at **top level** infers correctly; an
+explicit **signature** on the where-binding does NOT help. So the defect is in
+how the occurrence type is recorded for a local multi-equation binding, not in
+generalization. bhc-lower desugars those to `\_arg0 -> case _arg0 of {…}` with
+the scrutinee referring to the lambda's own DefId, so start by dumping what
+typeck infers for that lambda (`BHC_DBG_OCC=<name>` prints a Var occurrence's
+recorded, raw and scheme types).
+
+**Done when:** a 12-line repro (local `getLevel` over an imported ADT, used as
+`query getLevel bs`) resolves both dictionaries, and `makeSectionsWithOffsets`
+returns sections instead of crashing.
+
+## 0b. A named parser CAF at concrete `Identity` returns a wrong value
+
+`named :: Parser Int; named = return 7` makes `parse named "" "ab"` give **1**,
+while the same parser written polymorphically (`Monad m =>`, run with
+`runParserT` at IO) and the inline `parse (return 7)` both give 7. Pre-existing;
+affects any `Parsec`-at-Identity code path (`runPure`, `Text.Pandoc.Format`).
+
 ## 1. `parserBind` continuation captures a `Text` in the `k` slot — the pandoc blocker
 
 **Detailed home:** `spec/BHC-BRIEF-0003-lazy-arguments.md` (§ "readMarkdown's crash,

@@ -70,6 +70,10 @@ impl DefKind {
     }
 }
 
+/// Every builtin definition has a DefId below this; the first user or
+/// imported definition is allocated at it (see `define_builtins`).
+pub const BUILTIN_DEF_LIMIT: usize = 12323;
+
 /// Information about a definition.
 #[derive(Clone, Debug)]
 pub struct DefInfo {
@@ -157,6 +161,10 @@ impl Scope {
 /// Map from `DefId` to definition information.
 pub type DefMap = IndexMap<DefId, DefInfo>;
 
+/// A functional dependency as (determining, determined) class parameter
+/// indices: `m -> s` of `class MonadState s m` is `([1], [0])`.
+pub type ClassFunDep = (Vec<usize>, Vec<usize>);
+
 /// An imported class as threaded from module interfaces:
 /// (class name, method names, superclass names, defaulted-method names,
 /// per-method declared-type arrow counts, class type-parameter count).
@@ -177,6 +185,10 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 /// monad defined as one has its transformer layer in whatever it wraps.
 pub type InterfaceConstructorEntry = (String, u32, u32, Option<String>, bool, Vec<bhc_types::Ty>);
 
+/// An imported class as threaded from module interfaces: (name, method names,
+/// superclass names, defaulted method names, method arities, parameter count,
+/// superclass parameter indices, method-level schemes). See
+/// `LowerContext::interface_classes`.
 pub type InterfaceClassEntry = (
     Symbol,
     Vec<Symbol>,
@@ -185,6 +197,9 @@ pub type InterfaceClassEntry = (
     Vec<(Symbol, usize)>,
     usize,
     Vec<Vec<usize>>,
+    // Methods with constraints of their own (`query :: Monoid c => …`): the
+    // declared scheme, its constraints being exactly the method-level ones.
+    Vec<(Symbol, bhc_types::Scheme)>,
 );
 
 /// An imported instance as threaded from module interfaces:
@@ -243,6 +258,10 @@ pub struct LowerContext {
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
     pub interface_constructors: Vec<InterfaceConstructorEntry>,
+    /// The `DefId` each `interface_constructors` entry was bound under, index
+    /// for index. A qualified-only import (`A.Done`) binds no bare name, so the
+    /// constructor cannot be found again by name alone.
+    pub interface_constructor_ids: Vec<DefId>,
     /// Instances loaded from `.bhi` interfaces: (class name, instance types,
     /// the instance's own method names). hir-to-core registers these so
     /// class-method calls on concrete types specialize to
@@ -265,6 +284,15 @@ pub struct LowerContext {
     /// that omit the method. The fifth carries each method's declared-type
     /// arrow count, used to eta-expand point-free instance-method bindings.
     pub interface_classes: Vec<InterfaceClassEntry>,
+    /// Functional dependencies of the classes in `interface_classes`, as
+    /// (determining, determined) parameter indices, so the type checker can
+    /// improve constraints on imported classes (`MonadState ?s (StateT Int
+    /// IO)` gives `?s := Int`).
+    pub interface_class_fundeps: FxHashMap<Symbol, Vec<ClassFunDep>>,
+    /// The declared type of each field of a parameterless record loaded from
+    /// an interface, with the record's type name — consulted by the type
+    /// checker for record updates only (closure IO model).
+    pub interface_record_field_types: FxHashMap<Symbol, (Symbol, bhc_types::Ty)>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
@@ -306,8 +334,11 @@ impl LowerContext {
             interface_value_modules: FxHashMap::default(),
             qualified_leak_names: FxHashSet::default(),
             interface_constructors: Vec::new(),
+            interface_constructor_ids: Vec::new(),
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),
+            interface_class_fundeps: FxHashMap::default(),
+            interface_record_field_types: FxHashMap::default(),
             errors: Vec::new(),
             warnings: Vec::new(),
             import_aliases: FxHashMap::default(),
@@ -530,6 +561,8 @@ impl LowerContext {
             // Exception handling
             "catch",
             "try",
+            "tryIOError",
+            "catchIOError",
             "throw",
             "throwIO",
             "bracket",
@@ -865,6 +898,7 @@ impl LowerContext {
             "canonicalizePath",
             // System.FilePath
             "splitExtension",
+            "splitDirectories",
             // System.Process
             "createProcess_",
             "waitForProcess",
@@ -1042,7 +1076,7 @@ impl LowerContext {
             "Data.IntSet.foldr",
             "Data.IntSet.toList",
             "Data.IntSet.fromList",
-            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12322 below
             // Container PrimOps: Data.Text (packed UTF-8)
             "Data.Text.empty",
             "Data.Text.singleton",
@@ -1082,6 +1116,19 @@ impl LowerContext {
             "Data.Text.lines",
             "Data.Text.splitOn",
             "Data.Text.replace",
+            // Predicate/scan/build functions whose codegen (bhc_text_*) and RTS
+            // ids are already wired; only the builtin registration was missing,
+            // so an aliased use (`T.any`, `T.takeWhile`, …) fell through to a
+            // stub. Needed by pandoc's HTML writer.
+            "Data.Text.any",
+            "Data.Text.all",
+            "Data.Text.takeWhile",
+            "Data.Text.uncons",
+            "Data.Text.span",
+            "Data.Text.break",
+            "Data.Text.unwords",
+            "Data.Text.unlines",
+            "Data.Text.stripSuffix",
             // Data.Text.Encoding
             "Data.Text.Encoding.encodeUtf8",
             "Data.Text.Encoding.decodeUtf8",
@@ -1162,6 +1209,9 @@ impl LowerContext {
             "hGetChar",
             "hPutChar",
             "hSetBuffering",
+            "hSetNewlineMode",
+            "hSetEncoding",
+            "hSetBinaryMode",
             "hGetBuffering",
             "hSeek",
             "hTell",
@@ -1211,6 +1261,9 @@ impl LowerContext {
         ];
 
         for name in builtin_funcs {
+            if bhc_types::is_library_transformer_name(name) {
+                continue;
+            }
             let sym = Symbol::intern(name);
             let def_id = self.fresh_def_id();
             self.define(def_id, sym, DefKind::Value, Span::default());
@@ -1261,6 +1314,11 @@ impl LowerContext {
         ];
 
         for &(id, name) in transformer_builtins {
+            // Under the closure IO model these come from the transformers
+            // library (spec/BHC-BRIEF-0005).
+            if bhc_types::io_closure_mode() {
+                break;
+            }
             let sym = Symbol::intern(name);
             let def_id = DefId::new(id);
             self.define(def_id, sym, DefKind::Value, Span::default());
@@ -1556,6 +1614,17 @@ impl LowerContext {
             // Data.Text.Encoding
             (11238, "Data.Text.Encoding.encodeUtf8"),
             (11239, "Data.Text.Encoding.decodeUtf8"),
+            // Predicate/scan/build primops (codegen + RTS already wired; see the
+            // name list above). Free DefId block 11240-11249.
+            (11240, "Data.Text.any"),
+            (11241, "Data.Text.all"),
+            (11242, "Data.Text.takeWhile"),
+            (11243, "Data.Text.uncons"),
+            (11244, "Data.Text.span"),
+            (11245, "Data.Text.break"),
+            (11246, "Data.Text.unwords"),
+            (11247, "Data.Text.unlines"),
+            (11248, "Data.Text.stripSuffix"),
         ];
 
         for &(id, name) in e20_text_builtins {
@@ -1896,7 +1965,7 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
-        // Data.Sequence at fixed DefIds 12300-12320
+        // Data.Sequence at fixed DefIds 12300-12322
         let seq_fns: &[(usize, &str)] = &[
             (12300, "Data.Sequence.empty"),
             (12301, "Data.Sequence.singleton"),
@@ -1919,6 +1988,8 @@ impl LowerContext {
             (12318, "Data.Sequence.viewl"),
             (12319, "Data.Sequence.viewr"),
             (12320, "Data.Sequence.filter"),
+            (12321, "Data.Sequence.dropWhileL"),
+            (12322, "Data.Sequence.dropWhileR"),
         ];
         for &(id, name) in seq_fns {
             let sym = Symbol::intern(name);
@@ -1928,8 +1999,8 @@ impl LowerContext {
         }
 
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 12321 {
-            self.next_def_id = 12321;
+        if self.next_def_id <= BUILTIN_DEF_LIMIT as u32 {
+            self.next_def_id = BUILTIN_DEF_LIMIT as u32;
         }
     }
 
@@ -2748,6 +2819,22 @@ impl LowerContext {
     #[must_use]
     pub fn all_class_param_counts(&self) -> &FxHashMap<Symbol, usize> {
         &self.class_param_counts
+    }
+
+    /// The method names of every class loaded from an interface, keyed by
+    /// class name — what interface generation needs to record a newtype's
+    /// derived instance of an imported class.
+    #[must_use]
+    pub fn interface_class_method_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+        self.interface_classes
+            .iter()
+            .map(|c| {
+                (
+                    c.0.as_str().to_string(),
+                    c.1.iter().map(|m| m.as_str().to_string()).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Register a pattern synonym definition.

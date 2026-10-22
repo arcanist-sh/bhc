@@ -24,6 +24,7 @@ pub fn generate_interface(
     ast: &AstModule,
     typed: &bhc_typeck::TypedModule,
     imported_class_params: &HashMap<String, usize>,
+    imported_class_methods: &HashMap<String, Vec<String>>,
 ) -> ModuleInterface {
     let mut iface = ModuleInterface::new(module_name);
 
@@ -127,9 +128,15 @@ pub fn generate_interface(
                 // emits the impls as external `$instance_{method}_{Name}`
                 // symbols (matching the consumer's reconstruction), harvested as
                 // interface instance methods. Only these classes take part in
-                // transformer-newtype deriving, and only with a single type
-                // parameter (the deriver's own precondition).
-                if nt.params.len() == 1 {
+                // transformer-newtype deriving. A newtype may carry parameters
+                // BEFORE the one the class abstracts over (`Future s a` wraps
+                // `Reader s a`), and the instance head is then the newtype
+                // applied to the rest — pandoc's `Future` was invisible to
+                // importing modules, so `liftA2 (<>)` in its `Semigroup`
+                // instance had no `>>=` to build from.
+                if !nt.params.is_empty() && bhc_types::io_closure_mode() {
+                    record_newtype_derived_instances(&mut iface, nt, ast, imported_class_methods);
+                } else if !nt.params.is_empty() {
                     for clause in &nt.deriving {
                         let methods: Vec<String> = match clause.class.name.as_str() {
                             "Functor" => vec!["fmap".to_string()],
@@ -141,9 +148,18 @@ pub fn generate_interface(
                             }
                             _ => continue,
                         };
+                        let head = nt.params[..nt.params.len() - 1].iter().fold(
+                            Type::Con(nt.name.name.as_str().to_string()),
+                            |acc, p| {
+                                Type::App(
+                                    Box::new(acc),
+                                    Box::new(Type::Var(p.name.name.as_str().to_string())),
+                                )
+                            },
+                        );
                         iface.add_instance(ExportedInstance {
                             class: clause.class.name.as_str().to_string(),
-                            types: vec![Type::Con(nt.name.name.as_str().to_string())],
+                            types: vec![head],
                             constraints: Vec::new(),
                             methods,
                         });
@@ -198,27 +214,36 @@ pub fn generate_interface(
                             let default_names = &default_names;
                             let class_params = &params;
                             let class_name = cls.name.name.as_str();
-                            Some(sig.names.iter().map(move |name| ClassMethod {
-                                name: name.name.as_str().to_string(),
-                                signature: TypeSignature {
-                                    type_vars: Vec::new(),
-                                    // The method's implicit class constraint
-                                    // (`HasReaderOptions st => ...`), sharing
-                                    // the class param var with the sig type.
-                                    // Consumers use it to extract the class
-                                    // param's instantiation from a recorded
-                                    // occurrence type when the param appears
-                                    // in neither argument nor result head.
-                                    constraints: vec![Constraint {
-                                        class: class_name.to_string(),
-                                        args: class_params
-                                            .iter()
-                                            .map(|p| Type::Var(p.clone()))
-                                            .collect(),
-                                    }],
-                                    ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
-                                },
-                                has_default: default_names.contains(name.name.as_str()),
+                            Some(sig.names.iter().map(move |name| {
+                                ClassMethod {
+                                    name: name.name.as_str().to_string(),
+                                    signature: TypeSignature {
+                                        type_vars: Vec::new(),
+                                        // The method's implicit class constraint
+                                        // (`HasReaderOptions st => ...`), sharing
+                                        // the class param var with the sig type.
+                                        // Consumers use it to extract the class
+                                        // param's instantiation from a recorded
+                                        // occurrence type when the param appears
+                                        // in neither argument nor result head.
+                                        //
+                                        // Followed by the method's OWN context
+                                        // (`query :: Monoid c => …`): an
+                                        // importer passes those constraints'
+                                        // dictionaries at every use.
+                                        constraints: std::iter::once(Constraint {
+                                            class: class_name.to_string(),
+                                            args: class_params
+                                                .iter()
+                                                .map(|p| Type::Var(p.clone()))
+                                                .collect(),
+                                        })
+                                        .chain(method_own_context(&sig.ty))
+                                        .collect(),
+                                        ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
+                                    },
+                                    has_default: default_names.contains(name.name.as_str()),
+                                }
                             }))
                         } else {
                             None
@@ -226,11 +251,25 @@ pub fn generate_interface(
                     })
                     .flatten()
                     .collect();
+                let param_index = |ident: &bhc_intern::Ident| {
+                    params.iter().position(|p| p == ident.name.as_str())
+                };
+                let fundeps = cls
+                    .fundeps
+                    .iter()
+                    .map(|fd| {
+                        (
+                            fd.from.iter().filter_map(param_index).collect(),
+                            fd.to.iter().filter_map(param_index).collect(),
+                        )
+                    })
+                    .collect();
                 iface.add_class(ExportedClass {
                     name: cls.name.name.as_str().to_string(),
                     params,
                     superclasses: supers,
                     methods,
+                    fundeps,
                 });
             }
             bhc_ast::Decl::InstanceDecl(inst) => {
@@ -259,6 +298,32 @@ pub fn generate_interface(
                     class: inst.class.name.as_str().to_string(),
                     types,
                     constraints,
+                    methods,
+                });
+            }
+            // `deriving instance Monoid Blocks`: HIR->Core emits the methods
+            // as `$instance_{method}_{Type}` (see
+            // `derive_value_class_via_synonym`), so importers must see the
+            // instance or they fall onto another `Many` instance.
+            bhc_ast::Decl::StandaloneDeriving(sd) => {
+                // Only a synonym declared here: that is the case HIR->Core
+                // derives (an unsupported direct newtype target emits nothing,
+                // and advertising it would leave importers unlinked).
+                let is_local_synonym = matches!(&sd.ty, bhc_ast::Type::Con(c, _)
+                    if ast.decls.iter().any(|d| matches!(d,
+                        bhc_ast::Decl::TypeAlias(ta) if ta.name.name == c.name)));
+                if !is_local_synonym {
+                    continue;
+                }
+                let methods: Vec<String> = match sd.class.name.as_str() {
+                    "Semigroup" => vec!["<>".to_string()],
+                    "Monoid" => vec!["mempty".to_string(), "mappend".to_string()],
+                    _ => continue,
+                };
+                iface.add_instance(ExportedInstance {
+                    class: sd.class.name.as_str().to_string(),
+                    types: vec![convert_ast_type(&sd.ty)],
+                    constraints: Vec::new(),
                     methods,
                 });
             }
@@ -673,6 +738,99 @@ fn flatten_instance_head(ty: &bhc_ast::Type, param_count: usize) -> Vec<&bhc_ast
     }
 }
 
+/// Under the closure IO model (spec/BHC-BRIEF-0005), every class a newtype
+/// derives by newtype deriving becomes an instance an importer can see:
+/// `deriving (MonadIO, MonadError String)` on pandoc's `PandocIO` gives
+/// `MonadIO PandocIO` and `MonadError [Char] PandocIO`. HIR->Core emits one
+/// `$instance_{method}_{head}` per class method (its
+/// `derive_newtype_via_wrapped`), so the method list is the class's own: the
+/// builtin monad family's as hir-to-core registers it, a local class's from
+/// this module, an imported one's from its interface. A `String` argument is
+/// written as `[Char]`, the spelling the instance is keyed at.
+fn record_newtype_derived_instances(
+    iface: &mut ModuleInterface,
+    nt: &bhc_ast::NewtypeDecl,
+    ast: &AstModule,
+    imported_class_methods: &HashMap<String, Vec<String>>,
+) {
+    const STOCK: &[&str] = &[
+        "Eq",
+        "Ord",
+        "Show",
+        "Read",
+        "Enum",
+        "Bounded",
+        "Ix",
+        "Generic",
+        "NFData",
+        "Foldable",
+        "Traversable",
+        "Typeable",
+        "Data",
+    ];
+    let local_methods = |class: &str| -> Option<Vec<String>> {
+        ast.decls.iter().find_map(|d| match d {
+            bhc_ast::Decl::ClassDecl(c) if c.name.name.as_str() == class => Some(
+                c.methods
+                    .iter()
+                    .filter_map(|m| match m {
+                        bhc_ast::Decl::TypeSig(sig) => Some(
+                            sig.names
+                                .iter()
+                                .map(|n| n.name.as_str().to_string())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect(),
+            ),
+            _ => None,
+        })
+    };
+    let head = nt.params[..nt.params.len() - 1].iter().fold(
+        Type::Con(nt.name.name.as_str().to_string()),
+        |acc, p| {
+            Type::App(
+                Box::new(acc),
+                Box::new(Type::Var(p.name.name.as_str().to_string())),
+            )
+        },
+    );
+    for clause in &nt.deriving {
+        let class = clause.class.name.as_str();
+        if STOCK.contains(&class) {
+            continue;
+        }
+        let methods: Vec<String> = match class {
+            "Functor" => vec!["fmap".into(), "<$".into()],
+            "Applicative" => vec!["pure".into(), "<*>".into(), "*>".into(), "<*".into()],
+            "Monad" => vec![">>=".into(), ">>".into()],
+            _ => {
+                match local_methods(class).or_else(|| imported_class_methods.get(class).cloned()) {
+                    Some(m) => m,
+                    None => continue,
+                }
+            }
+        };
+        let mut types: Vec<Type> = clause
+            .args
+            .iter()
+            .map(|t| match convert_ast_type(t) {
+                Type::Con(c) if c == "String" => Type::List(Box::new(Type::Con("Char".into()))),
+                other => other,
+            })
+            .collect();
+        types.push(head.clone());
+        iface.add_instance(ExportedInstance {
+            class: class.to_string(),
+            types,
+            constraints: Vec::new(),
+            methods,
+        });
+    }
+}
+
 fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
     match ty {
         bhc_ast::Type::Var(tv, _) => Type::Var(tv.name.name.as_str().to_string()),
@@ -699,6 +857,22 @@ fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
         bhc_ast::Type::PromotedList(_, _) | bhc_ast::Type::NatLit(_, _) => {
             Type::Con("Unknown".to_string())
         }
+    }
+}
+
+/// The context written on a class method's own signature (`Monoid c` in
+/// `query :: Monoid c => (a -> c) -> b -> c`), under any `forall`/parens.
+fn method_own_context(ty: &bhc_ast::Type) -> Vec<Constraint> {
+    match ty {
+        bhc_ast::Type::Forall(_, inner, _) | bhc_ast::Type::Paren(inner, _) => {
+            method_own_context(inner)
+        }
+        bhc_ast::Type::Constrained(ctx, inner, _) => ctx
+            .iter()
+            .map(convert_ast_constraint)
+            .chain(method_own_context(inner))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

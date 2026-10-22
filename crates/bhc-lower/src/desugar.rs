@@ -335,6 +335,22 @@ fn desugar_let_decls(
                     rhs,
                     span: fun_bind.span,
                 });
+            } else if fun_bind.clauses.len() > 1 && !fun_bind.clauses[0].pats.is_empty() {
+                // Several clauses: `let f 0 = a; f n = b` is `f = \_arg0 -> case
+                // _arg0 of { 0 -> a; n -> b }` (a tuple of the arguments for
+                // more than one). Only the first clause was lowered before, so
+                // every later one silently vanished.
+                let def_id = ctx
+                    .lookup_value(fun_bind.name.name)
+                    .expect("do-let binding should be bound");
+                let pat = hir::Pat::Var(fun_bind.name.name, def_id, fun_bind.span);
+                let lam = desugar_multi_clause_fun(ctx, fun_bind, span, lower_expr, lower_pat);
+                bindings.push(hir::Binding {
+                    pat,
+                    sig: None,
+                    rhs: lam,
+                    span: fun_bind.span,
+                });
             } else {
                 // Function binding with parameters: let f x y = expr
                 let def_id = ctx
@@ -395,6 +411,110 @@ fn desugar_let_decls(
     } else {
         hir::Expr::Let(bindings, Box::new(body), span)
     }
+}
+
+/// A multi-clause local function as a lambda over fresh parameters whose body
+/// cases on them (on their tuple, for several). A clause's boolean guards
+/// stay on its alternative, so when they all fail the match resumes at the
+/// next clause.
+fn desugar_multi_clause_fun(
+    ctx: &mut LowerContext,
+    fun_bind: &ast::FunBind,
+    span: Span,
+    lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+) -> hir::Expr {
+    let arity = fun_bind.clauses[0].pats.len();
+    let fspan = fun_bind.span;
+    let mut params = Vec::with_capacity(arity);
+    for i in 0..arity {
+        let name = Symbol::intern(&format!("_arg{i}"));
+        let id = ctx.fresh_def_id();
+        ctx.define(id, name, DefKind::PatVar, fspan);
+        ctx.bind_value(name, id);
+        params.push((name, id));
+    }
+    let mut alts = Vec::with_capacity(fun_bind.clauses.len());
+    for clause in &fun_bind.clauses {
+        ctx.enter_scope();
+        for p in &clause.pats {
+            bind_pattern(ctx, p);
+        }
+        let pat = if clause.pats.len() == 1 {
+            lower_pat(ctx, &clause.pats[0])
+        } else {
+            let tuple_id = crate::lower::ensure_tuple_constructor(ctx, clause.pats.len(), fspan);
+            let tuple_ref = ctx.def_ref(tuple_id, fspan);
+            hir::Pat::Con(
+                tuple_ref,
+                clause.pats.iter().map(|p| lower_pat(ctx, p)).collect(),
+                fspan,
+            )
+        };
+        let (rhs, guards) = if !clause.wheres.is_empty() {
+            let body = desugar_body_with_wheres(
+                ctx,
+                &clause.rhs,
+                &clause.wheres,
+                fspan,
+                lower_expr,
+                lower_pat,
+            );
+            (body, Vec::new())
+        } else {
+            match &clause.rhs {
+                ast::Rhs::Simple(e, _) => (lower_expr(ctx, e), Vec::new()),
+                ast::Rhs::Guarded(grhss, _)
+                    if grhss.len() == 1
+                        && grhss[0]
+                            .guards
+                            .iter()
+                            .all(|g| matches!(g, ast::Guard::Expr(_, _))) =>
+                {
+                    let guards = grhss[0]
+                        .guards
+                        .iter()
+                        .filter_map(|g| match g {
+                            ast::Guard::Expr(e, sp) => Some(hir::Guard {
+                                cond: lower_expr(ctx, e),
+                                span: *sp,
+                            }),
+                            ast::Guard::Pattern(..) => None,
+                        })
+                        .collect();
+                    (lower_expr(ctx, &grhss[0].body), guards)
+                }
+                ast::Rhs::Guarded(grhss, _) => (
+                    desugar_guarded_rhs(ctx, grhss, span, lower_expr, lower_pat),
+                    Vec::new(),
+                ),
+            }
+        };
+        ctx.exit_scope();
+        alts.push(hir::CaseAlt {
+            pat,
+            guards,
+            rhs,
+            span: clause.span,
+        });
+    }
+    let param_ref = |id: hir::DefId| {
+        hir::Expr::Var(hir::DefRef {
+            def_id: id,
+            span: fspan,
+        })
+    };
+    let scrutinee = if params.len() == 1 {
+        param_ref(params[0].1)
+    } else {
+        hir::Expr::Tuple(params.iter().map(|(_, id)| param_ref(*id)).collect(), fspan)
+    };
+    let param_pats = params
+        .iter()
+        .map(|(name, id)| hir::Pat::Var(*name, *id, fspan))
+        .collect();
+    let case_expr = hir::Expr::Case(Box::new(scrutinee), alts, fspan);
+    hir::Expr::Lam(param_pats, Box::new(case_expr), fspan)
 }
 
 /// Desugar list comprehensions.
@@ -539,10 +659,24 @@ pub fn desugar_guarded_rhs(
     lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
     lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
 ) -> hir::Expr {
-    guarded_rhss.iter().rev().fold(
-        // Default: error "Non-exhaustive guards"
-        make_pattern_match_error(ctx, span),
-        |else_branch, grhs| {
+    let fallback = make_pattern_match_error(ctx, span);
+    desugar_guarded_rhs_or(ctx, guarded_rhss, fallback, span, lower_expr, lower_pat)
+}
+
+/// [`desugar_guarded_rhs`] with an explicit result for when every guard
+/// fails — the next `case` alternative, rather than a pattern-match error.
+pub fn desugar_guarded_rhs_or(
+    ctx: &mut LowerContext,
+    guarded_rhss: &[ast::GuardedRhs],
+    fallback: hir::Expr,
+    span: Span,
+    lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+) -> hir::Expr {
+    guarded_rhss
+        .iter()
+        .rev()
+        .fold(fallback, |else_branch, grhs| {
             // Pass the AST body to desugar_guards - it will be lowered inside
             // the pattern guard scopes so that pattern variables are visible.
             desugar_guards_with_body(
@@ -554,8 +688,7 @@ pub fn desugar_guarded_rhs(
                 lower_expr,
                 lower_pat,
             )
-        },
-    )
+        })
 }
 
 /// Desugar a sequence of guards with an AST body, properly scoping pattern variables.

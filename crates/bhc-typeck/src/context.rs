@@ -103,6 +103,10 @@ pub struct TyCtxt {
     /// Type schemes for definitions (`DefId` -> Scheme).
     pub(crate) def_schemes: FxHashMap<DefId, Scheme>,
 
+    /// The builtin `$`, so a local binding's uses can tell `f $ x` (an
+    /// application of `f`) from `f` passed as a value.
+    pub(crate) dollar_def: Option<DefId>,
+
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
     /// are universally quantified, not unification variables).
@@ -115,6 +119,12 @@ pub struct TyCtxt {
     /// Collected type class constraints during inference.
     /// These are solved after inference completes or defaulted if ambiguous.
     pub(crate) constraints: Vec<Constraint>,
+
+    /// Arguments of constraints of dictionary-passed classes that are not
+    /// solved by the checker (imported classes): recorded at instantiation
+    /// so a local binding mentioning them is not generalized over them
+    /// (closure IO model; see `infer`'s local generalization).
+    pub(crate) dict_constraint_args: Vec<Ty>,
 
     /// Given constraints from existential pattern matches.
     /// When pattern matching on an existential constructor, the existential
@@ -140,10 +150,19 @@ pub struct TyCtxt {
     /// Constraints for these classes flow through dict-passing.
     /// Builtin classes (Show, Eq, Monad, MonadState, etc.) are handled by codegen.
     pub(crate) user_defined_classes: rustc_hash::FxHashSet<Symbol>,
+    /// Declared field types of imported parameterless records (closure IO
+    /// model), used by record updates: field name -> (record type, type).
+    pub(crate) record_field_types: FxHashMap<Symbol, (Symbol, Ty)>,
 
     /// Type names that are GADTs (have constructors with explicit return types).
     /// Used to enable save/restore of substitution in case expressions.
     pub(crate) gadt_types: rustc_hash::FxHashSet<Symbol>,
+
+    /// Interface schemes of imported constrained values, by name. An
+    /// imported class's methods arrive here (with the class constraint),
+    /// which is the only record of their types: imported user classes are
+    /// not registered as `ClassInfo`s.
+    pub(crate) imported_constrained_schemes: FxHashMap<Symbol, Vec<Scheme>>,
 
     /// Maps field name → Vec<(constructor DefId, accessor DefId)>.
     /// Used for FieldAccess to find which constructor a field belongs to
@@ -161,6 +180,28 @@ pub struct TyCtxt {
     pub(crate) type_aliases: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>,
 }
 
+/// A scheme's printed form with its type variables numbered by first
+/// appearance, so two copies differing only in variable ids compare equal.
+fn alpha_key(scheme: &Scheme) -> String {
+    let text = format!("{:?}|{:?}", scheme.constraints, scheme.ty);
+    let mut ids: FxHashMap<String, usize> = FxHashMap::default();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(pos) = rest.find("id: ") {
+        out.push_str(&rest[..pos + 4]);
+        rest = &rest[pos + 4..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let next = ids.len();
+        let n = *ids.entry(rest[..end].to_string()).or_insert(next);
+        out.push_str(&n.to_string());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl TyCtxt {
     /// Create a new type checking context for the given file.
     #[must_use]
@@ -174,6 +215,8 @@ impl TyCtxt {
             file_id,
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
+            dollar_def: None,
+            dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
@@ -183,7 +226,9 @@ impl TyCtxt {
             scoped_type_variables: false,
             scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
+            record_field_types: FxHashMap::default(),
             gadt_types: rustc_hash::FxHashSet::default(),
+            imported_constrained_schemes: FxHashMap::default(),
             field_name_to_con: FxHashMap::default(),
             type_to_data_cons: FxHashMap::default(),
             type_aliases: FxHashMap::default(),
@@ -513,19 +558,39 @@ impl TyCtxt {
             // If so, it's an unsolvable error, not a deferred constraint.
             let has_type_vars = args.iter().any(|t| !t.free_vars().is_empty());
             if !has_type_vars {
-                // Concrete constraint that can't be solved — this is a type error
-                // (e.g., Num Bool from `if 42 then ...`)
-                let args_str = args
-                    .iter()
-                    .map(|t| format!("{:?}", t))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.diag.emit(Diagnostic::error(format!(
-                    "No instance for `{} {}`",
-                    constraint.class.as_str(),
-                    args_str
-                )));
-                continue;
+                // A concrete constraint typeck couldn't solve. Before reporting
+                // it, check whether typeck is even the authority on this class.
+                // Imported classes (e.g. blaze's `ToValue`, loaded from a
+                // `.bhi`) register NO ClassInfo and NO instances in the typeck
+                // env — their dictionaries are resolved later, in hir-to-core.
+                // A variable-typed constraint for such a class is already
+                // deferred (pushed to `unsolved`); a CONCRETE one — as produced
+                // by `toValue @Text` — must be deferred the same way, or typeck
+                // wrongly reports "No instance" for a class it cannot see. Only
+                // classes typeck genuinely tracks (builtin classes, or a class
+                // with a registered ClassInfo/instances) stay hard errors here,
+                // so `Num Bool` and unsatisfiable same-module user-class
+                // constraints are still caught.
+                let class_untracked = !is_typeck_builtin_class(constraint.class.as_str())
+                    && self.env.lookup_class(constraint.class).is_none()
+                    && self.env.lookup_instances(constraint.class).is_none();
+                if !class_untracked {
+                    // Concrete constraint that can't be solved — this is a type
+                    // error (e.g., Num Bool from `if 42 then ...`)
+                    let args_str = args
+                        .iter()
+                        .map(|t| format!("{:?}", t))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.diag.emit(Diagnostic::error(format!(
+                        "No instance for `{} {}`",
+                        constraint.class.as_str(),
+                        args_str
+                    )));
+                    continue;
+                }
+                // Untracked (imported) class: fall through and defer to
+                // hir-to-core, which owns dictionary resolution for it.
             }
 
             // Constraint involves type variables and can't be resolved yet —
@@ -557,6 +622,19 @@ impl TyCtxt {
         if depth > 50 {
             return false;
         }
+        // Instance heads are matched structurally, so a synonym in the
+        // constraint (`MonadError [Char] (ExceptT String IO)`) must be
+        // expanded first or it never meets `MonadError e (ExceptT e m)`.
+        let expanded: Vec<Ty>;
+        let args = if crate::io_closure_mode() {
+            expanded = args
+                .iter()
+                .map(|a| crate::unify::expand_aliases_deep(self, a))
+                .collect();
+            expanded.as_slice()
+        } else {
+            args
+        };
 
         // Handle single-argument constraints with existing resolve_instance
         if args.len() == 1 {
@@ -608,6 +686,10 @@ impl TyCtxt {
                 if let Ty::App(f, _) = &args[0] {
                     if let Ty::Con(tycon) = f.as_ref() {
                         let name = tycon.name.as_str();
+                        if bhc_types::is_library_transformer_name(name) {
+                            // A library instance answers (spec/BHC-BRIEF-0005).
+                            return false;
+                        }
                         if matches!(
                             name,
                             "State"
@@ -630,6 +712,9 @@ impl TyCtxt {
                     if let Ty::App(ff, _) = f.as_ref() {
                         if let Ty::Con(tycon) = ff.as_ref() {
                             let name = tycon.name.as_str();
+                            if bhc_types::is_library_transformer_name(name) {
+                                return false;
+                            }
                             if matches!(
                                 name,
                                 "StateT"
@@ -646,7 +731,7 @@ impl TyCtxt {
                     }
                 }
                 // Also check nested transformer applications that bottom out in IO
-                self.monad_bottoms_out_in_io(&args[0])
+                !crate::io_closure_mode() && self.monad_bottoms_out_in_io(&args[0])
             }
             // Monoid instances
             "Monoid" if args.len() == 1 => {
@@ -727,6 +812,9 @@ impl TyCtxt {
                 | "MonadFail"
         ) {
             if let Some(head) = container_head_name(ty) {
+                if bhc_types::is_library_transformer_name(head) {
+                    return false;
+                }
                 if matches!(
                     head,
                     "[]" | "Maybe"
@@ -741,6 +829,24 @@ impl TyCtxt {
                 ) {
                     return true;
                 }
+            }
+        }
+
+        // `Ratio a` (= `Rational` at `Integer`) is a base numeric type with
+        // the full numeric tower. It surfaced once local signatures reached
+        // typeck: pandoc's `getOffset :: Ratio Integer -> Text` does
+        // `(proportion - 1) * (-100 % 2)` and `round`.
+        if matches!(
+            class_name,
+            "Num" | "Fractional" | "Real" | "RealFrac" | "Eq" | "Ord" | "Show"
+        ) {
+            let is_ratio = match ty {
+                Ty::App(f, _) => matches!(f.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Ratio"),
+                Ty::Con(tc) => tc.name.as_str() == "Rational",
+                _ => false,
+            };
+            if is_ratio {
+                return true;
             }
         }
 
@@ -936,6 +1042,9 @@ impl TyCtxt {
         let mut changed = true;
         let mut iterations = 0;
         const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+                                           // Constraints already improved through an instance (closure model),
+                                           // by class and arguments, so each adds its context only once.
+        let mut improved: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
         while changed && iterations < MAX_ITERATIONS {
             changed = false;
@@ -975,6 +1084,13 @@ impl TyCtxt {
                         continue; // Not all "from" types are ground yet
                     }
 
+                    if crate::io_closure_mode() {
+                        if self.improve_by_instance(constraint, &args, fundep, &mut improved) {
+                            changed = true;
+                        }
+                        continue;
+                    }
+
                     // Find matching instances
                     if let Some(instances) = self.env.lookup_instances(constraint.class) {
                         for inst in instances {
@@ -1007,6 +1123,116 @@ impl TyCtxt {
                 }
             }
         }
+    }
+
+    /// One fundep improvement step through the instance that matches the
+    /// constraint's determining positions, instantiated properly.
+    ///
+    /// The instance head is matched one-way against the ground `from`
+    /// arguments; its remaining variables get fresh unification variables;
+    /// the `to` arguments are unified with the instantiated head; and the
+    /// instance's context constraints of fundep classes are added, so the
+    /// improvement continues through them. `MonadSt ?s (RdT Int (StT Int
+    /// IO))` matches `instance MonadSt s m => MonadSt s (RdT r m)`, adds
+    /// `MonadSt ?s' (StT Int IO)` with `?s ~ ?s'`, and that one pins `Int`.
+    /// The legacy step (closure IO model off) substitutes the instance's own,
+    /// uninstantiated variable and ignores the context.
+    fn improve_by_instance(
+        &mut self,
+        constraint: &Constraint,
+        args: &[Ty],
+        fundep: &crate::env::FunDep,
+        improved: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        fn match_one_way(pat: &Ty, target: &Ty, theta: &mut FxHashMap<u32, Ty>) -> bool {
+            match (pat, target) {
+                (Ty::Var(v), _) => match theta.get(&v.id) {
+                    Some(bound) => bound == target,
+                    None => {
+                        theta.insert(v.id, target.clone());
+                        true
+                    }
+                },
+                (Ty::Con(a), Ty::Con(b)) => a.name == b.name,
+                (Ty::App(f1, a1), Ty::App(f2, a2)) | (Ty::Fun(f1, a1), Ty::Fun(f2, a2)) => {
+                    match_one_way(f1, f2, theta) && match_one_way(a1, a2, theta)
+                }
+                (Ty::List(a), Ty::List(b)) => match_one_way(a, b, theta),
+                (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+                    xs.len() == ys.len()
+                        && xs.iter().zip(ys).all(|(x, y)| match_one_way(x, y, theta))
+                }
+                (Ty::Prim(a), Ty::Prim(b)) => a == b,
+                _ => false,
+            }
+        }
+        let args: Vec<Ty> = args
+            .iter()
+            .map(|a| crate::unify::expand_aliases_deep(self, a))
+            .collect();
+        let args = args.as_slice();
+        let key = format!("{}{:?}", constraint.class.as_str(), args);
+        if improved.contains(&key) {
+            return false;
+        }
+        let Some(instances) = self
+            .env
+            .lookup_instances(constraint.class)
+            .map(<[_]>::to_vec)
+        else {
+            return false;
+        };
+        for inst in &instances {
+            let mut theta: FxHashMap<u32, Ty> = FxHashMap::default();
+            let matches = fundep
+                .from
+                .iter()
+                .all(|&i| match (inst.types.get(i), args.get(i)) {
+                    (Some(pat), Some(arg)) => match_one_way(pat, arg, &mut theta),
+                    _ => false,
+                });
+            if !matches {
+                continue;
+            }
+            improved.insert(key);
+            let mut inst_vars: Vec<TyVar> = inst.types.iter().flat_map(Ty::free_vars).collect();
+            for c in &inst.context {
+                inst_vars.extend(c.args.iter().flat_map(Ty::free_vars));
+            }
+            let mut subst = Subst::new();
+            for v in inst_vars {
+                let t = match theta.get(&v.id) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let fresh = self.fresh_ty();
+                        theta.insert(v.id, fresh.clone());
+                        fresh
+                    }
+                };
+                subst.insert(&v, t);
+            }
+            for &to in &fundep.to {
+                if let (Some(arg), Some(inst_ty)) = (args.get(to), inst.types.get(to)) {
+                    let want = subst.apply(inst_ty);
+                    self.unify(arg, &want, constraint.span);
+                }
+            }
+            for c in &inst.context {
+                let has_fundeps = self
+                    .env
+                    .lookup_class(c.class)
+                    .is_some_and(|ci| !ci.fundeps.is_empty());
+                if has_fundeps {
+                    self.constraints.push(Constraint {
+                        class: c.class,
+                        args: c.args.iter().map(|t| subst.apply(t)).collect(),
+                        span: constraint.span,
+                    });
+                }
+            }
+            return true;
+        }
+        false
     }
 
     /// Check if a type contains any unresolved type variables.
@@ -2193,6 +2419,10 @@ impl TyCtxt {
             }
         }
 
+        if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
+            self.dollar_def = Some(*id);
+        }
+
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {
             // Skip pattern variables (function parameters, let-bound vars) —
@@ -2208,6 +2438,24 @@ impl TyCtxt {
             // same-named Prelude builtin, so it must not get the hardcoded
             // builtin scheme. Its type comes from inference or its signature.
             if local_value_ids.contains(&def_info.id) {
+                continue;
+            }
+            // A value loaded from a module interface carries the scheme its
+            // module inferred; it is not a builtin, whatever its name. A class
+            // method `getModificationTime :: String -> m Int` imported from a
+            // `.bhi` took System.Directory's `FilePath -> IO UTCTime` here,
+            // and every `P.getModificationTime` use was typed at IO.
+            if def_info.type_scheme.is_some()
+                && bhc_index::Idx::index(def_info.id) >= bhc_lower::BUILTIN_DEF_LIMIT
+            {
+                continue;
+            }
+            // Under the closure IO model a transformer name is a library
+            // definition (spec/BHC-BRIEF-0005); its type comes from the
+            // library, never from the curated builtin schemes below.
+            if bhc_types::is_library_transformer_name(
+                def_info.name.as_str().rsplit('.').next().unwrap_or(""),
+            ) {
                 continue;
             }
             let raw_name = def_info.name.as_str();
@@ -2251,7 +2499,15 @@ impl TyCtxt {
                 };
             let scheme = match name {
                 // Arithmetic operators
-                "+" | "-" | "*" | "/" | "div" | "mod" | "^" | "^^" | "**" => num_binop(),
+                // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
+                "^" | "^^" => {
+                    let e = TyVar::new_star(0xFFFF_0001);
+                    Scheme::poly(
+                        vec![a.clone(), e.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(e), Ty::Var(a.clone()))),
+                    )
+                }
+                "+" | "-" | "*" | "/" | "div" | "mod" | "**" => num_binop(),
                 // Comparison operators
                 "==" | "/=" => eq_binop(),
                 "<" | "<=" | ">" | ">=" => cmp_binop(),
@@ -2990,10 +3246,10 @@ impl TyCtxt {
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                 ),
                 // toInteger :: Integral a => a -> Integer
-                "toInteger" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    self.builtins.int_ty.clone(),
-                )),
+                "toInteger" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.builtins.integer_ty.clone()),
+                ),
                 // any :: (a -> Bool) -> [a] -> Bool
                 "any" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
@@ -3384,6 +3640,40 @@ impl TyCtxt {
                         Box::new(self.builtins.string_ty.clone()),
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_string))
+                }
+                // getArgs :: IO [String]. Untyped, it was missing from the
+                // IO-primitive set, and the closure IO model ran its eager
+                // result as an action (a bus error at startup).
+                "getArgs" => Scheme::mono(Ty::App(
+                    Box::new(Ty::Con(self.builtins.io_con.clone())),
+                    Box::new(Ty::List(Box::new(self.builtins.string_ty.clone()))),
+                )),
+                // getProgName, getCurrentDirectory :: IO String
+                "getProgName" | "getCurrentDirectory" => Scheme::mono(Ty::App(
+                    Box::new(Ty::Con(self.builtins.io_con.clone())),
+                    Box::new(self.builtins.string_ty.clone()),
+                )),
+                // hGetChar :: Handle -> IO Char
+                "hGetChar" => {
+                    let io_char = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.char_ty.clone()),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_char))
+                }
+                // Handle configuration: Handle -> setting -> IO (). Codegen
+                // runs them as no-ops; the IO result type is what puts them
+                // in the IO-primitive set, so the closure IO model defers
+                // them instead of running their eager result as an action.
+                "hSetBuffering" | "hSetNewlineMode" | "hSetEncoding" | "hSetBinaryMode" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), io_unit)),
+                    )
                 }
                 // hClose :: Handle -> IO ()
                 // Simplified: a -> IO ()
@@ -7611,6 +7901,24 @@ impl TyCtxt {
             self.env.insert_global(def_info.id, scheme);
         }
 
+        // Builtin values already given a scheme, by name. An unqualified import
+        // of a builtin (`import Control.Monad (unless)`) gets a FRESH DefId of
+        // the same name and kind (codegen recognizes builtins by name), which
+        // no table here knows; given a fresh-variable scheme, `unless c (put
+        // xs)` never tied `put`'s monad to the result and its MonadState
+        // dictionary was left unresolved.
+        //
+        // Only for `when`/`unless`: many builtin schemes are narrower than the
+        // real functions (`sortBy`, `mplus`, …), and taking them for every
+        // re-imported name rejected or mis-dispatched programs that the
+        // permissive placeholder let through.
+        let builtin_by_name: rustc_hash::FxHashMap<Symbol, Scheme> = defs
+            .values()
+            .filter(|d| matches!(d.kind, DefKind::Value))
+            .filter(|d| matches!(d.name.as_str(), "when" | "unless"))
+            .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
+            .collect();
+
         // Second pass: register any remaining definitions (imported items not in builtins)
         // with their interface type schemes (if available) or fresh type variables.
         // We do this in a separate pass to avoid borrow conflicts with the closures above.
@@ -7628,7 +7936,48 @@ impl TyCtxt {
             }
             // Use the type scheme from the interface file if available,
             // otherwise fall back to a fresh type variable
+            // An untyped import of a MonadError method (`import
+            // Control.Monad.Except (catchError)` bound to a stub or a
+            // scheme-less imported value), or of `liftIO`,
+            // takes the class method's scheme. With a fresh variable instead,
+            // `runIO (catchError act h)` never tied `act`'s monad to PandocIO,
+            // so `act`'s binds and `return`s compiled for no monad at all.
+            let monad_error_method = (matches!(def_info.kind, DefKind::StubValue)
+                || (matches!(def_info.kind, DefKind::Value)
+                    && def_info.type_scheme.is_none()
+                    && !local_value_ids.contains(&def_info.id)))
+            .then(|| def_info.name.as_str().rsplit('.').next().unwrap_or(""))
+            .and_then(|base| match base {
+                "throwError" => Some(<DefId as bhc_index::Idx>::new(10071)),
+                "catchError" => Some(<DefId as bhc_index::Idx>::new(10072)),
+                // `import Control.Monad.IO.Class (liftIO)` binds a scheme-less
+                // value; typed fresh, its argument unified with the RESULT
+                // monad, so the IO action inside (`liftIO (return x)`) was
+                // compiled at the caller's transformer stack.
+                "liftIO" => Some(<DefId as bhc_index::Idx>::new(10011)),
+                _ => None,
+            })
+            .and_then(|id| self.env.lookup_global(id).cloned());
+            if let Some(scheme) = monad_error_method {
+                self.env.insert_global(def_info.id, scheme);
+                continue;
+            }
+            let builtin_same_name = (matches!(def_info.kind, DefKind::Value)
+                && def_info.type_scheme.is_none()
+                && !local_value_ids.contains(&def_info.id))
+            .then(|| builtin_by_name.get(&def_info.name).cloned())
+            .flatten();
+            if let Some(scheme) = builtin_same_name {
+                self.env.insert_global(def_info.id, scheme);
+                continue;
+            }
             let scheme = if let Some(ref iface_scheme) = def_info.type_scheme {
+                if !iface_scheme.constraints.is_empty() {
+                    self.imported_constrained_schemes
+                        .entry(def_info.name)
+                        .or_default()
+                        .push(iface_scheme.clone());
+                }
                 iface_scheme.clone()
             } else {
                 let fresh_var = self.fresh_ty_var();
@@ -7852,6 +8201,36 @@ impl TyCtxt {
             self.env
                 .insert_global_by_name(method.name, method_scheme.clone());
 
+            // Bind the method's own DefId in globals to its declared type SHAPE.
+            // Uses of a class method resolve to this DefId, and
+            // `register_lowered_builtins` (run before classes are registered)
+            // seeded it with a `forall v. v` placeholder. Left that way, a use
+            // is typed purely by unification with its arguments, which drops the
+            // method's declared shape — in particular that `(!) :: h -> Attribute
+            // -> h` returns the same `h` it takes. A single application is still
+            // pinned by context, but a nested one (`x ! a ! b`) leaves the
+            // intermediate type unsolved, so Core lowering can't recover the
+            // instance for the outer call. Instantiating the real shape per use
+            // keeps the shared type variable, so the intermediate solves.
+            //
+            // The class CONSTRAINT is cleared from this copy: instance selection
+            // happens in Core lowering by type, and emitting the `C h` constraint
+            // here would route it through the constraint solver (whose handling of
+            // these placeholder-seeded method uses is incomplete) and reject
+            // programs that otherwise check.
+            //
+            // Except, in the closure IO model, for a class with functional
+            // dependencies: without the constraint nothing reaches fundep
+            // improvement, and `getx >>= \_ -> …` at `RdT Int (StT Int IO)`
+            // left `getx`'s state type unsolved, so the lifted instance's
+            // context dictionary could not be built.
+            let keep_for_fundeps = crate::io_closure_mode() && !class.fundeps.is_empty();
+            let mut shape_scheme = method_scheme.clone();
+            if !keep_for_fundeps {
+                shape_scheme.constraints.clear();
+            }
+            self.env.insert_global(method.id, shape_scheme);
+
             // Also store by DefId so hir-to-core can look it up
             self.def_schemes.insert(method.id, method_scheme);
         }
@@ -7896,6 +8275,50 @@ impl TyCtxt {
         for method in &instance.methods {
             if class_known {
                 self.check_value_def(method);
+                self.guide_instance_method_type(instance, method);
+            } else if let Some(shape) = builtin_value_method_shape(instance, method.name)
+                .or_else(|| self.monad_family_method_shape(instance, method.name))
+            {
+                // Semigroup/Monoid are builtin (no ClassDef), but every method
+                // shape is fixed by the instance type, so the body CAN be
+                // checked. Skipping it left nothing inside with a recorded
+                // type: the inner `mempty` of `mempty = Many mempty` (at
+                // `[a]`) had no type to dispatch on and stayed a bare builtin.
+                let mut typed = method.clone();
+                typed.sig = Some(Scheme::mono(shape));
+                self.check_value_def(&typed);
+            } else if let Some(scheme) = self.imported_class_method_scheme(instance, method) {
+                // The class is imported (not a known `ClassInfo`), but its
+                // method's interface scheme is. Record the method's type at
+                // the instance head; the body stays unchecked as below.
+                // A bare fresh variable here left `getCommonState` in
+                // `instance PandocMonad PandocIO` typed `forall v. v`, so its
+                // compiled original could not see the PandocIO stack.
+                self.def_schemes.insert(method.id, scheme.clone());
+                self.env.insert_global(method.id, scheme.clone());
+                // Under the closure IO model the body is checked against that
+                // scheme (spec/BHC-BRIEF-0005): hir-to-core dispatches every
+                // monadic operation inside by its recorded type, and the
+                // transformers library's `lift m = ExceptT (m >>= \a ->
+                // return (Right a))` must `return` in the inner monad.
+                if crate::io_closure_mode() {
+                    let mut typed = method.clone();
+                    typed.sig = Some(scheme);
+                    // Only the recorded types are wanted: a body the checker
+                    // cannot follow (pandoc's roff lexers return through an
+                    // injective associated family) must not fail a module it
+                    // used to leave unchecked. Its errors are dropped.
+                    let earlier = self.diag.take_diagnostics();
+                    self.check_value_def(&typed);
+                    let body_diags = self.diag.take_diagnostics();
+                    for d in earlier.into_iter().chain(
+                        body_diags
+                            .into_iter()
+                            .filter(|d| !matches!(d.severity, bhc_diagnostics::Severity::Error)),
+                    ) {
+                        self.diag.emit(d);
+                    }
+                }
             } else {
                 // Still register the method's scheme so it can be looked up,
                 // but use a fresh type variable to avoid constraining other code.
@@ -7904,6 +8327,154 @@ impl TyCtxt {
                 self.def_schemes.insert(method.id, scheme.clone());
                 self.env.insert_global(method.id, scheme);
             }
+        }
+    }
+
+    /// The type of a `Functor`/`Applicative`/`Monad` method at the instance
+    /// head, with fresh variables for the method's own type parameters, so
+    /// the method body is checked and its expressions get recorded types.
+    ///
+    /// These classes are builtin (no `ClassInfo`), so their instance bodies
+    /// were never checked: nothing inside `instance Monad m => Applicative
+    /// (StT s m)` had a type, and Core lowering resolved the inner `return`
+    /// to the instance being defined. Only in the closure IO model
+    /// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005), until checking these
+    /// bodies is proven on the e2e suite and pandoc.
+    fn monad_family_method_shape(&mut self, instance: &InstanceDef, method: Symbol) -> Option<Ty> {
+        if !crate::io_closure_mode()
+            || !matches!(instance.class.as_str(), "Functor" | "Applicative" | "Monad")
+            || instance.types.len() != 1
+        {
+            return None;
+        }
+        let f = instance.types[0].clone();
+        let at = |x: &Ty| Ty::App(Box::new(f.clone()), Box::new(x.clone()));
+        let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+        let (a, b, c) = (self.fresh_ty(), self.fresh_ty(), self.fresh_ty());
+        let shape = match method.as_str() {
+            "fmap" => fun(fun(a.clone(), b.clone()), fun(at(&a), at(&b))),
+            "<$" => fun(a.clone(), fun(at(&b), at(&a))),
+            "pure" | "return" => fun(a.clone(), at(&a)),
+            "<*>" => fun(at(&fun(a.clone(), b.clone())), fun(at(&a), at(&b))),
+            "*>" | ">>" => fun(at(&a), fun(at(&b), at(&b))),
+            "<*" => fun(at(&a), fun(at(&b), at(&a))),
+            "liftA2" => fun(
+                fun(a.clone(), fun(b.clone(), c.clone())),
+                fun(at(&a), fun(at(&b), at(&c))),
+            ),
+            ">>=" => fun(at(&a), fun(fun(a.clone(), at(&b)), at(&b))),
+            _ => return None,
+        };
+        Some(shape)
+    }
+
+    /// The type of an instance method of an IMPORTED class, at the instance
+    /// head: the method's interface scheme with the class constraint's
+    /// parameters replaced by the instance types and the class constraint
+    /// dropped. `None` unless exactly one imported scheme of that name
+    /// carries the class constraint with variable arguments.
+    fn imported_class_method_scheme(
+        &mut self,
+        instance: &InstanceDef,
+        method: &ValueDef,
+    ) -> Option<Scheme> {
+        let candidates = self.imported_constrained_schemes.get(&method.name)?;
+        let mut found = candidates.iter().filter(|s| {
+            s.constraints.iter().any(|c| {
+                c.class == instance.class
+                    && c.args.len() == instance.types.len()
+                    && c.args.iter().all(|a| matches!(a, Ty::Var(_)))
+            })
+        });
+        let scheme = found.next()?.clone();
+        // The same method can arrive more than once — from its class's module
+        // and from each module re-exporting it (`lift` via
+        // `Control.Monad.Trans`). Only genuinely different schemes are
+        // ambiguous.
+        let key = alpha_key(&scheme);
+        if found.any(|other| alpha_key(other) != key) {
+            return None;
+        }
+        let class_c = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == instance.class)?
+            .clone();
+        let mut subst = Subst::new();
+        for (arg, t) in class_c.args.iter().zip(&instance.types) {
+            if let Ty::Var(v) = arg {
+                subst.insert(v, t.clone());
+            }
+        }
+        let vars: Vec<TyVar> = scheme
+            .vars
+            .iter()
+            .filter(|v| {
+                !class_c
+                    .args
+                    .iter()
+                    .any(|a| matches!(a, Ty::Var(p) if p.id == v.id))
+            })
+            .cloned()
+            .collect();
+        let constraints = scheme
+            .constraints
+            .iter()
+            .filter(|c| c.class != instance.class)
+            .map(|c| Constraint {
+                class: c.class,
+                args: c.args.iter().map(|a| subst.apply(a)).collect(),
+                span: c.span,
+            })
+            .collect();
+        Some(Scheme {
+            vars,
+            constraints,
+            ty: subst.apply(&scheme.ty),
+        })
+    }
+
+    /// Unify an instance method's inferred type with the class method's type
+    /// at the instance head, keeping no errors from it.
+    ///
+    /// Instance method bodies are inferred without an expected type, so
+    /// inside `instance PandocMonad m => PandocMonad (ParsecT s st m)` the
+    /// `do` block of `trace` had a fresh monad variable. Core lowering then
+    /// matched that variable against the constraint dictionary for `m`,
+    /// selected `getsCommonState` and `>>=` from it, and ran a ParsecT action
+    /// through ExceptT-over-StateT's bind. Pinning the type here makes the
+    /// recorded occurrence types say `ParsecT s st m`. Any mismatch is
+    /// dropped: this only refines types, it must not reject a module that
+    /// checked before.
+    fn guide_instance_method_type(&mut self, instance: &InstanceDef, method: &ValueDef) {
+        let Some(class) = self.env.lookup_class(instance.class).cloned() else {
+            return;
+        };
+        let Some(method_scheme) = class.methods.get(&method.name).cloned() else {
+            return;
+        };
+        if class.params.len() != instance.types.len() {
+            return;
+        }
+        let Some(inferred) = self.def_schemes.get(&method.id).map(|s| s.ty.clone()) else {
+            return;
+        };
+        let mut subst = Subst::new();
+        for (p, t) in class.params.iter().zip(&instance.types) {
+            subst.insert(p, t.clone());
+        }
+        for v in &method_scheme.vars {
+            if !class.params.iter().any(|p| p.id == v.id) {
+                let fresh = self.fresh_ty();
+                subst.insert(v, fresh);
+            }
+        }
+        let expected = subst.apply(&method_scheme.ty);
+        let saved = self.diag.take_diagnostics();
+        self.unify(&expected, &inferred, method.span);
+        let _speculative = self.diag.take_diagnostics();
+        for d in saved {
+            self.diag.emit(d);
         }
     }
 
@@ -8336,7 +8907,23 @@ impl TyCtxt {
 
         // Generalize and store the scheme
         let final_ty = self.apply_subst(&inferred_ty);
-        let scheme = if let Some(sig) = &value_def.sig {
+        // A record field accessor generated by lowering has no signature, but
+        // its scheme (`T a -> FieldType`) was registered with the data type.
+        // Re-inference can lose the field type (`rd :: R -> Integer` came out
+        // as `R -> t`), so the registered scheme stands.
+        let accessor_scheme = if value_def.sig.is_none()
+            && self
+                .field_name_to_con
+                .get(&value_def.name)
+                .is_some_and(|fields| fields.iter().any(|(_, acc)| *acc == value_def.id))
+        {
+            self.env.lookup_global(value_def.id).cloned()
+        } else {
+            None
+        };
+        let scheme = if let Some(registered) = accessor_scheme {
+            registered
+        } else if let Some(sig) = &value_def.sig {
             // Has explicit type signature — use it (it already has constraints).
             // Mark as explicit so finalization doesn't substitute away the
             // universally quantified type variables.
@@ -8612,6 +9199,60 @@ impl TyCtxt {
     }
 }
 
+/// Class names for which typeck is the authority on instance resolution,
+/// i.e. the classes handled by [`TyCtxt::is_builtin_instance`] and
+/// [`TyCtxt::is_builtin_instance_multi`]. A concrete, unsolvable constraint for
+/// one of these is a genuine type error (`Num Bool`). Any OTHER class is either
+/// a user class typeck tracks via a registered `ClassInfo`/instances, or an
+/// imported class typeck knows nothing about (whose dictionaries hir-to-core
+/// resolves) — the caller decides which by consulting the env before erroring.
+fn is_typeck_builtin_class(name: &str) -> bool {
+    matches!(
+        name,
+        // Numeric / comparison / show hierarchy (see is_builtin_instance)
+        "Num" | "Eq"
+            | "Ord"
+            | "Show"
+            | "Read"
+            | "Fractional"
+            | "Enum"
+            | "Bounded"
+            | "Integral"
+            | "IsList"
+            // Structural / literal classes
+            | "IsString"
+            | "Semigroup"
+            | "Monoid"
+            | "Hashable"
+            | "Generic"
+            | "NFData"
+            // Functor / monad family (is_builtin_instance + _multi)
+            | "Functor"
+            | "Foldable"
+            | "Traversable"
+            | "Applicative"
+            | "Monad"
+            | "Alternative"
+            | "MonadPlus"
+            | "MonadFail"
+    )
+}
+
+/// The declared type of a builtin `Semigroup`/`Monoid` method at a
+/// single-parameter instance's type, or `None` for any other method or class.
+fn builtin_value_method_shape(instance: &InstanceDef, method: Symbol) -> Option<Ty> {
+    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") || instance.types.len() != 1 {
+        return None;
+    }
+    let t = instance.types[0].clone();
+    let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+    match method.as_str() {
+        "mempty" => Some(t),
+        "<>" | "mappend" => Some(fun(t.clone(), fun(t.clone(), t))),
+        "mconcat" => Some(fun(Ty::List(Box::new(t.clone())), t)),
+        _ => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8646,6 +9287,83 @@ mod tests {
 
     fn con(name: &str, kind: Kind) -> Ty {
         Ty::Con(TyCon::new(Symbol::intern(name), kind))
+    }
+
+    /// An instance of an IMPORTED class (no `ClassInfo`) takes its method's
+    /// type from the method's interface scheme at the instance head — the
+    /// class constraint discharged, other constraints and variables kept.
+    #[test]
+    fn test_imported_class_method_scheme_at_instance_head() {
+        let mut ctx = TyCtxt::new(FileId::new(0));
+        let class = Symbol::intern("PandocMonadT");
+        let m = TyVar::new(9001, Kind::star_to_star());
+        let a = TyVar::new_star(9002);
+        let state = con("CommonStateT", Kind::Star);
+        // getCommonStateT :: forall m. PandocMonadT m => m CommonStateT
+        let get_scheme = Scheme {
+            vars: vec![m.clone()],
+            constraints: vec![Constraint::new(class, Ty::Var(m.clone()), Span::default())],
+            ty: Ty::App(Box::new(Ty::Var(m.clone())), Box::new(state.clone())),
+        };
+        // pokeT :: forall m a. (PandocMonadT m, Show a) => a -> m ()
+        let poke_scheme = Scheme {
+            vars: vec![m.clone(), a.clone()],
+            constraints: vec![
+                Constraint::new(class, Ty::Var(m.clone()), Span::default()),
+                Constraint::new(Symbol::intern("Show"), Ty::Var(a.clone()), Span::default()),
+            ],
+            ty: Ty::fun(
+                Ty::Var(a.clone()),
+                Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Tuple(vec![]))),
+            ),
+        };
+        ctx.imported_constrained_schemes
+            .insert(Symbol::intern("getCommonStateT"), vec![get_scheme]);
+        ctx.imported_constrained_schemes
+            .insert(Symbol::intern("pokeT"), vec![poke_scheme]);
+
+        let pio = con("PandocIOT", Kind::star_to_star());
+        let method = |name: &str| ValueDef {
+            id: <DefId as bhc_index::Idx>::new(1),
+            name: Symbol::intern(name),
+            sig: None,
+            equations: vec![],
+            span: Span::default(),
+        };
+        let instance = InstanceDef {
+            class,
+            types: vec![pio.clone()],
+            constraints: vec![],
+            assoc_type_impls: vec![],
+            methods: vec![],
+            span: Span::default(),
+        };
+
+        let get = ctx
+            .imported_class_method_scheme(&instance, &method("getCommonStateT"))
+            .expect("scheme for getCommonStateT");
+        assert!(get.vars.is_empty());
+        assert!(get.constraints.is_empty());
+        assert_eq!(get.ty, Ty::App(Box::new(pio.clone()), Box::new(state)));
+
+        let poke = ctx
+            .imported_class_method_scheme(&instance, &method("pokeT"))
+            .expect("scheme for pokeT");
+        assert_eq!(poke.vars, vec![a.clone()]);
+        assert_eq!(poke.constraints.len(), 1);
+        assert_eq!(poke.constraints[0].class, Symbol::intern("Show"));
+        assert_eq!(
+            poke.ty,
+            Ty::fun(
+                Ty::Var(a),
+                Ty::App(Box::new(pio), Box::new(Ty::Tuple(vec![])))
+            )
+        );
+
+        // A method no imported scheme constrains by this class: no guess.
+        assert!(ctx
+            .imported_class_method_scheme(&instance, &method("unrelatedT"))
+            .is_none());
     }
 
     #[test]

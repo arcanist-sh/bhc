@@ -4,6 +4,9 @@
 -- Stack: ReaderT String (StateT Int IO) a
 -- Uses: ask (direct), get/put (lifted from StateT)
 
+import Control.Monad.Reader
+import Control.Monad.State
+
 main :: IO ()
 main = do
     (result, finalState) <- runStateT (runReaderT comp "World") 5

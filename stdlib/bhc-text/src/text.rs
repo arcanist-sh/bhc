@@ -977,7 +977,7 @@ pub extern "C" fn bhc_text_split(
         let mut pieces: Vec<&[u8]> = Vec::new();
         let mut start = 0usize;
         for (i, c) in s.char_indices() {
-            if fn_ptr(env_ptr, c as i64) != 0 {
+            if pred_holds(fn_ptr(env_ptr, c as i64)) {
                 pieces.push(&bytes[start..i]);
                 start = i + c.len_utf8();
             }
@@ -1251,6 +1251,20 @@ pub extern "C" fn bhc_text_intersperse(c: i64, text: *const u8) -> *mut u8 {
     }
 }
 
+/// Whether a compiled predicate's result is `True`. A predicate returns either
+/// an immediate Bool (0/1) or a boxed `Bool` constructor whose first word is
+/// its tag; reading every non-zero word as True made `T.any isSpecial "hi"`
+/// hold for pandoc's `strToHtml`, whose `isSpecial` falls back to a boxed
+/// `False`.
+pub(crate) fn pred_holds(v: i64) -> bool {
+    if (0..=1).contains(&v) {
+        return v != 0;
+    }
+    // SAFETY: values above 1 are heap pointers to an evaluated Bool
+    // constructor; its tag (0 = False, 1 = True) is the first word.
+    unsafe { *(v as *const i64) != 0 }
+}
+
 /// `T.any p t`.
 #[no_mangle]
 pub extern "C" fn bhc_text_any(
@@ -1264,7 +1278,7 @@ pub extern "C" fn bhc_text_any(
     unsafe {
         text_as_str(text)
             .chars()
-            .any(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+            .any(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
     }
 }
 
@@ -1281,21 +1295,25 @@ pub extern "C" fn bhc_text_all(
     unsafe {
         text_as_str(text)
             .chars()
-            .all(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+            .all(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
     }
 }
 
+/// Byte index of the first character for which `p` equals `stop_when`
+/// (the text's length if there is none). `span`/`takeWhile`/`dropWhile`
+/// split at the first character NOT satisfying `p` (`stop_when = false`);
+/// they passed `true`, so `T.span (== 'a') "aab"` came out `("", "aab")`.
 unsafe fn split_at_pred(
     fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
     env_ptr: *mut u8,
     text: *const u8,
-    negate: bool,
+    stop_when: bool,
 ) -> usize {
     let s = text_as_str(text);
     let mut idx = s.len();
     for (i, c) in s.char_indices() {
-        let hit = fn_ptr(env_ptr, c as i64) != 0;
-        if hit == negate {
+        let hit = pred_holds(fn_ptr(env_ptr, c as i64));
+        if hit == stop_when {
             idx = i;
             break;
         }
@@ -1318,7 +1336,7 @@ pub extern "C" fn bhc_text_break(
         let s = text_as_str(text);
         let mut idx = s.len();
         for (i, c) in s.char_indices() {
-            if fn_ptr(env_ptr, c as i64) != 0 {
+            if pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i;
                 break;
             }
@@ -1341,7 +1359,7 @@ pub extern "C" fn bhc_text_span(
             return alloc_adt(0, &[bhc_text_empty(), bhc_text_empty()]);
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         let a = alloc_text_from_bytes(&s.as_bytes()[..idx]);
         let b = alloc_text_from_bytes(&s.as_bytes()[idx..]);
         alloc_adt(0, &[a, b])
@@ -1360,7 +1378,7 @@ pub extern "C" fn bhc_text_take_while(
             return bhc_text_empty();
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         alloc_text_from_bytes(&s.as_bytes()[..idx])
     }
 }
@@ -1377,7 +1395,7 @@ pub extern "C" fn bhc_text_drop_while(
             return bhc_text_empty();
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         alloc_text_from_bytes(&s.as_bytes()[idx..])
     }
 }
@@ -1396,7 +1414,7 @@ pub extern "C" fn bhc_text_drop_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if fn_ptr(env_ptr, c as i64) == 0 {
+            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i + c.len_utf8();
                 break;
             }
@@ -1419,7 +1437,7 @@ pub extern "C" fn bhc_text_take_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if fn_ptr(env_ptr, c as i64) == 0 {
+            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i + c.len_utf8();
                 break;
             }

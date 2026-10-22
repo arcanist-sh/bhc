@@ -2,6 +2,9 @@
 -- Stack: ExceptT String (StateT Int IO) a
 -- Uses: lift get, lift (put ...), throwE, return, runExceptT, runStateT
 
+import Control.Monad.State
+import Control.Monad.Trans.Except
+
 comp :: ExceptT String (StateT Int IO) Int
 comp = do
     s <- lift get

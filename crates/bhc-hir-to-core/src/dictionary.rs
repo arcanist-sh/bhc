@@ -35,7 +35,7 @@ use bhc_hir::DefId;
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Constraint, Kind, Scheme, Subst, Ty, TyVar};
+use bhc_types::{Constraint, Kind, Scheme, Subst, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
 
 /// Information about an associated type in a class.
@@ -159,6 +159,40 @@ impl InstanceInfo {
     }
 }
 
+/// An instance context with `Functor t` added for each `Traversable t` that
+/// lacks one (closure IO model only, where `Functor` is dictionary-passed).
+///
+/// `Traversable` itself is not dictionary-passed, so a body generic in its
+/// container — pandoc-types' `instance (Foldable t, Traversable t, Walkable a
+/// b) => Walkable a (t b)` with `walk f = fmapDefault (walk f)` — had no way
+/// to map: the builtin `fmap` guessed the functor from an unknown type. Its
+/// `Functor` superclass, made a parameter of its own, carries the `fmap`.
+/// Applied both where instance methods get their dictionary lambdas and where
+/// instance dictionaries are built, so the slots line up.
+#[must_use]
+pub fn with_functor_from_traversable(constraints: &[Constraint]) -> Vec<Constraint> {
+    let mut out = constraints.to_vec();
+    if !bhc_types::io_closure_mode() {
+        return out;
+    }
+    for c in constraints {
+        if c.class.as_str() != "Traversable" {
+            continue;
+        }
+        let has_functor = out
+            .iter()
+            .any(|o| o.class.as_str() == "Functor" && o.args == c.args);
+        if !has_functor {
+            out.push(Constraint::new_multi(
+                Symbol::intern("Functor"),
+                c.args.clone(),
+                c.span,
+            ));
+        }
+    }
+    out
+}
+
 /// Registry of classes and instances for dictionary construction.
 #[derive(Clone, Debug, Default)]
 pub struct ClassRegistry {
@@ -167,7 +201,25 @@ pub struct ClassRegistry {
     /// Instances indexed by (class name, instance type hash).
     /// Since we can't use Ty as a key directly, we use a list and linear search.
     pub instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
+    /// Declared schemes of class methods that carry constraints of their
+    /// OWN, beyond the class's (`query :: Monoid c => (a -> c) -> b -> c` in
+    /// pandoc's `Walkable a b`), keyed by (class, method). The scheme's
+    /// constraints are exactly those method-level ones; its type shares their
+    /// variables, so matching it against an occurrence instantiates them.
+    pub method_level: FxHashMap<(Symbol, Symbol), Scheme>,
+    /// Type parameters of LOCALLY declared classes, the variables their
+    /// `method_types` are written in. Instantiating a method's declared type
+    /// at an instance head needs them.
+    pub class_params: FxHashMap<Symbol, Vec<TyVar>>,
+    /// Functional dependencies by class, as (determining, determined)
+    /// parameter indices: `MonadError e m | m -> e` is `[([1], [0])]`.
+    /// A class absent here has no recorded dependencies.
+    pub fundeps: ClassFunDeps,
 }
+
+/// Functional dependencies by class name, as (determining, determined)
+/// parameter-index lists per dependency.
+pub type ClassFunDeps = FxHashMap<Symbol, Vec<(Vec<usize>, Vec<usize>)>>;
 
 /// Give `Monad`/`Applicative` constraints a runtime witness, so a
 /// monad-polymorphic binding can dispatch `return`/`pure`.
@@ -206,6 +258,7 @@ pub(crate) const MONAD_FAMILY_CLASSES: &[&str] = &[
     "Monad",
     "Alternative",
     "MonadPlus",
+    "MonadFail",
     "Semigroup",
     "Monoid",
     // `Default`'s `def` is a bare result-type-determined value method, dispatched
@@ -260,6 +313,13 @@ pub(crate) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "Default",
 ];
 
+/// Whether `name` is one of [`BUILTIN_CLASS_NAMES`]. Under the closure IO
+/// model the mtl classes (`MonadState`, `MonadIO`, ...) are library classes and
+/// get ordinary dictionary passing (spec/BHC-BRIEF-0005).
+pub(crate) fn is_builtin_class_name(name: &str) -> bool {
+    BUILTIN_CLASS_NAMES.contains(&name) && !bhc_types::is_library_transformer_name(name)
+}
+
 /// The representation suffix for a transformer whose methods depend on the
 /// layer beneath it. Mirrors the copy in `resolve_dictionary`: `ExceptT e
 /// (StateT s m)` needs `_st`, because its methods thread the state.
@@ -309,6 +369,32 @@ impl ClassRegistry {
         Self::default()
     }
 
+    /// The parameter positions of `class` that its functional dependencies
+    /// determine once the positions in `fixed` are known (the closure, not
+    /// including `fixed` itself). `None` when the class has no recorded
+    /// dependencies, so callers can keep their previous behaviour.
+    #[must_use]
+    pub fn determined_positions(&self, class: Symbol, fixed: &[usize]) -> Option<Vec<usize>> {
+        let deps = self.fundeps.get(&class).filter(|d| !d.is_empty())?;
+        let mut known: Vec<usize> = fixed.to_vec();
+        loop {
+            let before = known.len();
+            for (from, to) in deps {
+                if from.iter().all(|f| known.contains(f)) {
+                    for t in to {
+                        if !known.contains(t) {
+                            known.push(*t);
+                        }
+                    }
+                }
+            }
+            if known.len() == before {
+                break;
+            }
+        }
+        Some(known.into_iter().filter(|k| !fixed.contains(k)).collect())
+    }
+
     /// Whether an instance-declaration constraint of this class becomes a
     /// runtime dictionary parameter on the instance's methods.
     ///
@@ -341,8 +427,14 @@ impl ClassRegistry {
         if monad_witness_enabled() && matches!(name, "Monad" | "Applicative") {
             return true;
         }
+        // Under the closure IO model `Functor` too: the transformers library's
+        // `instance Functor m => Functor (StateT s m)` maps through the inner
+        // functor's `fmap` (spec/BHC-BRIEF-0005).
+        if bhc_types::io_closure_mode() && name == "Functor" {
+            return true;
+        }
         matches!(name, "Semigroup" | "Monoid")
-            || (!BUILTIN_CLASS_NAMES.contains(&name) && self.lookup_class(class_name).is_some())
+            || (!is_builtin_class_name(name) && self.lookup_class(class_name).is_some())
     }
 
     /// Register a type class.
@@ -351,7 +443,8 @@ impl ClassRegistry {
     }
 
     /// Register a type class instance.
-    pub fn register_instance(&mut self, info: InstanceInfo) {
+    pub fn register_instance(&mut self, mut info: InstanceInfo) {
+        info.instance_constraints = with_functor_from_traversable(&info.instance_constraints);
         self.instances.entry(info.class).or_default().push(info);
     }
 
@@ -395,13 +488,31 @@ impl ClassRegistry {
         // instance that is not ParsecT's, and the parser ran an action
         // belonging to another monad. Require the head constructors to
         // agree first, then fall back to the permissive match.
+        //
+        // `String` is tried a second time as `[Char]` before any permissive
+        // match. It is the language's own synonym, so an occurrence carries
+        // whichever spelling the source used, while the instance is declared at
+        // the list: `Semigroup String` agreed with no head, fell through to the
+        // permissive pass, and matched a variable-headed instance with no
+        // methods — a dictionary whose `<>` was `error "No implementation for
+        // method"`. Only `String`, and only as a second try: other synonyms
+        // carry instances of their own (`instance Semigroup Inlines` is keyed at
+        // `Inlines`), which an unconditional expansion would miss.
+        let normalized: Vec<Ty> = types.iter().map(string_as_char_list).collect();
+        let spellings: &[&[Ty]] = if normalized.as_slice() == types {
+            &[types]
+        } else {
+            &[types, &normalized]
+        };
         for require_head in [true, false] {
-            for inst in instances {
-                if require_head && !instance_heads_agree(&inst.instance_types, types) {
-                    continue;
-                }
-                if let Some(subst) = types_match_multi(&inst.instance_types, types) {
-                    return Some((inst, subst));
+            for tys in spellings {
+                for inst in instances {
+                    if require_head && !instance_heads_agree(&inst.instance_types, tys) {
+                        continue;
+                    }
+                    if let Some(subst) = types_match_multi(&inst.instance_types, tys) {
+                        return Some((inst, subst));
+                    }
                 }
             }
         }
@@ -545,6 +656,9 @@ pub struct DictContext<'a> {
     /// module under whatever layer happened to be current. So the variant
     /// travels in the name: `ExceptT.pure` vs `ExceptT_st.pure`.
     transformer_variant: Option<&'static str>,
+    /// Nesting of `get_dictionary`: an instance context that leads back to
+    /// itself through ever-different types never terminates otherwise.
+    depth: u32,
     /// Dictionaries in scope at the construction site, with the constraint
     /// arguments each is for.
     ///
@@ -579,6 +693,7 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: None,
             transformer_variant: None,
+            depth: 0,
             scope_dicts: Vec::new(),
             scope_super_dicts: Vec::new(),
         }
@@ -594,6 +709,7 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: Some(var_map),
             transformer_variant: None,
+            depth: 0,
             scope_dicts: Vec::new(),
             scope_super_dicts: Vec::new(),
         }
@@ -604,6 +720,49 @@ impl<'a> DictContext<'a> {
     /// filled. See `scope_dicts`.
     pub fn set_scope_dicts(&mut self, dicts: Vec<(Symbol, Vec<Ty>, Var)>) {
         self.scope_dicts = dicts;
+    }
+
+    /// The full arguments of the ONE instance of multi-parameter `class` whose
+    /// last argument fits the last of `args`, when the instance pins every
+    /// other argument (the class's fundep: `MonadError e m | m -> e`).
+    /// `args` may be just that last argument (a superclass slot records only
+    /// it). `None` when no such instance, more than one, or one that leaves
+    /// an earlier argument a variable (`MonadError e (StateT s m)`).
+    fn fill_by_unique_instance(&self, class: Symbol, args: &[Ty]) -> Option<Vec<Ty>> {
+        let target = args.last()?;
+        let mut fits = self
+            .registry
+            .instances
+            .get(&class)?
+            .iter()
+            .filter_map(|inst| {
+                let (last, _) = inst.instance_types.split_last()?;
+                if inst.instance_types.len() < 2
+                    || !instance_heads_agree(
+                        std::slice::from_ref(last),
+                        std::slice::from_ref(target),
+                    )
+                {
+                    return None;
+                }
+                let s =
+                    types_match_multi(std::slice::from_ref(last), std::slice::from_ref(target))?;
+                Some(
+                    inst.instance_types
+                        .iter()
+                        .map(|t| s.apply(t))
+                        .collect::<Vec<_>>(),
+                )
+            });
+        let filled = fits.next()?;
+        if fits.next().is_some()
+            || filled[..filled.len() - 1]
+                .iter()
+                .any(crate::context::has_type_variables)
+        {
+            return None;
+        }
+        Some(filled)
     }
 
     /// A dictionary in scope at the construction site for this very
@@ -631,10 +790,30 @@ impl<'a> DictContext<'a> {
         {
             return Some(core::Expr::Var(var.clone(), span));
         }
+        // A superclass reached from a single-parameter holder records only
+        // the holder's parameter: `PandocMonad m`'s `MonadError PandocError m`
+        // is offered as `[m]`. Match it on the wanted LAST argument (the
+        // position that parameter stands for), or the StateT instance's
+        // `MonadError e m` context inside a `PandocMonad m =>` function was a
+        // null placeholder and its `catchError` jumped through it.
+        let matches_last = |class: &Symbol, args: &Vec<Ty>| {
+            *class == constraint.class
+                && args.len() == 1
+                && constraint.args.len() > 1
+                && constraint
+                    .args
+                    .last()
+                    .is_some_and(|want| same_head(&args[0], want))
+        };
         let (_, _, base, path) = self
             .scope_super_dicts
             .iter()
-            .find(|(class, args, _, _)| matches(class, args))?;
+            .find(|(class, args, _, _)| matches(class, args))
+            .or_else(|| {
+                self.scope_super_dicts
+                    .iter()
+                    .find(|(class, args, _, _)| matches_last(class, args))
+            })?;
         let mut cur = core::Expr::Var(base.clone(), span);
         for idx in path {
             cur = core::Expr::App(
@@ -720,7 +899,21 @@ impl<'a> DictContext<'a> {
 
         // Construct the dictionary, applying the substitution to resolve
         // type variables in superclass constraints
-        let dict_expr = self.construct_dictionary(class, instance, &subst, span)?;
+        const MAX_DICT_DEPTH: u32 = 64;
+        if self.depth >= MAX_DICT_DEPTH {
+            if std::env::var_os("BHC_DBG_DICTDEPTH").is_some() {
+                eprintln!(
+                    "[dict-depth] giving up at {} {:?}",
+                    constraint.class.as_str(),
+                    constraint.args
+                );
+            }
+            return None;
+        }
+        self.depth += 1;
+        let dict_expr = self.construct_dictionary(class, instance, &subst, span);
+        self.depth -= 1;
+        let dict_expr = dict_expr?;
 
         // Create a variable for this dictionary and cache it
         let type_names: Vec<String> = constraint.args.iter().map(type_name).collect();
@@ -786,8 +979,21 @@ impl<'a> DictContext<'a> {
                 .get(i)
                 .and_then(|super_ty| {
                     let concrete_super_ty = subst.apply(super_ty);
-                    let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
-                    self.get_dictionary(&super_constraint, span)
+                    let super_constraint =
+                        Constraint::new(*superclass, concrete_super_ty.clone(), span);
+                    self.get_dictionary(&super_constraint, span).or_else(|| {
+                        // A multi-parameter superclass is recorded at its LAST
+                        // argument alone: `PandocMonad PandocIO`'s `MonadError
+                        // PandocError m` slot asked for `MonadError PandocIO`,
+                        // which no two-argument instance matches, so the slot
+                        // was a null placeholder and every `catchError` inside
+                        // a `PandocMonad m =>` function jumped through it.
+                        let args = self.fill_by_unique_instance(
+                            *superclass,
+                            std::slice::from_ref(&concrete_super_ty),
+                        )?;
+                        self.get_dictionary(&Constraint::new_multi(*superclass, args, span), span)
+                    })
                 })
                 .or_else(|| {
                     // The instance's OWN constraints name the right type when
@@ -895,7 +1101,7 @@ impl<'a> DictContext<'a> {
                             Some(cur)
                         })
                 })
-                .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+                .unwrap_or_else(|| crate::context::null_dict_placeholder(*superclass, &[], span));
             super_fields.push(super_dict);
         }
 
@@ -919,9 +1125,55 @@ impl<'a> DictContext<'a> {
                     args: c.args.iter().map(|a| subst.apply(a)).collect(),
                     span,
                 };
-                self.get_dictionary(&concrete, span)
+                // A constraint that stays a bare variable (`Semigroup a` for
+                // `Semigroup (Future s a)` built inside that instance's own
+                // body) is the dictionary in scope; no instance can know it.
+                // Instance-body dictionaries are registered without argument
+                // types, so an empty argument list matches too.
+                let var_only = !concrete.args.is_empty()
+                    && concrete.args.iter().all(|a| matches!(a, Ty::Var(_)));
+                let scoped = var_only
+                    .then(|| {
+                        self.scope_dicts
+                            .iter()
+                            .find(|(class, args, _)| {
+                                *class == concrete.class
+                                    && (args.is_empty()
+                                        || (args.len() == concrete.args.len()
+                                            && args
+                                                .iter()
+                                                .zip(&concrete.args)
+                                                .all(|(a, b)| same_head(a, b))))
+                            })
+                            .map(|(_, _, var)| core::Expr::Var(var.clone(), span))
+                    })
+                    .flatten();
+                // A context constraint whose leading arguments are still
+                // variables but whose last is pinned: `MonadError e m` for
+                // `MonadError e (StateT s m)` built at `StateT () PandocIO`
+                // with `e` unknown at the use site. The class's fundep fixes
+                // `e` from `PandocIO`; without it the slot was a null
+                // placeholder and `catchError` at StateT jumped through it.
+                let needs_fill = concrete.args.len() > 1
+                    && concrete.args[..concrete.args.len() - 1]
+                        .iter()
+                        .any(crate::context::has_type_variables);
+                scoped
+                    .or_else(|| {
+                        if !needs_fill {
+                            return None;
+                        }
+                        let args = self.fill_by_unique_instance(concrete.class, &concrete.args)?;
+                        self.get_dictionary(
+                            &Constraint::new_multi(concrete.class, args, span),
+                            span,
+                        )
+                    })
+                    .or_else(|| self.get_dictionary(&concrete, span))
                     .or_else(|| self.dict_in_scope_by_head(&concrete, span))
-                    .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span))
+                    .unwrap_or_else(|| {
+                        crate::context::null_dict_placeholder(concrete.class, &concrete.args, span)
+                    })
             })
             .collect();
 
@@ -942,7 +1194,13 @@ impl<'a> DictContext<'a> {
             let mut partial_fields = super_fields.clone();
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     partial_fields.push(apply_constraint_dicts(
                         method_ref,
                         &constraint_dicts,
@@ -963,13 +1221,25 @@ impl<'a> DictContext<'a> {
             let mut final_fields = super_fields;
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     final_fields.push(apply_constraint_dicts(method_ref, &constraint_dicts, span));
                 } else if let Some(&default_def_id) = class.defaults.get(method_name) {
                     // Apply the default function to the partial dict.
                     // Default is `\$dClass -> body`, so `default partial_dict`
                     // produces the method implementation.
-                    let default_ref = self.method_reference(default_def_id, span);
+                    let default_ref = Self::at_instance_ty(
+                        self.method_reference(default_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     final_fields.push(core::Expr::App(
                         Box::new(default_ref),
                         Box::new(core::Expr::Var(partial_dict_var.clone(), span)),
@@ -989,6 +1259,8 @@ impl<'a> DictContext<'a> {
                     );
                     final_fields.push(missing_method_field(
                         self,
+                        class.name,
+                        &final_fields[..class.superclasses.len()],
                         &instance.methods,
                         &constraint_dicts,
                         *method_name,
@@ -1004,7 +1276,13 @@ impl<'a> DictContext<'a> {
             let mut fields = super_fields;
             for method_name in &class.methods {
                 let method_expr = if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     apply_constraint_dicts(method_ref, &constraint_dicts, span)
                 } else {
                     let error_msg = format!(
@@ -1020,6 +1298,8 @@ impl<'a> DictContext<'a> {
                     );
                     missing_method_field(
                         self,
+                        class.name,
+                        &fields[..class.superclasses.len()],
                         &instance.methods,
                         &constraint_dicts,
                         *method_name,
@@ -1034,6 +1314,66 @@ impl<'a> DictContext<'a> {
     }
 
     /// Create a reference to a method implementation.
+    /// An instance method reference carrying its type AT THIS INSTANCE: the
+    /// class method's signature with the class parameter replaced by the
+    /// (matched) instance head.
+    ///
+    /// The reference otherwise keeps its binder's scheme type. For pandoc's
+    /// `instance … => PandocMonad (t m)` that is `t m CommonState`; in a clone
+    /// of an imported caller (no span-keyed types to consult) monomorphization
+    /// mapped only the head `t` to the concrete monad and specialized the
+    /// method at an ill-kinded type, so the generic method ran instead of one
+    /// built for `StateT s PandocIO`. Single-parameter classes only.
+    fn at_instance_ty(
+        method_ref: core::Expr,
+        class: &ClassInfo,
+        instance: &InstanceInfo,
+        method: Symbol,
+        subst: &Subst,
+    ) -> core::Expr {
+        let core::Expr::Var(mut var, span) = method_ref else {
+            return method_ref;
+        };
+        if class.param_count != 1 || instance.instance_types.len() != 1 {
+            return core::Expr::Var(var, span);
+        }
+        let Some(scheme) = class.method_types.get(&method) else {
+            return core::Expr::Var(var, span);
+        };
+        let param = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == class.name)
+            .and_then(|c| match c.args.first() {
+                Some(Ty::Var(v)) => Some(v.clone()),
+                _ => None,
+            });
+        let head = subst.apply(&instance.instance_types[0]);
+        if let Some(param) = param {
+            let mut at = Subst::new();
+            at.insert(&param, head);
+            var.ty = at.apply(&scheme.ty);
+        } else if crate::context::transformer_headed(&head) {
+            // An IMPORTED class records only each method's arrow count
+            // (`Fun(Error, … Error)`). For a monad-like class at a transformer
+            // instance the method's result is an action in that transformer,
+            // which is all monomorphization reads: `n` erased arguments to
+            // `head <erased>`.
+            let mut arrows = 0;
+            let mut t = &scheme.ty;
+            while let Ty::Fun(_, r) = t {
+                arrows += 1;
+                t = r;
+            }
+            let mut ty = Ty::App(Box::new(head), Box::new(Ty::Error));
+            for _ in 0..arrows {
+                ty = Ty::Fun(Box::new(Ty::Error), Box::new(ty));
+            }
+            var.ty = ty;
+        }
+        core::Expr::Var(var, span)
+    }
+
     fn method_reference(&self, def_id: DefId, span: Span) -> core::Expr {
         // Builtin monad instance methods are SYNTHETIC: their DefIds are
         // hardcoded at registration and name nothing the program declared. They
@@ -1295,6 +1635,27 @@ fn apply_constraint_dicts(
 /// (tag + fields). When a class has only 1 method and no superclasses, the
 /// standard `make_tuple` would optimize away the tuple wrapper, causing
 /// `$sel_0` to fail. This function pads 1-element dictionaries with a
+/// `String` replaced by `[Char]` throughout a type.
+pub(crate) fn string_as_char_list(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Con(tc) if tc.name.as_str() == "String" => Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            bhc_types::Kind::Star,
+        )))),
+        Ty::App(f, a) => Ty::App(
+            Box::new(string_as_char_list(f)),
+            Box::new(string_as_char_list(a)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(string_as_char_list(a)),
+            Box::new(string_as_char_list(b)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(string_as_char_list(e))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(string_as_char_list).collect()),
+        other => other.clone(),
+    }
+}
+
 /// dummy field to ensure a valid 2-tuple is always created.
 fn make_dict(fields: Vec<core::Expr>, span: Span) -> core::Expr {
     if fields.len() == 1 {
@@ -1331,12 +1692,82 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
 #[allow(clippy::too_many_arguments)]
 fn missing_method_field(
     ctx: &mut DictContext,
+    class_name: Symbol,
+    super_fields: &[core::Expr],
     class_methods: &FxHashMap<Symbol, bhc_hir::DefId>,
     constraint_dicts: &[core::Expr],
     method_name: Symbol,
     error_msg: &str,
     span: Span,
 ) -> core::Expr {
+    // The builtin Monoid class carries no default bodies, so an instance that
+    // defines only `mempty` (the usual modern shape — `<>` lives in the
+    // Semigroup instance) got error closures in its `mappend`/`mconcat`
+    // slots. `foldr mappend mempty` and `mconcat` over any user Monoid then
+    // ran them, which is how pandoc's `query`/`foldMap` over `Min Int`
+    // crashed. Fill them with the class defaults: `mappend = (<>)` via the
+    // Semigroup superclass slot, `mconcat = foldr mappend mempty`.
+    if class_name.as_str() == "Monoid" {
+        let semigroup_append = || -> Option<core::Expr> {
+            let sg = super_fields.first()?;
+            if matches!(sg, core::Expr::Lit(..)) {
+                return None; // unresolved superclass placeholder
+            }
+            let sel = Var {
+                name: Symbol::intern("$sel_0"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            Some(core::Expr::App(
+                Box::new(core::Expr::Var(sel, span)),
+                Box::new(sg.clone()),
+                span,
+            ))
+        };
+        match method_name.as_str() {
+            "mappend" => {
+                if let Some(append) = semigroup_append() {
+                    return append;
+                }
+            }
+            "mconcat" => {
+                let mappend = match class_methods.get(&Symbol::intern("mappend")) {
+                    Some(&id) => {
+                        let r = ctx.method_reference(id, span);
+                        Some(apply_constraint_dicts(r, constraint_dicts, span))
+                    }
+                    None => semigroup_append(),
+                };
+                let mempty = class_methods.get(&Symbol::intern("mempty")).map(|&id| {
+                    let r = ctx.method_reference(id, span);
+                    apply_constraint_dicts(r, constraint_dicts, span)
+                });
+                if let (Some(mappend), Some(mempty)) = (mappend, mempty) {
+                    let foldr_var = Var {
+                        name: Symbol::intern("foldr"),
+                        id: VarId::new(0),
+                        ty: Ty::Error,
+                    };
+                    let xs = ctx.fresh_var("$mconcat_xs", Ty::Error, span);
+                    let body = core::Expr::App(
+                        Box::new(core::Expr::App(
+                            Box::new(core::Expr::App(
+                                Box::new(core::Expr::Var(foldr_var, span)),
+                                Box::new(mappend),
+                                span,
+                            )),
+                            Box::new(mempty),
+                            span,
+                        )),
+                        Box::new(core::Expr::Var(xs.clone(), span)),
+                        span,
+                    );
+                    return core::Expr::Lam(xs, Box::new(body), span);
+                }
+            }
+            _ => {}
+        }
+    }
     if method_name.as_str() == "<$" {
         if let Some(&fmap_id) = class_methods.get(&Symbol::intern("fmap")) {
             let fmap_ref = ctx.method_reference(fmap_id, span);
@@ -1359,6 +1790,65 @@ fn missing_method_field(
                 Box::new(core::Expr::Lam(pv, Box::new(body), span)),
                 span,
             );
+        }
+    }
+    // Class defaults for sequencing. An instance that defines only `>>=`
+    // (or only `<*>`) is the ordinary shape, and its `>>` / `*>` / `<*`
+    // slots held the error closure below — so `p >> q` on any such user
+    // monad crashed. `m >> k = m >>= \_ -> k`; `a *> b = (id <$ a) <*> b`
+    // and `a <* b = fmap const a <*> b`, with `fmap` from the Functor
+    // superclass slot.
+    let lam2 = |ctx: &mut DictContext, body: &dyn Fn(&Var, &Var) -> core::Expr| {
+        let a = ctx.fresh_var("a", Ty::Error, span);
+        let b = ctx.fresh_var("b", Ty::Error, span);
+        let inner = body(&a, &b);
+        core::Expr::Lam(a, Box::new(core::Expr::Lam(b, Box::new(inner), span)), span)
+    };
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    if class_name.as_str() == "Monad" && method_name.as_str() == ">>" {
+        if let Some(&bind_id) = class_methods.get(&Symbol::intern(">>=")) {
+            let bind_ref = ctx.method_reference(bind_id, span);
+            let bind = apply_constraint_dicts(bind_ref, constraint_dicts, span);
+            let ignored = ctx.fresh_var("_", Ty::Error, span);
+            return lam2(ctx, &|m, k| {
+                let cont = core::Expr::Lam(ignored.clone(), Box::new(var(k)), span);
+                app(app(bind.clone(), var(m)), cont)
+            });
+        }
+    }
+    if class_name.as_str() == "Applicative" && matches!(method_name.as_str(), "*>" | "<*") {
+        let functor_fmap = super_fields
+            .first()
+            .filter(|f| !matches!(f, core::Expr::Lit(..)))
+            .map(|functor| {
+                let sel0 = Var {
+                    name: Symbol::intern("$sel_0"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                app(core::Expr::Var(sel0, span), functor.clone())
+            });
+        if let (Some(fmap), Some(&ap_id)) =
+            (functor_fmap, class_methods.get(&Symbol::intern("<*>")))
+        {
+            let ap_ref = ctx.method_reference(ap_id, span);
+            let ap = apply_constraint_dicts(ap_ref, constraint_dicts, span);
+            let x = ctx.fresh_var("x", Ty::Error, span);
+            let y = ctx.fresh_var("y", Ty::Error, span);
+            // `*>` keeps the second result, `<*` the first.
+            let keep = if method_name.as_str() == "*>" { &y } else { &x };
+            let pick = core::Expr::Lam(
+                x.clone(),
+                Box::new(core::Expr::Lam(y.clone(), Box::new(var(keep)), span)),
+                span,
+            );
+            return lam2(ctx, &|a, b| {
+                app(
+                    app(ap.clone(), app(app(fmap.clone(), pick.clone()), var(a))),
+                    var(b),
+                )
+            });
         }
     }
     // Defer the error to call time: a raw error field would throw while the

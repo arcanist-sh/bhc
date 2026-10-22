@@ -2738,6 +2738,63 @@ unsafe fn alloc_nil() -> *mut u8 {
     }
 }
 
+/// `reads :: String -> [(Int, String)]`, at `Int` only: optional leading
+/// whitespace, an optional `-`, then decimal digits. `[(n, rest)]` on
+/// success, `[]` otherwise. bhc has no `Read` dictionaries, so the builtin
+/// answers at the type every use in pandoc needs (list numbers via
+/// `safeRead`). The list spine is forced, since a closure-model string can
+/// arrive lazily; the elements are immediate characters.
+///
+/// # Safety
+///
+/// `str_list` must be a BHC list of characters (or a thunk evaluating to one).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
+    unsafe {
+        let tag = |p: *mut u8| *(p as *const i64);
+        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let mut cells: Vec<*mut u8> = Vec::new();
+        let mut list = bhc_force(str_list);
+        while tag(list) != 0 {
+            cells.push(list);
+            list = bhc_force(field(list, 1));
+        }
+        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let is_space = |c: i64| c == 32 || c == 9 || c == 10 || c == 13;
+        let mut i = 0;
+        while i < chars.len() && is_space(chars[i]) {
+            i += 1;
+        }
+        let negative = i < chars.len() && chars[i] == '-' as i64;
+        let digits_start = if negative { i + 1 } else { i };
+        let mut j = digits_start;
+        let mut n: i64 = 0;
+        while j < chars.len() && (('0' as i64)..=('9' as i64)).contains(&chars[j]) {
+            n = n.wrapping_mul(10).wrapping_add(chars[j] - '0' as i64);
+            j += 1;
+        }
+        if j == digits_start {
+            return alloc_nil();
+        }
+        if negative {
+            n = -n;
+        }
+        // The rest of the input is the original list from the first unread cell.
+        let rest = if j < cells.len() {
+            cells[j]
+        } else {
+            alloc_nil()
+        };
+        // A pair is constructor 0 with two fields.
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let pair = std::alloc::alloc(layout);
+        *(pair as *mut i64) = 0;
+        *(pair.add(8) as *mut *mut u8) = n as *mut u8;
+        *(pair.add(16) as *mut *mut u8) = rest;
+        alloc_cons(pair, alloc_nil())
+    }
+}
+
 /// Print a newline to stdout
 #[no_mangle]
 pub extern "C" fn bhc_print_newline() {
@@ -3031,6 +3088,52 @@ pub extern "C" fn bhc_catch_typed(
                 BHC_EXCEPTION.with(|cell| cell.set(saved));
             }
             result
+        }
+    }
+}
+
+/// Allocate a one-field constructor cell `[i64 tag, field]` — `Left x` (tag 0)
+/// or `Right x` (tag 1) of `Either`.
+unsafe fn alloc_con1(tag: i64, field: *mut u8) -> *mut u8 {
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(16, 8);
+        let cell = std::alloc::alloc(layout);
+        *(cell as *mut i64) = tag;
+        *(cell.add(8) as *mut *mut u8) = field;
+        cell
+    }
+}
+
+/// Run an IO action and reify a matching exception as `Left`:
+/// `tryIOError :: IO a -> IO (Either IOError a)` with `type_tag` 1.
+///
+/// Returns `Right result` when the action completes, `Left payload` when it
+/// throws an exception whose tag matches `type_tag` (0 matches any), and
+/// re-throws (returning the sentinel with the exception still pending) for
+/// any other exception — the same filtering as [`bhc_catch_typed`].
+#[no_mangle]
+pub extern "C" fn bhc_try_typed(
+    action_fn: extern "C" fn(*mut u8) -> *mut u8,
+    action_env: *mut u8,
+    type_tag: i64,
+) -> *mut u8 {
+    let saved = BHC_EXCEPTION.with(|cell| cell.replace(None));
+    let result = action_fn(action_env);
+    let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+    match thrown {
+        Some(exc_ptr) => {
+            if type_tag == EXC_TAG_SOME_EXCEPTION || bhc_exc_get_tag(exc_ptr) == type_tag {
+                unsafe { alloc_con1(0, bhc_exc_get_payload(exc_ptr)) }
+            } else {
+                BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+                BHC_EXCEPTION_SENTINEL
+            }
+        }
+        None => {
+            if saved.is_some() {
+                BHC_EXCEPTION.with(|cell| cell.set(saved));
+            }
+            unsafe { alloc_con1(1, result) }
         }
     }
 }
@@ -4169,6 +4272,101 @@ unsafe fn alloc_hs_string(s: &str) -> *mut u8 {
     }
 }
 
+/// Build a cons-cell list of C strings from Rust strings.
+fn cstr_list_from(parts: &[String]) -> *mut u8 {
+    let mut list = unsafe { alloc_nil() };
+    for part in parts.iter().rev() {
+        let cs = CString::new(part.as_str()).unwrap_or_default();
+        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+    }
+    list
+}
+
+/// `System.FilePath.Posix.splitPath`: each component keeps its trailing
+/// separators, and a leading run of separators is its own component.
+///
+/// `splitPath "/usr/local/bin" == ["/","usr/","local/","bin"]`,
+/// `splitPath "a//b/" == ["a//","b/"]`, `splitPath "" == []`.
+fn posix_split_path(path: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut rest = path;
+    let lead = rest.len() - rest.trim_start_matches('/').len();
+    if lead > 0 {
+        parts.push(rest[..lead].to_string());
+        rest = &rest[lead..];
+    }
+    while !rest.is_empty() {
+        let name_end = rest.find('/').unwrap_or(rest.len());
+        let seps = rest[name_end..].len() - rest[name_end..].trim_start_matches('/').len();
+        parts.push(rest[..name_end + seps].to_string());
+        rest = &rest[name_end + seps..];
+    }
+    parts
+}
+
+/// `System.FilePath.Posix.splitDirectories`: `splitPath` with trailing
+/// separators dropped, except that a root component stays `"/"`.
+///
+/// `splitDirectories "/usr/local/bin" == ["/","usr","local","bin"]`,
+/// `splitDirectories "a//b/" == ["a","b"]`.
+fn posix_split_directories(path: &str) -> Vec<String> {
+    posix_split_path(path)
+        .into_iter()
+        .map(|part| {
+            let trimmed = part.trim_end_matches('/');
+            if trimmed.is_empty() {
+                "/".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect()
+}
+
+/// `System.FilePath.Posix.joinPath = foldr combine ""`, where `combine a b`
+/// is `b` when `b` is absolute, and otherwise joins with exactly one `'/'`
+/// unless `a` already ends in one (empty operands are identities).
+fn posix_join_path(parts: &[String]) -> String {
+    parts.iter().rev().fold(String::new(), |acc, part| {
+        if acc.starts_with('/') || part.is_empty() {
+            acc
+        } else if acc.is_empty() {
+            part.clone()
+        } else if part.ends_with('/') {
+            format!("{part}{acc}")
+        } else {
+            format!("{part}/{acc}")
+        }
+    })
+}
+
+/// `splitPath` over a C string, returning a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_cstr_split_path(s: *const c_char) -> *mut u8 {
+    if s.is_null() {
+        return unsafe { alloc_nil() };
+    }
+    let path = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
+    cstr_list_from(&posix_split_path(path))
+}
+
+/// `splitDirectories` over a C string, returning a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_cstr_split_directories(s: *const c_char) -> *mut u8 {
+    if s.is_null() {
+        return unsafe { alloc_nil() };
+    }
+    let path = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
+    cstr_list_from(&posix_split_directories(path))
+}
+
+/// `joinPath` over a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_cstr_join_path(list: *const u8) -> *mut c_char {
+    let joined = posix_join_path(&collect_list_strings(list));
+    CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
+}
+
 /// Join a cons-cell list of C strings with `' '`.
 #[no_mangle]
 pub extern "C" fn bhc_cstr_unwords(list: *const u8) -> *mut c_char {
@@ -4849,6 +5047,46 @@ pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strs(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn test_posix_split_path() {
+        assert_eq!(
+            posix_split_path("/usr/local/bin"),
+            strs(&["/", "usr/", "local/", "bin"])
+        );
+        assert_eq!(posix_split_path("a//b/"), strs(&["a//", "b/"]));
+        assert_eq!(
+            posix_split_path("data/translations/en.yaml"),
+            strs(&["data/", "translations/", "en.yaml"])
+        );
+        assert!(posix_split_path("").is_empty());
+    }
+
+    #[test]
+    fn test_posix_split_directories() {
+        assert_eq!(
+            posix_split_directories("/usr/local/bin"),
+            strs(&["/", "usr", "local", "bin"])
+        );
+        assert_eq!(posix_split_directories("a//b/"), strs(&["a", "b"]));
+        assert_eq!(posix_split_directories("./x"), strs(&[".", "x"]));
+    }
+
+    #[test]
+    fn test_posix_join_path() {
+        assert_eq!(posix_join_path(&strs(&["/", "usr", "bin"])), "/usr/bin");
+        assert_eq!(posix_join_path(&strs(&["a/", "b"])), "a/b");
+        assert_eq!(posix_join_path(&strs(&["a", "/abs", "c"])), "/abs/c");
+        assert_eq!(posix_join_path(&strs(&["a", "", "c"])), "a/c");
+        assert_eq!(posix_join_path(&[]), "");
+        // round trip
+        let p = "data/translations/en.yaml";
+        assert_eq!(posix_join_path(&posix_split_directories(p)), p);
+    }
 
     #[test]
     fn test_bhc_init() {

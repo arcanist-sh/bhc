@@ -2,6 +2,9 @@
 -- Stack: WriterT String (ReaderT String IO) a
 -- Uses: tell, lift ask, runWriterT, runReaderT
 
+import Control.Monad.Reader
+import Control.Monad.Writer
+
 comp :: WriterT String (ReaderT String IO) String
 comp = do
     r <- lift ask

@@ -57,23 +57,24 @@ pub extern "C" fn bhc_char_to_lower(c: u32) -> u32 {
         .unwrap_or(c)
 }
 
-/// Get numeric value of digit character
+/// Get numeric value of a (hexadecimal) digit character, as Haskell's
+/// `digitToInt`: `'0'..'9'`, `'a'..'f'` and `'A'..'F'`; -1 otherwise.
 #[no_mangle]
 pub extern "C" fn bhc_char_digit_to_int(c: u32) -> i32 {
     char::from_u32(c)
-        .and_then(|c| c.to_digit(10))
+        .and_then(|c| c.to_digit(16))
         .map(|d| d as i32)
         .unwrap_or(-1)
 }
 
-/// Get character for digit
+/// Get character for a digit, as Haskell's `intToDigit`: 0..15 map to
+/// `'0'..'9'` and `'a'..'f'`; anything else gives NUL.
 #[no_mangle]
 pub extern "C" fn bhc_char_int_to_digit(n: i32) -> u32 {
-    if (0..=9).contains(&n) {
-        ('0' as u32) + (n as u32)
-    } else {
-        0
-    }
+    u32::try_from(n)
+        .ok()
+        .and_then(|d| char::from_digit(d, 16))
+        .map_or(0, |c| c as u32)
 }
 
 /// Get character's Unicode general category
@@ -242,6 +243,11 @@ mod tests {
     #[test]
     fn test_digit_conversion() {
         assert_eq!(bhc_char_digit_to_int('5' as u32), 5);
+        assert_eq!(bhc_char_digit_to_int('c' as u32), 12);
+        assert_eq!(bhc_char_digit_to_int('C' as u32), 12);
+        assert_eq!(bhc_char_digit_to_int('g' as u32), -1);
         assert_eq!(bhc_char_int_to_digit(5), '5' as u32);
+        assert_eq!(bhc_char_int_to_digit(11), 'b' as u32);
+        assert_eq!(bhc_char_int_to_digit(16), 0);
     }
 }

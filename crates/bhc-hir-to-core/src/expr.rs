@@ -224,15 +224,95 @@ fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> co
     }
 }
 
+/// A saturated `a == b` / `a /= b` on `Text` whose operator type is unknown
+/// or still has type variables: type it `Text -> Text -> Bool`. An infix operator's span is
+/// the whole expression's, so the type recorded there is the result `Bool`,
+/// and codegen, which picks the comparison from the operator's type,
+/// compared two `Text` fields of a parametric constructor (`TagOpen n _` at
+/// `Tag Text`) by address — tagsoup's `~==` never matched.
+fn type_equality_operator(
+    ctx: &LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    e: core::Expr,
+) -> core::Expr {
+    let Expr::App(op, a, _) = f else {
+        return e;
+    };
+    let Expr::Var(dr) = op.as_ref() else {
+        return e;
+    };
+    let is_eq = ctx
+        .lookup_var(dr.def_id)
+        .is_some_and(|v| matches!(v.name.as_str(), "==" | "/="));
+    if !is_eq {
+        return e;
+    }
+    // Only `Text`, and only when BOTH operands say so: a scalar operand typed
+    // `Char` made codegen force a raw character as a boxed object, and a
+    // desugared section's operand carries a synthetic span whose recorded
+    // type is some other expression's — `(== '\n')` came out `Text -> Text ->
+    // Bool` and crashed every markdown read in `anyLine`.
+    let is_text = |o: &hir::Expr| matches!(ctx.resolved_expr_ty_opt(o.span()), Some(Ty::Con(c)) if c.name.as_str() == "Text");
+    if !(is_text(a) && is_text(x)) {
+        return e;
+    }
+    let t = Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star));
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    match e {
+        core::Expr::App(g, rhs, sp) => match *g {
+            core::Expr::App(head, lhs, sp2) => match *head {
+                core::Expr::Var(mut v, vs)
+                    if !is_fully_concrete_ty(&v.ty) && matches!(v.name.as_str(), "==" | "/=") =>
+                {
+                    v.ty = Ty::fun(t.clone(), Ty::fun(t, bool_ty));
+                    core::Expr::App(
+                        Box::new(core::Expr::App(Box::new(core::Expr::Var(v, vs)), lhs, sp2)),
+                        rhs,
+                        sp,
+                    )
+                }
+                other => core::Expr::App(
+                    Box::new(core::Expr::App(Box::new(other), lhs, sp2)),
+                    rhs,
+                    sp,
+                ),
+            },
+            other => core::Expr::App(Box::new(other), rhs, sp),
+        },
+        other => other,
+    }
+}
+
 fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
     match expr {
         Expr::Lit(lit, span) => lower_lit_at(ctx, lit, *span),
 
-        Expr::Var(def_ref) => lower_var(ctx, def_ref),
+        Expr::Var(def_ref) => {
+            let mut e = lower_var(ctx, def_ref)?;
+            stamp_integer_conversion_ty(ctx, def_ref.span, &mut e);
+            Ok(apply_method_level_dicts_to_value(ctx, def_ref, e))
+        }
 
         Expr::Con(def_ref) => lower_con(ctx, def_ref),
 
-        Expr::App(f, x, span) => lower_app(ctx, f, x, *span),
+        Expr::App(f, x, span) => {
+            let mut head = f.as_ref();
+            while let Expr::App(g, _, _) = head {
+                head = g.as_ref();
+            }
+            let head_span = match head {
+                Expr::Var(dr) => ctx.app_head_spans.insert(dr.span).then_some(dr.span),
+                _ => None,
+            };
+            let e = lower_app_with_method_level(ctx, f, x, *span);
+            if let Some(hs) = head_span {
+                ctx.app_head_spans.remove(&hs);
+            }
+            let e = bind_via_scope_monad(ctx, head, e?);
+            let e = type_equality_operator(ctx, f, x, e);
+            Ok(type_state_runner(ctx, type_shown_variable(ctx, x, e)))
+        }
 
         Expr::Lam(pats, body, span) => lower_lambda(ctx, pats, body, *span),
 
@@ -320,33 +400,132 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
 /// `T.length` on it segfaulted. `fromString` is gone by Core (it lowers to
 /// identity, which is right for `String`), so the conversion has to key off the
 /// literal's own occurrence type.
-fn lower_lit_at(ctx: &LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
+fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
     let core_lit = lower_lit(lit, span)?;
+    if let Lit::Int(n) = lit {
+        // An integer literal typeck resolved at `Integer` is a bignum: as a
+        // machine int it reached an `Integer` constructor field or argument
+        // unboxed (`ModifiedJulianDay 0` stored a raw 0 the field's readers
+        // dereferenced).
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| ctx.expand_type_aliases(&t));
+        let con_name = |t: &Ty| match t {
+            Ty::Con(c) => Some(c.name.as_str().to_string()),
+            _ => None,
+        };
+        match resolved.as_ref().and_then(con_name).as_deref() {
+            Some("Integer") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Integer(*n as i128), ty, span));
+            }
+            // An integer literal at a floating type (`posixSecondsToUTCTime
+            // 1700000000`, `POSIXTime` = `Double`) passed as a machine int
+            // was read as the double with those bits — a denormal ≈ 0.
+            Some("Double") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Double(*n as f64), ty, span));
+            }
+            _ => {}
+        }
+    }
     if !matches!(lit, Lit::String(_)) {
         return Ok(core_lit);
     }
-    match refined_occurrence_ty(ctx, span) {
-        Some(ty) if ty_head_is(&ty, "Text") => {
-            let pack = Var {
-                name: Symbol::intern("Data.Text.pack"),
-                id: VarId::new(0),
-                ty: Ty::Error,
-            };
-            Ok(core::Expr::App(
-                Box::new(core::Expr::Var(pack, span)),
-                Box::new(core_lit),
+    // The literal's type at this occurrence: what typeck recorded, else the
+    // caller's expected type. An OverloadedStrings literal in an imported
+    // constructor's `Text` field is recorded by typeck as its default `[Char]`,
+    // so the expected type (the field type, pushed in by
+    // `propagate_constructor_field_tys`) is the authority there and must win.
+    // `refined_occurrence_ty` keeps a CONCRETE recorded type over the hint,
+    // and the recorded `[Char]` is concrete — so an expected `Text` is checked
+    // first, explicitly (`Str "hi"` with pandoc-types' imported `Str`).
+    let occ = ctx
+        .expected_ty_opt(span)
+        .filter(ty_head_is_text)
+        .or_else(|| refined_occurrence_ty(ctx, span))
+        .or_else(|| ctx.expected_ty_opt(span));
+
+    // `Text` is packed directly (its RTS entry points read a `{len, bytes}`
+    // header, not a char list).
+    if occ.as_ref().is_some_and(ty_head_is_text) {
+        let pack = Var {
+            name: Symbol::intern("Data.Text.pack"),
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+        return Ok(core::Expr::App(
+            Box::new(core::Expr::Var(pack, span)),
+            Box::new(core_lit),
+            span,
+        ));
+    }
+
+    // OverloadedStrings at a user type: dispatch its `IsString` instance's
+    // `fromString`. BHC otherwise lowers every string literal to a `[Char]`
+    // (identity `fromString`, right only for `String` itself), so a literal at
+    // a user newtype like blaze's `AttributeValue`/`StaticString` kept the raw
+    // char list and the type's accessor read it as the wrapped value — garbage.
+    // Only concrete user types are dispatched; the string-shaped builtins keep
+    // their existing lowering.
+    if let Some(ty) = occ {
+        if dispatchable_isstring_ty(&ty) {
+            if let Some(from_string) = ctx.resolve_method_at_concrete_type(
+                Symbol::intern("fromString"),
+                Symbol::intern("IsString"),
+                &ty,
                 span,
-            ))
+            ) {
+                return Ok(core::Expr::App(
+                    Box::new(from_string),
+                    Box::new(core_lit),
+                    span,
+                ));
+            }
         }
-        _ => Ok(core_lit),
+    }
+
+    Ok(core_lit)
+}
+
+/// Whether an OverloadedStrings literal at this type should dispatch a user
+/// `IsString` instance's `fromString` (rather than stay a `[Char]`).
+///
+/// The string-shaped builtins are excluded: `String`/`[Char]` IS the literal's
+/// native form, and `Text`/`ByteString` have dedicated lowering. Everything
+/// else with a concrete head constructor is a candidate — if no instance is in
+/// scope, `resolve_method_at_concrete_type` returns `None` and the caller falls
+/// back to the char list unchanged.
+fn dispatchable_isstring_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => {
+            !matches!(
+                c.name.as_str(),
+                "String" | "Char" | "Text" | "LazyText" | "ByteString"
+            ) && !c.name.as_str().ends_with(".Text")
+                && !c.name.as_str().ends_with(".ByteString")
+        }
+        // A saturated head like `Doc Text` — dispatch on the head constructor.
+        Ty::App(f, _) => dispatchable_isstring_ty(f),
+        // `[Char]` and bare lists are the native string form.
+        _ => false,
     }
 }
 
-/// Whether a type's head constructor is named `name`.
-fn ty_head_is(ty: &Ty, name: &str) -> bool {
+/// Whether a type's head is the strict `Data.Text.Text`, spelled bare or
+/// qualified. A field type recovered from an imported constructor's signature
+/// (e.g. `ChoiceString`'s `Text :: Data.Text.Text -> ChoiceString`) keeps its
+/// qualifier, so the exact-name check would miss it and leave an
+/// OverloadedStrings literal in that field an unpacked char list — read later
+/// as a `{len, bytes}` Text header, it segfaults. Mirrors codegen's
+/// `is_text_type`, minus the lazy variant (packing targets strict Text).
+fn ty_head_is_text(ty: &Ty) -> bool {
     match ty {
-        Ty::Con(c) => c.name.as_str() == name,
-        Ty::App(f, _) => ty_head_is(f, name),
+        Ty::Con(c) => {
+            let n = c.name.as_str();
+            n == "Text" || n.ends_with(".Text")
+        }
+        Ty::App(f, _) => ty_head_is_text(f),
         _ => false,
     }
 }
@@ -372,7 +551,7 @@ fn lower_lit(lit: &Lit, span: Span) -> LowerResult<core::Expr> {
 /// at a bare type VARIABLE would unify with any instance (the first match),
 /// turning a constraint-dict method like `Future`'s `mempty = return mempty`
 /// into a self-referential loop.
-fn has_concrete_head(ty: &Ty) -> bool {
+pub(crate) fn has_concrete_head(ty: &Ty) -> bool {
     match ty {
         Ty::Con(_) | Ty::List(_) | Ty::Tuple(_) | Ty::Prim(_) => true,
         Ty::App(f, _) => has_concrete_head(f),
@@ -405,6 +584,34 @@ fn binding_returns_in_dict_monad(ctx: &LowerContext, class_name: Symbol) -> bool
         .is_some_and(|sig| same_type_head(&dict_ty, result_of(sig)))
 }
 
+/// Whether this occurrence's recorded monad is a type VARIABLE and the
+/// in-scope `Monad` dictionary is for a variable too. `askx = RdT return`
+/// under `Monad m =>` passes the inner monad's `return` as a value; the
+/// binding returns in `RdT`, so `binding_returns_in_dict_monad` says no and
+/// the bare builtin `return` was left in a dictionary-passed position.
+fn occurrence_in_dict_monad_var(ctx: &LowerContext, span: Span) -> bool {
+    fn head(ty: &Ty) -> &Ty {
+        match ty {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    let monad = Symbol::intern("Monad");
+    // An UNTYPED `Monad` dictionary (an instance context's, or a method-level
+    // one like `lift`'s) is for the instance's inner monad variable — under
+    // the closure IO model, what `lift m = ExceptT (m >>= \a -> return (Right
+    // a))` must `return` in.
+    let dict_is_var = match ctx.lookup_dict_ty(monad) {
+        Some(t) => matches!(head(t), Ty::Var(_)),
+        None => io_closure_mode() && ctx.lookup_dict(monad).is_some(),
+    };
+    let occ_is_var = refined_occurrence_ty(ctx, span)
+        .as_ref()
+        .and_then(monad_head_of_method_occurrence)
+        .is_some_and(|h| matches!(h, Ty::Var(_)));
+    dict_is_var && occ_is_var
+}
+
 /// Whether an in-scope dictionary for `class_name` is one this occurrence
 /// should actually be selecting a method from.
 ///
@@ -426,9 +633,33 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // existential pattern match, say), so keep the old behaviour.
         return true;
     };
+    // A VALUE class is parameterized by the value type itself, which every
+    // method returns (`mempty :: c`, `(<>) :: c -> c -> c`, `mconcat :: [c]
+    // -> c`, `def :: a`). Reading a monad head off `c` found nothing, so a bare
+    // `mempty` inside `Monoid c =>` ignored the dictionary in scope and fell to
+    // the list builtin. Compare the result type's head instead; an unrecorded
+    // occurrence takes the dictionary in scope.
+    if matches!(class_name.as_str(), "Semigroup" | "Monoid" | "Default") {
+        fn result_of(ty: &Ty) -> &Ty {
+            match ty {
+                Ty::Fun(_, r) => result_of(r),
+                t => t,
+            }
+        }
+        return match refined_occurrence_ty(ctx, span) {
+            Some(occ) => same_type_head(&dict_ty, result_of(&occ)),
+            None => true,
+        };
+    }
     let occ_head = refined_occurrence_ty(ctx, span)
         .as_ref()
         .and_then(monad_head_of_method_occurrence);
+    if dispatch_dbg() {
+        eprintln!(
+            "[dict-match] {class_name}: dict_ty={dict_ty:?} occ={:?} head={occ_head:?}",
+            refined_occurrence_ty(ctx, span)
+        );
+    }
     match occ_head {
         // A dictionary for one monad must not answer for another, whatever
         // the class. `readWithM p` runs `p` at `ParsecT Sources st m` inside a
@@ -436,6 +667,12 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // PandocMonad method the ParsecT instance defines as `lift
         // getCommonState` — was selected from the dictionary for `m` and the
         // parser was handed an ExceptT-over-StateT action to run.
+        // A multi-parameter class's dictionary is for ALL its arguments, and
+        // the monad is not necessarily the first: `MonadSt s m` records
+        // `s := Int` first, which never matched `getx`'s monad `m`.
+        Some(occ_head) if ctx.class_param_count(class_name) > 1 => ctx
+            .lookup_dict_args(class_name)
+            .is_some_and(|args| args.iter().any(|a| same_type_head(a, &occ_head))),
         Some(occ_head) => same_type_head(&dict_ty, &occ_head),
         // Nothing recorded: keep what each class kind did before.
         None => !ctx.is_monad_family_class(class_name),
@@ -483,6 +720,188 @@ pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
     from_first_arg.or_else(|| applied_to(result_of(ty)))
 }
 
+/// The class and method of a use of a class method whose own constraints are
+/// dictionary-passed (`query :: Monoid c => …`), if `def_ref` is one.
+fn method_level_target(ctx: &LowerContext, def_ref: &DefRef) -> Option<(Symbol, Symbol)> {
+    let name = ctx.lookup_var(def_ref.def_id)?.name;
+    // An imported method may carry its module qualifier (`Text.Pandoc.Walk.
+    // query`); class method tables are keyed by the bare name.
+    let bare = match name.as_str().rsplit_once('.') {
+        Some((module, bare))
+            if !bare.is_empty()
+                && module.chars().next().is_some_and(char::is_uppercase)
+                && bare
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_lowercase() || c == '_') =>
+        {
+            Symbol::intern(bare)
+        }
+        _ => name,
+    };
+    // By reference, not by name: the pattern-bound `query` of `let (query,
+    // fragment) = break …` is no `Walkable` method, and was lowered as
+    // `query 0`.
+    let class = ctx.class_method_of_def(def_ref.def_id, bare)?;
+    ctx.method_level_dict_constraints(class, bare)?;
+    Some((class, bare))
+}
+
+/// A class method with method-level dictionaries used as a VALUE (not the
+/// head of an application): apply them to the selected method.
+fn apply_method_level_dicts_to_value(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    e: core::Expr,
+) -> core::Expr {
+    if ctx.method_level_active.contains(&def_ref.span) {
+        return e;
+    }
+    let Some((class, method)) = method_level_target(ctx, def_ref) else {
+        return e;
+    };
+    let Some(dicts) = ctx.method_level_dicts_at(class, method, def_ref.span) else {
+        return e;
+    };
+    dicts.into_iter().fold(e, |acc, d| {
+        core::Expr::App(Box::new(acc), Box::new(d), def_ref.span)
+    })
+}
+
+/// `lower_app`, supplying the method-level dictionaries of a class method at
+/// the head of the spine. Every instance's implementation of such a method
+/// takes them right after its instance dictionaries, so they go immediately
+/// before the spine's value arguments, whichever path resolved the method.
+fn lower_app_with_method_level(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<core::Expr> {
+    let mut head = f;
+    let mut n_args = 1usize;
+    while let Expr::App(g, _, _) = head {
+        head = g.as_ref();
+        n_args += 1;
+    }
+    let target = match head {
+        Expr::Var(dr) if !ctx.method_level_active.contains(&dr.span) => {
+            method_level_target(ctx, dr).map(|t| (t, dr.span))
+        }
+        _ => None,
+    };
+    let Some(((class, method), head_span)) = target else {
+        return lower_app(ctx, f, x, span);
+    };
+    ctx.method_level_active.insert(head_span);
+    let lowered = lower_app(ctx, f, x, span);
+    ctx.method_level_active.remove(&head_span);
+    let e = lowered?;
+    let Some(dicts) = ctx.method_level_dicts_at(class, method, head_span) else {
+        return Ok(e);
+    };
+    #[allow(clippy::result_large_err)]
+    fn insert(
+        e: core::Expr,
+        n: usize,
+        dicts: &[core::Expr],
+        span: Span,
+    ) -> Result<core::Expr, core::Expr> {
+        if n == 0 {
+            return Ok(dicts.iter().fold(e, |acc, d| {
+                core::Expr::App(Box::new(acc), Box::new(d.clone()), span)
+            }));
+        }
+        match e {
+            core::Expr::App(g, a, sp) => match insert(*g, n - 1, dicts, span) {
+                Ok(g) => Ok(core::Expr::App(Box::new(g), a, sp)),
+                Err(g) => Err(core::Expr::App(Box::new(g), a, sp)),
+            },
+            core::Expr::Let(b, body, sp) => match insert(*body, n, dicts, span) {
+                Ok(body) => Ok(core::Expr::Let(b, Box::new(body), sp)),
+                Err(body) => Err(core::Expr::Let(b, Box::new(body), sp)),
+            },
+            other => Err(other),
+        }
+    }
+    match insert(e, n_args, &dicts, span) {
+        Ok(e) => Ok(e),
+        Err(e) => {
+            if crate::context::ml_dbg() {
+                eprintln!("[ml] {class}.{method}: could not place method-level dicts at {span:?}");
+            }
+            Ok(e)
+        }
+    }
+}
+
+/// `foldMap f xs` whose Monoid is NOT a list, as
+/// `foldr (\x acc -> mappend (f x) acc) mempty xs` over that Monoid's
+/// dictionary.
+///
+/// codegen implements the `foldMap` builtin as `concatMap`, i.e. at the list
+/// Monoid only. pandoc's `Walkable` reaches every `query` through
+/// `F.foldMap (query f)` — at `Min Int` for section levels, at `Text` for
+/// `stringify` — and those results were walked as cons cells. The Monoid comes
+/// from the occurrence type `(a -> m) -> t a -> m`: a concrete `m` builds its
+/// instance dictionary, a variable `m` takes the Monoid dictionary in scope
+/// (the enclosing binding's own `Monoid m =>`). A list `m`, or an `m` that
+/// neither resolves, keeps the builtin.
+fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core::Expr> {
+    let occ = ctx.resolved_expr_ty_opt(span)?;
+    let Ty::Fun(f_ty, _) = &occ else {
+        return None;
+    };
+    let Ty::Fun(_, m_ty) = f_ty.as_ref() else {
+        return None;
+    };
+    let m_ty = ctx.expand_type_aliases(m_ty);
+    let monoid = Symbol::intern("Monoid");
+    let dict_expr = match &m_ty {
+        Ty::List(_) => return None,
+        Ty::Var(_) => core::Expr::Var(ctx.lookup_dict(monoid)?.clone(), span),
+        t if has_concrete_head(t) => {
+            ctx.resolve_dictionary(&Constraint::new(monoid, t.clone(), span), span)?
+        }
+        _ => return None,
+    };
+    let dict_var = ctx.fresh_var("$dFoldMap", Ty::Error, span);
+    let mappend =
+        ctx.select_method_from_dict(&dict_var, monoid, Symbol::intern("mappend"), span)?;
+    let mempty = ctx.select_method_from_dict(&dict_var, monoid, Symbol::intern("mempty"), span)?;
+    let f = ctx.fresh_var("$fm_f", Ty::Error, span);
+    let xs = ctx.fresh_var("$fm_xs", Ty::Error, span);
+    let x = ctx.fresh_var("$fm_x", Ty::Error, span);
+    let acc = ctx.fresh_var("$fm_acc", Ty::Error, span);
+    let app = |a: core::Expr, b: core::Expr| core::Expr::App(Box::new(a), Box::new(b), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    // \x acc -> mappend (f x) acc
+    let step = core::Expr::Lam(
+        x.clone(),
+        Box::new(core::Expr::Lam(
+            acc.clone(),
+            Box::new(app(app(mappend, app(var(&f), var(&x))), var(&acc))),
+            span,
+        )),
+        span,
+    );
+    let foldr_var = Var {
+        name: Symbol::intern("foldr"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let body = app(
+        app(app(core::Expr::Var(foldr_var, span), step), mempty),
+        var(&xs),
+    );
+    let lam = core::Expr::Lam(f, Box::new(core::Expr::Lam(xs, Box::new(body), span)), span);
+    Some(core::Expr::Let(
+        Box::new(Bind::NonRec(dict_var, Box::new(dict_expr))),
+        Box::new(lam),
+        span,
+    ))
+}
+
 /// Lower a variable reference to Core.
 ///
 /// This handles several cases:
@@ -496,9 +915,97 @@ pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
 ///    resolve instances for concrete types.
 ///
 /// 3. **Regular variables**: Just return a variable reference.
+/// `fromIntegral`/`fromInteger`/`toInteger` between `Integer` and a machine
+/// integer are real conversions (the bignum is boxed), but the builtin's own
+/// type is a loose scheme (`a -> b`, or `Int -> Int`). Record the resolved
+/// type on the variable so codegen can tell them from the identity cases.
+fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Expr) {
+    let core::Expr::Var(v, _) = e else {
+        return;
+    };
+    if matches!(
+        v.name.as_str(),
+        "+" | "-" | "*" | "==" | "/=" | "<" | "<=" | ">" | ">=" | "div" | "mod" | "quot" | "rem"
+    ) {
+        // Core bakes the single-pass type (`t -> t -> Bool`); the resolved
+        // one tells codegen the operands are bignums when they are — and, for
+        // (in)equality, the element type of compared lists: pandoc's HTML
+        // writer compares attribute lists bound by tuple patterns, which carry
+        // no type of their own (`hclasses /= dclasses` compared pointers).
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            let integer = matches!(&resolved, Ty::Fun(a, _)
+                if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"));
+            let ground_list_eq = matches!(v.name.as_str(), "==" | "/=")
+                && matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
+            if integer || ground_list_eq {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if matches!(v.name.as_str(), "show" | "print") {
+        // Codegen otherwise picks a Show instance from the argument's shape,
+        // which an `if` whose branches mix a literal and a variable defeats
+        // (`show (if w == 0 then 7 else w)` went to an unrelated user type's
+        // derived Show).
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if !has_type_variables(a)) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if v.name.as_str() == "^" {
+        // `(^)`'s base and exponent types differ (`Integer ^ Int`); codegen
+        // picks the multiplication from the resolved base type.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Con(_))) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if !matches!(
+        v.name.as_str(),
+        "fromIntegral" | "fromInteger" | "toInteger"
+    ) {
+        return;
+    }
+    let Some(resolved) = ctx.resolved_expr_ty_opt(span) else {
+        return;
+    };
+    if let Ty::Fun(a, r) = &resolved {
+        let is_con = |t: &Ty, name: Option<&str>| matches!(t, Ty::Con(c) if name.is_none_or(|n| c.name.as_str() == n));
+        let floating = |t: &Ty| is_con(t, Some("Double")) || is_con(t, Some("Float"));
+        if (is_con(a, Some("Integer")) && is_con(r, None))
+            || (is_con(a, None) && is_con(r, Some("Integer")))
+            || (is_con(a, None) && floating(r))
+        {
+            v.ty = resolved.clone();
+        }
+    }
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
+    if let (Some(want), Some(n)) = (occ_dbg_name(), var_name) {
+        if n.as_str() == want {
+            eprintln!(
+                "[occ] {n} def={:?} span={:?} resolved={:?} raw={:?} scheme={:?}",
+                def_ref.def_id,
+                def_ref.span,
+                ctx.resolved_expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                ctx.expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                ctx.lookup_scheme(def_ref.def_id).map(|s| dbg_ty(&s.ty)),
+            );
+        }
+    }
+
+    if let Some(e) = try_lower_bare_sequence(ctx, def_ref)? {
+        return Ok(e);
+    }
 
     if std::env::var_os("BHC_DBG_MONOP").is_some() {
         if let Some(n) = var_name {
@@ -515,6 +1022,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     }
 
     if let Some(name) = var_name {
+        if let Some(e) = lower_monad_plus_builtin(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         // `guard :: Alternative f => Bool -> f ()` — an external constrained
         // FUNCTION (not a class method), unimplemented as a builtin, so it
         // stubs at runtime (pandoc's `guardEnabled` = `getOption
@@ -547,6 +1057,51 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         return Ok(lam);
                     }
                 }
+            }
+        }
+        // `liftA2`/`liftM2` in VALUE position. Its monad comes from the
+        // occurrence type (three arguments, then `m c`), else from the instance
+        // being defined — `(<>) = liftA2 (<>)` is a bare partial application
+        // with no type of its own, and it is exactly the case that matters.
+        if matches!(name.as_str(), "liftA2" | "liftM2") {
+            let mut cands: Vec<Ty> = Vec::new();
+            cands.extend(ctx.resolved_expr_ty_opt(def_ref.span).and_then(|t| {
+                let mut cur = t;
+                for _ in 0..3 {
+                    let Ty::Fun(_, r) = cur else { return None };
+                    cur = *r;
+                }
+                match cur {
+                    Ty::App(m, _) => Some(*m),
+                    _ => None,
+                }
+            }));
+            if let Some(inst) = ctx.current_instance_type().cloned() {
+                // The class parameter of `Semigroup (Future s a)` is FULLY
+                // applied, while `liftA2` works one layer up, at `Future s`.
+                if let Ty::App(ref head, _) = inst {
+                    cands.push(head.as_ref().clone());
+                }
+                cands.push(inst);
+            }
+            for m_ty in cands {
+                // An eager monad is NOT skipped: `ma >>= \a -> mb >>= \b ->
+                // pure (f a b)` is what a do-block at IO compiles to, and the
+                // alternative is the `liftA2` runtime stub.
+                if applied_head_name(&m_ty).is_none() {
+                    continue;
+                }
+                if let Some(lam) = lower_lift_a2_lambda(ctx, &m_ty, def_ref.span) {
+                    return Ok(lam);
+                }
+            }
+        }
+        if matches!(
+            name.as_str(),
+            "foldMap" | "F.foldMap" | "Data.Foldable.foldMap"
+        ) {
+            if let Some(lam) = lower_fold_map_via_monoid(ctx, def_ref.span) {
+                return Ok(lam);
             }
         }
         if name.as_str() == "guard" {
@@ -637,8 +1192,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // `do` block it reached. Drop the qualifier and let the dispatch below
         // find the instance's own `*>`.
         let name = instance_local_qualified_method(ctx, name).unwrap_or(name);
+        if let Some(e) = lower_value_pure_at_builtin(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         // Check if this is a class method
-        let is_method = ctx.is_class_method(name);
+        let is_method = ctx.class_method_of_def(def_ref.def_id, name);
         // `return` is in NO class's method list: the builtin Monad layout is
         // [`>>=`, `>>`] and `return` is Applicative's `pure` under another
         // name, so `is_class_method` does not recognise it and the whole
@@ -657,7 +1215,8 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         if is_method.is_none()
             && name.as_str() == "return"
             && crate::dictionary::monad_witness_enabled()
-            && binding_returns_in_dict_monad(ctx, Symbol::intern("Monad"))
+            && (binding_returns_in_dict_monad(ctx, Symbol::intern("Monad"))
+                || (io_closure_mode() && occurrence_in_dict_monad_var(ctx, def_ref.span)))
         {
             if let Some(method_expr) =
                 ctx.select_method_via_superclass(Symbol::intern("Monad"), name, def_ref.span)
@@ -665,7 +1224,45 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(method_expr);
             }
         }
+        // A value-position `return` whose occurrence type names a concrete,
+        // non-builtin monad (closure IO model): that monad's `pure`.
+        // pandoc-types' default `walk f = runIdentity . walkM (return . f)`
+        // has no dictionary in scope to hop from, and the bare builtin was
+        // IO's `return`, which `runIdentity` then unwrapped.
+        if is_method.is_none() && name.as_str() == "return" && io_closure_mode() {
+            let monad = refined_occurrence_ty(ctx, def_ref.span)
+                .as_ref()
+                .and_then(monad_head_of_method_occurrence);
+            if let Some(m) =
+                monad.filter(|m| has_concrete_head(m) && !LowerContext::is_builtin_monad_type(m))
+            {
+                if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                    Symbol::intern("pure"),
+                    Symbol::intern("Applicative"),
+                    &m,
+                    def_ref.span,
+                ) {
+                    return Ok(method_expr);
+                }
+            }
+        }
         if let Some(class_name) = is_method {
+            // `mappend = (<>)` inside `instance (Semigroup a, Monoid a) =>
+            // Monoid (Future s a)`: the alias is `<>` at `Future s a`. The
+            // in-scope `Semigroup` dictionary is the ELEMENT's, and taking it
+            // ran Inlines' `<>` on two Futures.
+            if ctx.is_instance_alias(def_ref.span) {
+                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                    if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                        name,
+                        class_name,
+                        &inst_ty,
+                        def_ref.span,
+                    ) {
+                        return Ok(method_expr);
+                    }
+                }
+            }
             // This is a class method - we need to select it from a dictionary
             // Look for an in-scope dictionary for this class
             let dict_matches = in_scope_dict_matches(ctx, class_name, def_ref.span);
@@ -685,9 +1282,25 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // `mempty :: [Int]` never reached instance resolution at all
                 // and stayed a bare `mempty` Var in Core, which `length` then
                 // walked as garbage. Only the result-type channel is opened
-                // here; superclass extraction stays user-classes-only.
+                // here, plus the one superclass edge between these classes: a
+                // VALUE `(<>)` under only `Monoid m =>` (`foldr (<>) mempty`)
+                // must come out of the Monoid dictionary's Semigroup slot.
+                // Applied `a <> b` already took that hop in `lower_app`; the
+                // bare operator stayed the builtin and hit its stub.
+                if ctx.lookup_dict(class_name).is_none() {
+                    if let Some(method_expr) =
+                        ctx.select_method_via_superclass(class_name, name, def_ref.span)
+                    {
+                        return Ok(method_expr);
+                    }
+                }
                 if let Some(method_expr) =
                     ctx.select_method_by_result_type(class_name, name, def_ref.def_id, def_ref.span)
+                {
+                    return Ok(method_expr);
+                }
+                if let Some(method_expr) =
+                    ctx.value_method_at_newtype_rep(class_name, name, def_ref.span)
                 {
                     return Ok(method_expr);
                 }
@@ -793,7 +1406,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // the named instance method at that head; builtin monads and
                 // unresolved heads fall through to the codegen fast path as
                 // before.
-                if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                // The REFINED type, so an expected type pushed in from the call
+                // site counts: `liftA2 (<>) one two` leaves nothing on the `<>`
+                // itself, and `hint_lift_a2_function_ty` supplies the element
+                // types that pin the class parameter.
+                if let Some(occ_ty) = refined_occurrence_ty(ctx, def_ref.span) {
                     // Semigroup/Monoid parameterize over the VALUE type itself:
                     // take the first parameter (or result) directly, unwrapping
                     // one list for `mconcat :: [a] -> a`.
@@ -805,7 +1422,13 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                             t => t,
                         };
                         Some(match target {
-                            Ty::List(t) => t.as_ref().clone(),
+                            // Only `mconcat :: [a] -> a` takes a LIST of the
+                            // class parameter. For `<>`/`mappend`/`mempty` the
+                            // value type IS the class parameter, and unwrapping
+                            // it resolved `"a" <> "b"` at `Semigroup Char` —
+                            // which does not exist, so the dictionary came back
+                            // with an `error "No implementation"` in its slot.
+                            Ty::List(t) if name.as_str() == "mconcat" => t.as_ref().clone(),
                             // Alias-qualified container cons (`Set.Set
                             // Extension` under `import qualified Data.Set as
                             // Set`) must match the builtin instance heads,
@@ -819,9 +1442,18 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         if has_concrete_head(&m_head)
                             && !LowerContext::is_builtin_monad_type(&m_head)
                         {
+                            // `return` is not a slot of the Monad layout; it IS
+                            // Applicative's `pure`. `walk f = runIdentity .
+                            // walkM (return . f)` (pandoc-types' default walk)
+                            // left a bare `return`, IO's under closure IO.
+                            let (method_name, method_class) = if name.as_str() == "return" {
+                                (Symbol::intern("pure"), Symbol::intern("Applicative"))
+                            } else {
+                                (name, class_name)
+                            };
                             if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
-                                name,
-                                class_name,
+                                method_name,
+                                method_class,
                                 &m_head,
                                 def_ref.span,
                             ) {
@@ -871,7 +1503,26 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
 
     // Regular variable handling
     let base_expr = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-        core::Expr::Var(var.clone(), def_ref.span)
+        // The MonadError builtins compile by the monad they run in. Inside a
+        // function codegen reads that from the ambient stack, but at a use
+        // site with no such stack (`runIO (throwError e)` in `main`) only the
+        // occurrence type says it is PandocIO's ExceptT-over-StateT; carry it.
+        let mut var = var.clone();
+        if matches!(var.ty, Ty::Error) && matches!(var.name.as_str(), "throwError" | "catchError") {
+            if let Some(occ) = refined_occurrence_ty(ctx, def_ref.span) {
+                var.ty = occ;
+            }
+        }
+        // A whole-body instance alias (`label = Impl.label`) is the method
+        // at the instance; typeck records no type at its span, and without
+        // one the monomorphizer never specializes the implementation there
+        // (its `liftIO` then compiled as the identity of an unknown monad).
+        if let Some(alias_ty) = ctx.instance_alias_ty(def_ref.span) {
+            if !has_type_variables(alias_ty) {
+                var.ty = alias_ty.clone();
+            }
+        }
+        core::Expr::Var(var, def_ref.span)
     } else {
         // Variable not found - this could be a builtin or external reference
         // Create a placeholder variable
@@ -926,6 +1577,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(dicted);
             }
             if all_deferred && !any_in_scope {
+                if let Some(dicted) =
+                    instance_alias_dicts(ctx, def_ref, base_expr.clone(), &user_constraints)
+                {
+                    return Ok(dicted);
+                }
                 // "Defer to App-level" assumes this reference is the head of an
                 // application, so an argument type will pin the constraint. A
                 // constrained *value* has no arguments and is never that head:
@@ -1052,10 +1708,102 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     Ok(base_expr)
 }
 
+/// `print v` / `show v` where `v` is a local the Core carries untyped — a
+/// case-alternative or do-bound binder (`Right ns -> print ns`). Codegen picks
+/// the show from the argument's TYPE and, finding `Error`, printed a list's
+/// address as an Int. Give that one occurrence the type typeck recorded for
+/// it, when the type is fully concrete. Only the occurrence is typed, never
+/// the binder, so nothing else's representation changes.
+fn type_shown_variable(ctx: &LowerContext, x: &hir::Expr, e: core::Expr) -> core::Expr {
+    let core::Expr::App(func, arg, app_span) = e else {
+        return e;
+    };
+    let is_show = matches!(
+        func.as_ref(),
+        core::Expr::Var(v, _) if matches!(v.name.as_str(), "print" | "show")
+    );
+    let arg = match *arg {
+        core::Expr::Var(mut v, vspan) if is_show && matches!(v.ty, Ty::Error) => {
+            // The single-pass type first; the fixpoint one when that left a
+            // variable (a binder typed only by the scrutinee's later solve).
+            if let Some(ty) = ctx
+                .expr_ty_opt(x.span())
+                .filter(is_fully_concrete_ty)
+                .or_else(|| {
+                    ctx.resolved_expr_ty_opt(x.span())
+                        .filter(is_fully_concrete_ty)
+                })
+            {
+                v.ty = ty;
+            }
+            core::Expr::Var(v, vspan)
+        }
+        other => other,
+    };
+    core::Expr::App(func, Box::new(arg), app_span)
+}
+
+/// `runStateT m s` / `evalStateT` / `execStateT` whose occurrence type left
+/// the StateT's inner monad a type variable. Codegen picks the run's
+/// representation from that inner monad, and an operand of a dictionary-passed
+/// `>>=` (`runStateT (gets f) s0 >>= k` at a newtype over ExceptT-over-StateT)
+/// keeps its instantiation variable in Core, so the run took the StateT-over-IO
+/// path and handed the bind an executed pair instead of an action. Give the
+/// runner occurrence typeck's resolved type when that names the inner monad.
+/// Only this occurrence is retyped.
+fn type_state_runner(ctx: &LowerContext, e: core::Expr) -> core::Expr {
+    fn inner_monad(ty: &Ty) -> Option<&Ty> {
+        let mut t = ty;
+        while let Ty::Forall(_, b) = t {
+            t = b;
+        }
+        // `StateT s m a -> …`: the runner's first parameter.
+        let Ty::Fun(param, _) = t else { return None };
+        let Ty::App(sm, _) = param.as_ref() else {
+            return None;
+        };
+        let Ty::App(st_s, m) = sm.as_ref() else {
+            return None;
+        };
+        let Ty::App(st, _) = st_s.as_ref() else {
+            return None;
+        };
+        matches!(st.as_ref(), Ty::Con(c) if c.name.as_str() == "StateT").then_some(m.as_ref())
+    }
+    fn monad_is_known(m: &Ty) -> bool {
+        match m {
+            Ty::Con(_) => true,
+            Ty::App(f, a) => monad_is_known(f) && !matches!(a.as_ref(), Ty::Error),
+            _ => false,
+        }
+    }
+    fn retype(e: &mut core::Expr, ctx: &LowerContext) {
+        match e {
+            core::Expr::App(f, _, _) | core::Expr::TyApp(f, _, _) => retype(f, ctx),
+            core::Expr::Var(v, span)
+                if !io_closure_mode()
+                    && matches!(v.name.as_str(), "runStateT" | "evalStateT" | "execStateT")
+                    && !inner_monad(&v.ty).is_some_and(monad_is_known) =>
+            {
+                if let Some(ty) = ctx
+                    .resolved_expr_ty_opt(*span)
+                    .filter(|t| inner_monad(t).is_some_and(monad_is_known))
+                {
+                    v.ty = ty;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut e = e;
+    retype(&mut e, ctx);
+    e
+}
+
 /// Every leaf of the type is a concrete constructor/primitive — no type
 /// variables, no `Ty::Error`. Downstream dictionary resolution can act on
 /// such a type without guessing.
-fn is_fully_concrete_ty(ty: &Ty) -> bool {
+pub(crate) fn is_fully_concrete_ty(ty: &Ty) -> bool {
     match ty {
         Ty::Con(_) | Ty::Prim(_) => true,
         Ty::App(f, a) => is_fully_concrete_ty(f) && is_fully_concrete_ty(a),
@@ -1111,7 +1859,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                     // Core IR params often have ty: Error in type_schemes.
                     // Check the Core Var's type as a fallback (populated from
                     // the function's type signature in compile_equations).
-                    if let Some(var) = ctx.lookup_var(def_ref.def_id) {
+                    let from_var = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
                         let vty = ctx.expand_type_aliases(&var.ty);
                         match &vty {
                             Ty::Con(_) => Some(vty),
@@ -1120,19 +1868,34 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                         }
                     } else {
                         None
-                    }
+                    };
+                    from_var.or_else(|| {
+                        ctx.pattern_binder_ty(def_ref.def_id)
+                            .map(|t| ctx.expand_type_aliases(t))
+                    })
                 }
                 _ => None,
             }
         }
-        Expr::Lit(lit, _) => match lit {
+        Expr::Lit(lit, lit_span) => match lit {
             Lit::Int(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))),
             Lit::Float(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star))),
             Lit::Char(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star))),
-            Lit::String(_) => Some(Ty::List(Box::new(Ty::Con(TyCon::new(
-                Symbol::intern("Char"),
-                Kind::Star,
-            ))))),
+            // An OverloadedStrings literal used where `Text` is expected IS a
+            // `Text` — `lower_lit_at` packs it on the same hint. Answering
+            // `[Char]` here picked `HasChars [Char]` for `literal "hello" ::
+            // Doc Text`, and the String instance walked a Text header.
+            Lit::String(_) => Some(
+                ctx.expected_ty_opt(*lit_span)
+                    .filter(ty_head_is_text)
+                    .or_else(|| refined_occurrence_ty(ctx, *lit_span).filter(ty_head_is_text))
+                    .unwrap_or_else(|| {
+                        Ty::List(Box::new(Ty::Con(TyCon::new(
+                            Symbol::intern("Char"),
+                            Kind::Star,
+                        ))))
+                    }),
+            ),
         },
         // List literal `[a, b, ...]`: infer the element type from the first
         // element, yielding `[elem]`. Enables resolving dictionaries for
@@ -1141,7 +1904,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
             let elem_ty = try_infer_arg_type(ctx, elems.first()?)?;
             Some(Ty::List(Box::new(elem_ty)))
         }
-        Expr::App(f, x, _) => {
+        Expr::App(f, x, app_span) => {
             // Peel off App layers to find head constructor and collect args:
             // App(App(Con(Pair), x), y) → (Con(Pair), [x, y])
             let mut head = f.as_ref();
@@ -1161,6 +1924,24 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                         extract_constructor_result_type(&con_ty, &con_args, ctx)
                     {
                         return Some(result_ty);
+                    }
+                    // Typeck's recorded type for this application, when it
+                    // is fully concrete.
+                    if let Some(ty) = ctx.resolved_expr_ty_opt(*app_span) {
+                        if !has_type_variables(&ty) && !matches!(ty, Ty::Error) {
+                            return Some(ty);
+                        }
+                    }
+                    // A bare head is only the type of a constructor whose type
+                    // takes no arguments. For `Many [1] :: Many Int` it bound
+                    // `Monoid m` to a kind-mismatched `Many`, which outranked
+                    // the occurrence type and dropped the dictionary.
+                    let mut res = &con_ty;
+                    while let Ty::Fun(_, r) = res {
+                        res = r.as_ref();
+                    }
+                    if matches!(res, Ty::App(..)) {
+                        return None;
                     }
                     // Return bare type name. The caller (lower_app) will try
                     // applied-type resolution as a second attempt if this fails.
@@ -1467,6 +2248,22 @@ fn occurrence_or_scheme_ty(ctx: &LowerContext, def_ref: &DefRef, scheme_ty: &Ty)
         .unwrap_or_else(|| scheme_ty.clone())
 }
 
+/// `var` (a reference to a constrained binding) carrying the type it is USED
+/// at here, not its binder's scheme type.
+///
+/// `fooM :: Monad n => n Int` used inside `evalStateT` at `StateT WriterState
+/// m` kept `n Int`. A clone of the enclosing writer at `m = PandocIO` then
+/// substituted `n` with PandocIO's own monad and specialized `fooM` there, so
+/// it returned an action of the wrong layer and the writer's state was read
+/// out of it.
+fn at_occurrence_ty(ctx: &LowerContext, var: &Var, span: Span) -> Var {
+    let mut var = var.clone();
+    if let Some(occ) = refined_occurrence_ty(ctx, span).filter(|t| !matches!(t, Ty::Error)) {
+        var.ty = occ;
+    }
+    var
+}
+
 /// Every dictionary a constrained VALUE needs, from whichever source has it.
 ///
 /// Resolving the whole set at once, and only when the occurrence pins EVERY
@@ -1491,11 +2288,38 @@ fn lower_constrained_value_all_dicts(
     let mut subst = bhc_types::Subst::new();
     match_ty(scheme_ty, &occ_ty, &mut subst);
     // A function instantiation means this is a constrained *function*; those
-    // resolve at the application site, which builds its own head var.
-    if matches!(subst.apply(scheme_ty), Ty::Fun(..)) {
+    // resolve at the application site, which builds its own head var — when
+    // there is one. Under the closure IO model a function passed as an
+    // argument (`flip evalStateT def`, with the transformers library's
+    // `evalStateT :: Monad m => …`) is a value and is resolved here.
+    // So, in either model, is one whose every constraint is a monad witness
+    // (`task :: MonadPlus m => …` in `mapM task xs` at `Maybe`): nothing at
+    // the use site supplies it later.
+    let only_monad_witnesses = constraints.iter().all(|c| {
+        matches!(
+            c.class.as_str(),
+            "Monad" | "Applicative" | "MonadPlus" | "Alternative"
+        )
+    });
+    if matches!(subst.apply(scheme_ty), Ty::Fun(..))
+        && (!(io_closure_mode() || only_monad_witnesses)
+            || ctx.app_head_spans.contains(&def_ref.span))
+    {
         return None;
     }
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
+    let var = at_occurrence_ty(ctx, &var, def_ref.span);
+    // First with functional-dependency completion: a constraint argument
+    // that appears only in the constraint (`t` in notFollowedBy's
+    // `Stream s m t`) is not fixed by the occurrence type, and without it
+    // `notFollowedBy . char` passed notFollowedBy with no dictionary.
+    if let Some(dicts) = resolve_user_dicts(ctx, constraints, &subst, def_ref.span) {
+        let mut result = core::Expr::Var(var, def_ref.span);
+        for dict in dicts {
+            result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+        }
+        return Some(result);
+    }
     let mut dicts = Vec::with_capacity(constraints.len());
     let mut any_real = false;
     for c in constraints {
@@ -1615,6 +2439,208 @@ fn arrow_count(ty: &Ty) -> usize {
 /// head (`maybe`, `id`, `either`) carries the type inward just as a declared
 /// one does; this is why pandoc's `orderedListStart` (`try (maybe
 /// anyOrderedListMarker … mbstydelim)`) is reached at all.
+/// The variable name `BHC_DBG_OCC` asks to trace, read once.
+fn occ_dbg_name() -> Option<&'static str> {
+    static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::env::var("BHC_DBG_OCC").ok())
+        .as_deref()
+}
+
+/// For a saturated `liftA2 f ma mb` (or `liftM2`), record `f`'s type from the
+/// element types of the two actions and of the result.
+///
+/// `liftA2 :: (a -> b -> c) -> m a -> m b -> m c`, so `a`, `b` and `c` are
+/// exactly what the operands and this application carry. Without the hint a
+/// class method passed as `f` has only a type variable and is emitted as the
+/// builtin — `stub: <> not implemented` the moment the element type is a user
+/// type.
+fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr, span: Span) {
+    // Spine: `((liftA2 fn) ma) x`.
+    let hir::Expr::App(inner, mb, _) = f else {
+        return;
+    };
+    let hir::Expr::App(head, fn_arg, _) = inner.as_ref() else {
+        return;
+    };
+    let hir::Expr::Var(dr) = head.as_ref() else {
+        return;
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return;
+    };
+    if !matches!(name.as_str(), "liftA2" | "liftM2") {
+        return;
+    }
+    // Expanded: the element type reaches instance lookup as whatever synonym
+    // the source wrote, and `String` matches no instance — the dictionary came
+    // back with an `error "No implementation for method"` in its `<>` slot,
+    // while `[Char]` resolves to the list instance.
+    let elem = |ctx: &LowerContext, t: Option<Ty>| match t {
+        Some(Ty::App(_, e)) => Some(ctx.expand_type_aliases(e.as_ref())),
+        _ => None,
+    };
+    let a = elem(ctx, ctx.resolved_expr_ty_opt(mb.span()));
+    let b = elem(ctx, ctx.resolved_expr_ty_opt(x.span()));
+    let c = elem(ctx, ctx.resolved_expr_ty_opt(span));
+    let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+        return;
+    };
+    if has_type_variables(&a) || has_type_variables(&b) || has_type_variables(&c) {
+        return;
+    }
+    let want = Ty::Fun(Box::new(a), Box::new(Ty::Fun(Box::new(b), Box::new(c))));
+    propagate_expected_ty(ctx, fn_arg, &want, 0);
+}
+
+/// Under the closure IO model, the monad a monad-family method application
+/// runs in as typeck recorded it on the application itself, when that names a
+/// concrete constructor: `runF (do { Pandoc _ bs <- B.doc <$> blocks; … })`
+/// inside a parser's do-block binds in `Future ParserState`, while the monad
+/// context stack still holds the enclosing `ParsecT`.
+fn own_concrete_monad(ctx: &LowerContext, span: Span) -> Option<Ty> {
+    if !io_closure_mode() {
+        return None;
+    }
+    let Some(Ty::App(monad, _)) = ctx.resolved_expr_ty_opt(span) else {
+        return None;
+    };
+    has_concrete_head(&monad).then_some(*monad)
+}
+
+/// Under the closure IO model (spec/BHC-BRIEF-0005), a `>>=`/`>>` that every
+/// dispatch path left as the builtin, at a monad typeck did not pin to a
+/// constructor, binds in the `Monad` dictionary in scope (directly or through a
+/// superclass). The builtin is IO's bind there, which is wrong for any other
+/// monad: parsec's `tokenPrimEx` binds `uncons input` inside the rank-N
+/// `ParsecT` field, where nothing recorded its monad, and with only the
+/// `Stream s m t` dictionary in scope the builtin ran an `Identity` action as
+/// IO and every token parser failed.
+fn bind_via_scope_monad(ctx: &mut LowerContext, head: &hir::Expr, e: core::Expr) -> core::Expr {
+    if !io_closure_mode() {
+        return e;
+    }
+    let Expr::Var(dr) = head else {
+        return e;
+    };
+    // Peel the (two) applications down to the head Core variable.
+    let core::Expr::App(f1, b, sp1) = e else {
+        return e;
+    };
+    let core::Expr::App(f0, a, sp0) = *f1 else {
+        return core::Expr::App(f1, b, sp1);
+    };
+    let is_builtin_bind = matches!(f0.as_ref(), core::Expr::Var(v, _)
+        if matches!(v.name.as_str(), ">>=" | ">>"));
+    let pinned = refined_occurrence_ty(ctx, dr.span)
+        .as_ref()
+        .and_then(monad_head_of_method_occurrence)
+        .is_some_and(|h| !matches!(h, Ty::Var(_)));
+    let method = match f0.as_ref() {
+        core::Expr::Var(v, _) if is_builtin_bind && !pinned => Some(v.name),
+        _ => None,
+    };
+    let selected = method.and_then(|m| {
+        ctx.allow_multi_param_hop = true;
+        let sel = ctx.select_method_via_superclass(Symbol::intern("Monad"), m, dr.span);
+        ctx.allow_multi_param_hop = false;
+        sel
+    });
+    let head_expr = selected.unwrap_or(*f0);
+    core::Expr::App(
+        Box::new(core::Expr::App(Box::new(head_expr), a, sp0)),
+        b,
+        sp1,
+    )
+}
+
+/// Whether `BHC_DBG_DISPATCH` tracing is on, read once.
+/// Dictionaries for a constrained function used as a whole instance-method
+/// body — `fileExists = IO.fileExists` in pandoc's `instance PandocMonad
+/// PandocIO`, where `IO.fileExists :: (PandocMonad m, MonadIO m) => …`.
+///
+/// Such a body is eta-expanded only after it is lowered, so it never becomes
+/// the head of an application and the usual "defer to the application"
+/// path left it with no dictionaries: the instance method called its
+/// implementation one argument short. The instance fixes the class
+/// variable, so every constraint can be resolved here. `None` unless the
+/// reference is an instance alias and all its dictionaries resolve.
+fn instance_alias_dicts(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    base_expr: core::Expr,
+    constraints: &[Constraint],
+) -> Option<core::Expr> {
+    if !ctx.is_instance_alias(def_ref.span) {
+        return None;
+    }
+    let inst_class = ctx.current_instance_class()?;
+    let inst_ty = ctx.current_instance_type().cloned()?;
+    let mut subst = bhc_types::Subst::new();
+    for c in constraints.iter().filter(|c| c.class == inst_class) {
+        for a in &c.args {
+            if let Ty::Var(v) = a {
+                subst.insert(v, inst_ty.clone());
+            }
+        }
+    }
+    // An implementation constrained only by OTHER classes (`label ::
+    // MonadIO m => String -> m String` for `instance Store App`) is pinned by
+    // the method's own type at the instance (`String -> App String`).
+    if let Some(alias_ty) = ctx.instance_alias_ty(def_ref.span).cloned() {
+        if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+            let scheme_ty = ctx.expand_type_aliases(&scheme.ty);
+            match_ty(&scheme_ty, &ctx.expand_type_aliases(&alias_ty), &mut subst);
+        }
+    }
+    if subst.is_empty() {
+        return None;
+    }
+    // When `lower_var` found no ground instance-level type for the alias,
+    // carry the scheme instantiated at the instance instead: the
+    // monomorphizer specializes the implementation from it.
+    let mut base_expr = base_expr;
+    if let core::Expr::Var(v, _) = &mut base_expr {
+        if matches!(v.ty, Ty::Error) || has_type_variables(&v.ty) {
+            if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+                v.ty = subst.apply(&scheme.ty);
+            }
+        }
+    }
+    let mut result = base_expr;
+    for c in constraints {
+        let at_inst = Constraint::new_multi(
+            c.class,
+            c.args.iter().map(|a| subst.apply(a)).collect(),
+            c.span,
+        );
+        let dict = ctx.resolve_dictionary(&at_inst, def_ref.span)?;
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
+}
+
+/// The `IO` head of a monad-family occurrence's own recorded type (`IO b` for
+/// `a >> b`, after stripping the arrows of a partial application), or `None`
+/// when typeck recorded anything else.
+fn io_occurrence_head(ctx: &LowerContext, span: Span) -> Option<Ty> {
+    let ty = ctx.resolved_expr_ty_opt(span)?;
+    let mut cur = &ty;
+    while let Ty::Fun(_, r) = cur {
+        cur = r.as_ref();
+    }
+    match cur {
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(c) if c.name.as_str() == "IO") => {
+            Some(head.as_ref().clone())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn dispatch_dbg() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_DBG_DISPATCH").is_some())
+}
+
 fn prop_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_PROP").is_some())
@@ -1655,8 +2681,35 @@ pub(crate) fn propagate_expected_ty(
         Expr::Var(def_ref) => {
             ctx.record_expected_ty(def_ref.span, expected.clone());
         }
+        // A literal's own type is erased by Core (`lower_lit` records
+        // `Ty::Error`), so an OverloadedStrings string literal used where a
+        // `Text` is expected — a constructor field, a function argument —
+        // needs the caller's expected type to know it must pack. Only
+        // `lower_lit_at` reads this back (via `refined_occurrence_ty`), and it
+        // acts on string literals alone, so recording it for every literal is
+        // inert everywhere else.
+        Expr::Lit(_, span) => {
+            ctx.record_expected_ty(*span, expected.clone());
+        }
         Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) => {
             propagate_expected_ty(ctx, inner, expected, depth + 1);
+        }
+        // `["a", "b"]` where `[Text]` is expected: each element is a `Text`.
+        Expr::List(elems, _) => {
+            if let Ty::List(elem_ty) = expected {
+                for e in elems {
+                    propagate_expected_ty(ctx, e, elem_ty, depth + 1);
+                }
+            }
+        }
+        Expr::Tuple(elems, _) => {
+            if let Ty::Tuple(elem_tys) = expected {
+                if elem_tys.len() == elems.len() {
+                    for (e, t) in elems.iter().zip(elem_tys) {
+                        propagate_expected_ty(ctx, e, t, depth + 1);
+                    }
+                }
+            }
         }
         Expr::If(_, then_e, else_e, _) => {
             propagate_expected_ty(ctx, then_e, expected, depth + 1);
@@ -1751,14 +2804,21 @@ fn monadic_operand_tys(name: &str, expected: &Ty, nargs: usize) -> Option<Vec<Op
     let in_monad = Ty::App(monad.clone(), Box::new(unknown));
     let whole = Some(expected.clone());
     let operand = Some(in_monad);
+    let continuation = Some(Ty::Fun(
+        Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFE0_0001))),
+        Box::new(expected.clone()),
+    ));
     match name {
         // Both operands are actions; the result is the second one's.
         ">>" | "*>" => Some(vec![operand, whole]),
         // The first operand's action IS the result; the second is discarded.
         "<*" => Some(vec![whole, operand]),
-        // `p >>= k`: `p` is an action, `k` returns the result.
-        ">>=" => Some(vec![operand, None]),
-        "=<<" => Some(vec![None, operand]),
+        // `p >>= k`: `p` is an action, `k` returns the result. Without a type
+        // for `k`, the rest of every `do` block after its first bind — a
+        // lambda — lost the stream type, and a parser there (`many anyChar`
+        // after `_ <- lift …`) ran with null `Stream` dictionaries.
+        ">>=" => Some(vec![operand, continuation]),
+        "=<<" => Some(vec![continuation, operand]),
         // Both branches have the whole type.
         "<|>" | "mplus" => Some(vec![whole.clone(), whole]),
         // `f <$> p` / `mf <*> p`: only the right operand is an action here.
@@ -1791,6 +2851,14 @@ fn propagate_spine(
     // BUILTIN head (`id`, `maybe`, `either`), which has no scheme.
     let declared = match head {
         Expr::Var(dr) => ctx.lookup_scheme(dr.def_id).map(|sc| sc.ty.clone()),
+        // A constructor's declared type is polymorphic where its occurrence
+        // may not be: typeck records `Just "US"`'s `Just` at the literal's
+        // default, `[Char] -> Maybe [Char]`, which would push `[Char]` into
+        // a field that wants `Maybe Text`.
+        Expr::Con(_) => ctx
+            .resolved_expr_ty_opt(head.span())
+            .filter(|t| arrow_count(t) >= args.len())
+            .map(|t| generalize_constructor_ty(&t)),
         _ => None,
     };
     let head_ty = declared
@@ -1846,6 +2914,45 @@ fn propagate_spine(
     }
 }
 
+/// A constructor occurrence's type with each argument of its RESULT type
+/// abstracted to a variable everywhere it appears: `[Char] -> Maybe [Char]`
+/// becomes `v0 -> Maybe v0`. A data constructor's parameters are exactly its
+/// result's arguments, so this recovers the declared polymorphic type from
+/// an instantiation — which typeck may have defaulted (an OverloadedStrings
+/// literal's `[Char]`) where the caller expects something else.
+fn generalize_constructor_ty(ty: &Ty) -> Ty {
+    let mut result = ty;
+    while let Ty::Fun(_, r) = result {
+        result = r.as_ref();
+    }
+    let mut params: Vec<Ty> = Vec::new();
+    match result {
+        Ty::List(e) => params.push(e.as_ref().clone()),
+        Ty::App(..) => {
+            let mut cur = result;
+            while let Ty::App(f, a) = cur {
+                params.push(a.as_ref().clone());
+                cur = f.as_ref();
+            }
+        }
+        _ => return ty.clone(),
+    }
+    fn replace(t: &Ty, params: &[Ty]) -> Ty {
+        if let Some(i) = params.iter().position(|p| p == t) {
+            // Outside the ranges typeck and lowering allocate from.
+            return Ty::Var(bhc_types::TyVar::new_star(0xFFE1_0000 + i as u32));
+        }
+        match t {
+            Ty::Fun(a, b) => Ty::Fun(Box::new(replace(a, params)), Box::new(replace(b, params))),
+            Ty::App(f, a) => Ty::App(Box::new(replace(f, params)), Box::new(replace(a, params))),
+            Ty::List(e) => Ty::List(Box::new(replace(e, params))),
+            Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| replace(e, params)).collect()),
+            other => other.clone(),
+        }
+    }
+    replace(ty, &params)
+}
+
 /// The type of the occurrence at `span`, refined by any expected type a caller
 /// pushed inward. The recorded type keeps its structure — the hint only
 /// substitutes its variables — so a hint that is *less* informative than what
@@ -1861,6 +2968,34 @@ fn refined_occurrence_ty(ctx: &LowerContext, span: Span) -> Option<Ty> {
     let mut subst = bhc_types::Subst::new();
     match_ty(&recorded, &hint, &mut subst);
     Some(subst.apply(&recorded))
+}
+
+/// The positions of a multi-parameter constraint that select an instance for
+/// functional-dependency completion: the ground ones, and — when another
+/// position is a bare variable waiting to be determined — those with a
+/// concrete head, their inner variables treated as rigid. Inside a function
+/// generic in its state `u`, `MonadState ?s (StateT u Identity)` matches
+/// `instance MonadState s (StateT s m)` through its `StateT` position and
+/// fixes `?s = u`; with ground positions only, `modify` there was left with no
+/// dictionary.
+fn fundep_match_positions(inst_types: &[Ty], args: &[Ty]) -> (Vec<Ty>, Vec<Ty>) {
+    let has_bare_var = args.iter().any(|a| matches!(a, Ty::Var(_)));
+    let mut pat = Vec::new();
+    let mut tgt = Vec::new();
+    for (it, a) in inst_types.iter().zip(args) {
+        let headed = has_bare_var && !matches!(a, Ty::Var(_)) && has_concrete_head(a);
+        if !has_type_variables(a) || headed {
+            pat.push(it.clone());
+            tgt.push(a.clone());
+        }
+    }
+    (pat, tgt)
+}
+
+/// Whether completion determined a bare-variable position: the instance's own
+/// type there (`inst_ty`) was bound by the match to something else (`filled`).
+fn determined_by_match(ours: &Ty, filled: &Ty, inst_ty: &Ty) -> bool {
+    matches!(ours, Ty::Var(_)) && filled != inst_ty && filled != ours
 }
 
 /// Lower a value argument, applying its dictionaries when it is a constrained
@@ -1971,12 +3106,55 @@ fn canonical_functor_method(name: Symbol) -> Symbol {
     }
 }
 
+/// Monads codegen implements itself: the IO and transformer fast paths, plus
+/// the value monads whose `pure` is a constructor (`Just`, `Right`, `[x]`).
+/// No instance is registered for these, so dispatch must not look for one —
+/// and must not fall through to some other monad either.
+fn monad_handled_by_codegen(ty: &Ty) -> bool {
+    if LowerContext::is_builtin_monad_type(ty) || matches!(ty, Ty::List(_)) {
+        return true;
+    }
+    let head = match ty {
+        Ty::App(f, _) => f.as_ref(),
+        other => other,
+    };
+    matches!(head, Ty::Con(c) if matches!(c.name.as_str(), "Maybe" | "Either" | "[]" | "List"))
+}
+
 /// `<$>`/`fmap` and their monad/applicative spellings (`liftM`/`liftA`, already
 /// canonicalized to `fmap`) take a plain function as the first operand and a
 /// monadic value as the *last* operand. Only the last operand needs its
 /// dictionary forced — see `lower_monad_operand`.
 fn is_fmap_like_method(name: Symbol) -> bool {
     matches!(name.as_str(), "<$>" | "fmap" | "<$")
+}
+
+/// Class methods whose FIRST operand is a plain function or value, with the
+/// class parameter carried by every operand after it.
+///
+/// Dispatch infers the instance type from the operands, first one that answers
+/// wins — which is right for `runEval e s` and wrong for exactly this family:
+/// `two <$> letter` would resolve `Functor` at `Char -> Char -> String`.
+/// Names here are the canonical spellings (`<$>`/`liftM`/`liftA` arrive as
+/// `fmap`; see [`canonical_functor_method`]).
+fn method_first_operand_is_plain(name: Symbol) -> bool {
+    if std::env::var("BHC_NO_PLAINFIRST").is_ok() {
+        return false;
+    }
+    is_fmap_like_method(name)
+        || matches!(
+            name.as_str(),
+            "return"
+                | "pure"
+                | "=<<"
+                | "liftA2"
+                | "liftM2"
+                | "traverse"
+                | "traverse_"
+                | "mapM"
+                | "mapM_"
+                | "foldMap"
+        )
 }
 
 /// Lower an operand of a monadic bind (`>>=`/`>>`) whose monad `m` is the
@@ -2038,7 +3216,13 @@ fn resolve_constrained_fn_dicts(
         if uc.is_empty() {
             return None;
         }
-        (uc, scheme.ty.clone())
+        // Synonym-expanded, like the argument types it is matched against:
+        // `parse :: Stream s Identity t => Parsec s () a -> …` keeps the
+        // 3-argument `Parsec` synonym, and matching that spine against an
+        // argument's expanded 4-argument `ParsecT [Char] () Identity [Char]`
+        // misaligned it (`s := ()`), so the Stream dictionary went missing
+        // and every argument shifted.
+        (uc, ctx.expand_type_aliases(&scheme.ty))
     };
 
     // Declared parameter types (the scheme type carries no dictionaries).
@@ -2070,6 +3254,7 @@ fn resolve_constrained_fn_dicts(
         if std::env::var("BHC_DBG_DICT4").is_ok() {
             eprintln!("DICT4: occ_ty at head span = {occ_ty:?}");
         }
+        let occ_ty = ctx.expand_type_aliases(&occ_ty);
         match_ty(&scheme_ty, &occ_ty, &mut subst);
 
         // The occurrence's recorded type can keep the ENCLOSING SIGNATURE'S
@@ -2092,22 +3277,68 @@ fn resolve_constrained_fn_dicts(
         // resolving `Monad m` to the IO dictionary for a ReaderT computation.
         // `return` then compiled to IO's identity and `runReaderT` was handed a
         // bare value to call.
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn con_head(t: &Ty) -> Option<Symbol> {
+            match t {
+                Ty::App(f, _) => con_head(f),
+                Ty::Con(tc) => Some(tc.name),
+                _ => None,
+            }
+        }
+        // A MONOMORPHIC signature is also safe when the occurrence's result
+        // already has the signature result's concrete head: `char ']'`
+        // inside `where go :: Int -> Parsec String () String` records
+        // `ParsecT ?s ?u ?m Char`, and only the signature pins `?s`. The
+        // hazard above needs a VARIABLE head (`?573 Int` against `IO ()`).
+        let same_concrete_head = |sig: &Ty| {
+            let occ_head = con_head(result_of(&occ_ty));
+            occ_head.is_some() && occ_head == con_head(&ctx.expand_type_aliases(result_of(sig)))
+        };
+        if std::env::var("BHC_DBG_DICT4").is_ok() {
+            eprintln!("DICT4: binding sig = {:?}", ctx.current_binding_sig());
+        }
         if let Some(sig_ty) = ctx
             .current_binding_sig()
             .cloned()
-            .filter(has_type_variables)
+            .filter(|sig| has_type_variables(sig) || same_concrete_head(sig))
         {
-            fn result_of(t: &Ty) -> &Ty {
-                match t {
-                    Ty::Fun(_, r) => result_of(r),
-                    other => other,
-                }
-            }
             // The stored signature is already synonym-expanded (pandoc's
             // `MarkdownParser m a` = `ParsecT Sources ParserState m a`) —
             // see `lower_value_def`, which expands once per binding.
+            // A LOCAL signature (`where go :: Int -> Parsec String () String`)
+            // is not expanded on the way in; expand here, or the 3-argument
+            // `Parsec` spine misaligns against the 4-argument `ParsecT` one.
             let occ_result = result_of(&occ_ty).clone();
-            let sig_result = result_of(&sig_ty).clone();
+            let sig_result = ctx.expand_type_aliases(result_of(&sig_ty));
+            // An expected type pushed onto this application wins over the
+            // enclosing signature: under `lift` the call runs in the INNER
+            // monad (`lift $ setupTranslations meta` inside `StateT
+            // WriterState m`), and the signature would bind its monad to the
+            // whole stack — pandoc's `setupTranslations` then got the StateT
+            // `PandocMonad` dictionary. `match_ty` never overrides, so
+            // matching the hint first keeps the signature from rebinding it.
+            // (Propagation records the head's instantiated type on the head.)
+            // Often the recorded hint is just the occurrence's own unsolved
+            // type (`?m ()` under `when`): matching it binds `?m := ?m`,
+            // which would then block the signature. Keep only bindings
+            // that say something.
+            if let Some(expected) = ctx.expected_ty_opt(head_ref.span) {
+                let expected = ctx.expand_type_aliases(&expected);
+                let mut hint = bhc_types::Subst::new();
+                match_ty(&occ_result, result_of(&expected), &mut hint);
+                for v in occ_result.free_vars() {
+                    match hint.get(&v) {
+                        Some(Ty::Var(w)) if w.id == v.id => {}
+                        Some(t) if !subst.contains(&v) => subst.insert(&v, t.clone()),
+                        _ => {}
+                    }
+                }
+            }
             match_ty(&occ_result, &sig_result, &mut subst);
         }
     } else if std::env::var("BHC_DBG_DICT4").is_ok() {
@@ -2184,14 +3415,8 @@ fn resolve_constrained_fn_dicts(
                                 if inst.instance_types.len() != concrete_args.len() {
                                     return None;
                                 }
-                                let mut pat = Vec::new();
-                                let mut tgt = Vec::new();
-                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                    if !has_type_variables(a) {
-                                        pat.push(it.clone());
-                                        tgt.push(a.clone());
-                                    }
-                                }
+                                let (pat, tgt) =
+                                    fundep_match_positions(&inst.instance_types, &concrete_args);
                                 if pat.is_empty() {
                                     return None;
                                 }
@@ -2209,8 +3434,11 @@ fn resolve_constrained_fn_dicts(
                                 let merged: Vec<Ty> = filled
                                     .iter()
                                     .zip(&concrete_args)
-                                    .map(|(f, ours)| {
-                                        if has_type_variables(ours) && !has_type_variables(f) {
+                                    .zip(&inst.instance_types)
+                                    .map(|((f, ours), it)| {
+                                        if has_type_variables(ours) && !has_type_variables(f)
+                                            || determined_by_match(ours, f, it)
+                                        {
                                             f.clone()
                                         } else {
                                             ours.clone()
@@ -2384,14 +3612,8 @@ fn resolve_user_dicts(
                                 if inst.instance_types.len() != concrete_args.len() {
                                     return None;
                                 }
-                                let mut pat = Vec::new();
-                                let mut tgt = Vec::new();
-                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                    if !has_type_variables(a) {
-                                        pat.push(it.clone());
-                                        tgt.push(a.clone());
-                                    }
-                                }
+                                let (pat, tgt) =
+                                    fundep_match_positions(&inst.instance_types, &concrete_args);
                                 if pat.is_empty() {
                                     return None;
                                 }
@@ -2416,10 +3638,12 @@ fn resolve_user_dicts(
                                     .zip(&concrete_args)
                                     .map(|(it, ours)| {
                                         let f = sub.apply(it);
-                                        if has_type_variables(&f) {
-                                            ours.clone()
-                                        } else {
+                                        if !has_type_variables(&f)
+                                            || determined_by_match(ours, &f, it)
+                                        {
                                             f
+                                        } else {
+                                            ours.clone()
                                         }
                                     })
                                     .collect();
@@ -2583,6 +3807,15 @@ fn lower_constrained_fn_app(
             match_ty(p, &at, &mut subst);
         }
     }
+    // Then the head occurrence's recorded type, as `resolve_constrained_fn_dicts`
+    // does: `modifyx (+ 1)` at `RdT Int (StT Int IO)` pins `m` from the
+    // expected type, but only typeck (through `m`'s functional dependency)
+    // knows `s := Int`; left open, the lifted instance's context dictionary
+    // was built at `s` and came out null.
+    if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
+        let occ_ty = ctx.expand_type_aliases(&occ_ty);
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    }
 
     let Some(dicts) = resolve_user_dicts(ctx, &user_constraints, &subst, def_ref.span) else {
         return Ok(None);
@@ -2646,8 +3879,18 @@ fn is_constrained_fn_value(ctx: &LowerContext, expr: &hir::Expr) -> bool {
             return false;
         }
     }
-    ctx.lookup_scheme(dr.def_id)
-        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+    // Whatever the CALLEE takes as a dictionary parameter must be supplied
+    // here, so this asks the shared predicate rather than "is it a user
+    // class": a continuation constrained only by `Monad m` (dictionary-passed
+    // under the monad witness) was handed over BARE, and the callee's
+    // `cok c st` then put `c` in the dictionary slot. That is what made
+    // parsec's `tokenPrim` call the wrong continuation, so every `many`
+    // reported "a parser that accepts an empty string".
+    ctx.lookup_scheme(dr.def_id).is_some_and(|s| {
+        s.constraints
+            .iter()
+            .any(|c| ctx.constraint_is_dict_passed(c))
+    })
 }
 
 /// Whether `expr` is a bare constrained function value OR an *application* of one
@@ -2675,8 +3918,11 @@ fn references_constrained_fn(ctx: &LowerContext, expr: &hir::Expr) -> bool {
             return false;
         }
     }
-    ctx.lookup_scheme(dr.def_id)
-        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+    ctx.lookup_scheme(dr.def_id).is_some_and(|s| {
+        s.constraints
+            .iter()
+            .any(|c| ctx.constraint_is_dict_passed(c))
+    })
 }
 
 /// Handle a call that passes a constrained function as a *value* argument, when
@@ -2731,15 +3977,16 @@ fn try_lower_spine_with_dicts(
         return Ok(None);
     }
 
-    // Callee parameter types. A user-constrained callee is left to the
-    // constrained-function call paths (Case 2/3).
+    // Callee parameter types. A callee that takes dictionaries of its OWN is
+    // left to the constrained-function call paths (Case 2/3), which apply them
+    // — this path only supplies the ARGUMENTS' dictionaries.
     let Some(scheme) = ctx.lookup_scheme(callee_ref.def_id) else {
         return Ok(None);
     };
     if scheme
         .constraints
         .iter()
-        .any(|c| ctx.is_user_class(c.class))
+        .any(|c| ctx.constraint_is_dict_passed(c))
     {
         return Ok(None);
     }
@@ -2757,6 +4004,25 @@ fn try_lower_spine_with_dicts(
             match_ty(pty, &at, &mut subst);
         }
     }
+    // The callee's own occurrence type is often already instantiated where the
+    // arguments pin nothing: `unP item s cok eerr` records `unP` at `P IO ->
+    // St -> (Char -> St -> IO String) -> …`, while `item :: Monad m => P m`
+    // infers to nothing. Without it the continuation's expected type keeps a
+    // variable monad, its `Monad` dictionary cannot resolve, and the whole
+    // path gives up — handing the callee a dictionary-less continuation.
+    let occ_param_tys: Vec<Ty> = ctx
+        .resolved_expr_ty_opt(callee_ref.span)
+        .map(|t| ctx.expand_type_aliases(&t))
+        .map(|t| {
+            let mut v = Vec::new();
+            let mut cur = &t;
+            while let Ty::Fun(p, r) = cur {
+                v.push(p.as_ref().clone());
+                cur = r.as_ref();
+            }
+            v
+        })
+        .unwrap_or_default();
 
     let Some(callee_var) = ctx.lookup_var(callee_ref.def_id).cloned() else {
         return Ok(None);
@@ -2764,7 +4030,13 @@ fn try_lower_spine_with_dicts(
     let mut result = core::Expr::Var(callee_var, callee_ref.span);
     for (i, a) in args.iter().enumerate() {
         if is_constrained_fn_value(ctx, a) {
-            let Some(expected) = callee_param_tys.get(i).map(|p| subst.apply(p)) else {
+            let from_scheme = callee_param_tys.get(i).map(|p| subst.apply(p));
+            let expected = occ_param_tys
+                .get(i)
+                .filter(|t| !has_type_variables(t))
+                .cloned()
+                .or(from_scheme);
+            let Some(expected) = expected else {
                 return Ok(None);
             };
             let Some(arg_core) = lower_constrained_fn_value(ctx, a, &expected) else {
@@ -2852,12 +4124,84 @@ fn traversal_monad_ty(
 /// A monad whose actions codegen runs as it builds them. For those, and only
 /// those, `mapM_ f xs` really is `map f xs` with the result dropped.
 fn monad_runs_eagerly(ty: &Ty) -> bool {
+    let head = applied_head_name(ty).map(|n| n.as_str().to_string());
+    // Under the closure IO model (BHC_IO_MODEL=closure, BRIEF-0005) an IO
+    // action is a value that runs only when run, so `mapM_ f xs` at IO must be
+    // the fold through IO's `>>=`, like any other monad's.
+    if head.as_deref() == Some("IO") && io_closure_mode() {
+        return false;
+    }
     matches!(
-        applied_head_name(ty)
-            .map(|n| n.as_str().to_string())
-            .as_deref(),
-        Some("IO" | "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity" | "Maybe" | "Either")
+        head.as_deref(),
+        // Not the transformers: codegen's builtin `mapM` is a plain `map`
+        // (it never sequences), so `mapM step xs` at `StateT s IO` built a
+        // list of unrun actions and the caller ran a list as a state
+        // function. Their `>>=`/`pure` resolve like any instance's.
+        Some("IO" | "Identity" | "Maybe" | "Either")
     )
+}
+
+pub(crate) use bhc_types::io_closure_mode;
+
+/// `>>=` and `pure` for `Maybe` and `Either e`, written out as `case`.
+///
+/// Codegen's builtin `mapM` at these monads is a plain `map`: it never stops
+/// at a `Nothing`, so pandoc's `isJust (mapM toTaskListItem items)` was always
+/// true and every bullet list rendered as a task list. Traversals at them are
+/// folded through these instead.
+fn short_circuit_monad_ops(
+    ctx: &mut LowerContext,
+    monad_ty: &Ty,
+    span: Span,
+) -> Option<(core::Expr, core::Expr)> {
+    let (type_name, fail_name, fail_tag, ok_name) = match applied_head_name(monad_ty)?.as_str() {
+        "Maybe" => ("Maybe", "Nothing", 0, "Just"),
+        "Either" => ("Either", "Left", 0, "Right"),
+        _ => return None,
+    };
+    let tycon = TyCon::new(Symbol::intern(type_name), Kind::Star);
+    let con = |name: &str, tag: u32| DataCon {
+        name: Symbol::intern(name),
+        ty_con: tycon.clone(),
+        tag,
+        arity: 1,
+    };
+    let m = ctx.fresh_var("$sc_m", Ty::Error, span);
+    let k = ctx.fresh_var("$sc_k", Ty::Error, span);
+    let v = ctx.fresh_var("$sc_v", Ty::Error, span);
+    let var = |x: &Var| core::Expr::Var(x.clone(), span);
+    let mut fail_con = con(fail_name, fail_tag);
+    let (fail_binders, fail_rhs) = if fail_name == "Nothing" {
+        fail_con.arity = 0;
+        (vec![], nullary_var("Nothing", span))
+    } else {
+        // `Left e` is rebuilt at the result's own type.
+        let e = ctx.fresh_var("$sc_e", Ty::Error, span);
+        let rhs = core::Expr::App(Box::new(nullary_var("Left", span)), Box::new(var(&e)), span);
+        (vec![e], rhs)
+    };
+    let alts = vec![
+        Alt {
+            con: AltCon::DataCon(fail_con),
+            binders: fail_binders,
+            rhs: fail_rhs,
+        },
+        Alt {
+            con: AltCon::DataCon(con(ok_name, 1)),
+            binders: vec![v.clone()],
+            rhs: core::Expr::App(Box::new(var(&k)), Box::new(var(&v)), span),
+        },
+    ];
+    let bind = core::Expr::Lam(
+        m.clone(),
+        Box::new(core::Expr::Lam(
+            k,
+            Box::new(core::Expr::Case(Box::new(var(&m)), alts, Ty::Error, span)),
+            span,
+        )),
+        span,
+    );
+    Some((bind, nullary_var(ok_name, span)))
 }
 
 fn nullary_var(name: &str, span: Span) -> core::Expr {
@@ -2903,10 +4247,17 @@ fn lower_monadic_lift(
     head_span: Span,
     span: Span,
 ) -> LowerResult<Option<core::Expr>> {
+    let m_dbg = dispatch_dbg();
     let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, args.len()) else {
+        if m_dbg {
+            eprintln!("[lift] no monad type for {} args", args.len());
+        }
         return Ok(None);
     };
     if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        if m_dbg {
+            eprintln!("[lift] declined at {}", dbg_ty(&monad_ty));
+        }
         return Ok(None);
     }
     let Some(bind_e) = ctx.resolve_method_at_concrete_type(
@@ -2915,6 +4266,9 @@ fn lower_monadic_lift(
         &monad_ty,
         span,
     ) else {
+        if m_dbg {
+            eprintln!("[lift] no >>= at {}", dbg_ty(&monad_ty));
+        }
         return Ok(None);
     };
     let Some(pure_e) = ctx.resolve_method_at_concrete_type(
@@ -3020,6 +4374,108 @@ fn lower_ap_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<
     ))
 }
 
+/// `liftA2` = `\f ma mb -> ma >>= \a -> mb >>= \b -> pure (f a b)`, at a monad
+/// codegen does not run eagerly.
+///
+/// Built as a VALUE — a three-parameter lambda — so a PARTIAL application works
+/// as well as a saturated call. That is the shape that matters: pandoc writes
+/// `instance Semigroup a => Semigroup (Future s a) where (<>) = liftA2 (<>)`,
+/// and codegen has no `liftA2`, so the RTS stub aborted ("stub: liftA2 not
+/// implemented") the moment `inlines1` — `mconcat <$> many1 inline` — folded
+/// two `Future`s together.
+fn lower_lift_a2_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<core::Expr> {
+    // `m a`, `a -> m b`, … stand-ins: a builtin `>>=`/`pure` is chosen by the
+    // TYPE on its Var (`value_monad_of_ty`, the transformer stack), so the
+    // fallback has to carry one.
+    let unknown = Ty::Var(bhc_types::TyVar::new_star(0xFFE1_0000));
+    let in_monad = Ty::App(Box::new(monad_ty.clone()), Box::new(unknown.clone()));
+    let builtin = |name: &str, ty: Ty| {
+        core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty,
+            },
+            span,
+        )
+    };
+    let bind_e = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            monad_ty,
+            span,
+        )
+        .unwrap_or_else(|| {
+            builtin(
+                ">>=",
+                Ty::Fun(
+                    Box::new(in_monad.clone()),
+                    Box::new(Ty::Fun(
+                        Box::new(Ty::Fun(
+                            Box::new(unknown.clone()),
+                            Box::new(in_monad.clone()),
+                        )),
+                        Box::new(in_monad.clone()),
+                    )),
+                ),
+            )
+        });
+    let pure_e = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            monad_ty,
+            span,
+        )
+        .unwrap_or_else(|| {
+            builtin(
+                "pure",
+                Ty::Fun(Box::new(unknown.clone()), Box::new(in_monad.clone())),
+            )
+        });
+    let f = ctx.fresh_var("$l2_f", Ty::Error, span);
+    let ma = ctx.fresh_var("$l2_ma", Ty::Error, span);
+    let mb = ctx.fresh_var("$l2_mb", Ty::Error, span);
+    let a = ctx.fresh_var("$l2_a", Ty::Error, span);
+    let b = ctx.fresh_var("$l2_b", Ty::Error, span);
+    let app2 = |h: core::Expr, x: core::Expr, y: core::Expr| {
+        core::Expr::App(
+            Box::new(core::Expr::App(Box::new(h), Box::new(x), span)),
+            Box::new(y),
+            span,
+        )
+    };
+    let applied = app2(
+        core::Expr::Var(f.clone(), span),
+        core::Expr::Var(a.clone(), span),
+        core::Expr::Var(b.clone(), span),
+    );
+    let inner = app2(
+        bind_e.clone(),
+        core::Expr::Var(mb.clone(), span),
+        core::Expr::Lam(
+            b,
+            Box::new(core::Expr::App(Box::new(pure_e), Box::new(applied), span)),
+            span,
+        ),
+    );
+    let body = app2(
+        bind_e,
+        core::Expr::Var(ma.clone(), span),
+        core::Expr::Lam(a, Box::new(inner), span),
+    );
+    Some(core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(
+            ma,
+            Box::new(core::Expr::Lam(mb, Box::new(body), span)),
+            span,
+        )),
+        span,
+    ))
+}
+
 /// `ap mf mx` = `mf >>= \g -> mx >>= \v -> pure (g v)`, at a monad codegen
 /// does not run eagerly.
 fn lower_monadic_ap(
@@ -3083,21 +4539,166 @@ fn lower_monadic_ap(
     )))
 }
 
+/// `foldM`, `foldM_` and `filterM` at a monad whose actions are values (not
+/// run as they are built), as folds over that monad's own `>>=`/`pure`:
+///
+/// ```text
+/// foldM f z xs  = foldl (\k x -> k >>= \acc -> f acc x) (pure z) xs
+/// foldM_ f z xs = foldM f z xs >>= \_ -> pure ()
+/// filterM p xs  = foldr (\x k -> p x >>= \b -> k >>= \ys ->
+///                          pure (if b then x : ys else ys)) (pure []) xs
+/// ```
+///
+/// Codegen's loops for these apply the function but never run the actions it
+/// returns, which under the closure IO model (spec/BHC-BRIEF-0005) printed
+/// nothing and summed pointers.
+fn lower_monadic_fold_family(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    args: &[&hir::Expr],
+    head_span: Span,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let kind = match (name.as_str(), args.len()) {
+        ("foldM", 3) | ("foldM_", 3) | ("filterM", 2) => name.as_str(),
+        _ => return Ok(None),
+    };
+    let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, args.len()) else {
+        return Ok(None);
+    };
+    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        return Ok(None);
+    }
+    let (Some(bind_e), Some(pure_e)) = (
+        ctx.resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            &monad_ty,
+            span,
+        ),
+        ctx.resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            &monad_ty,
+            span,
+        ),
+    ) else {
+        return Ok(None);
+    };
+    let app = |f: core::Expr, a: core::Expr| core::Expr::App(Box::new(f), Box::new(a), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    let lam = |v: Var, body: core::Expr| core::Expr::Lam(v, Box::new(body), span);
+    let foldr = nullary_var("foldr", span);
+    let lowered: Vec<core::Expr> = args
+        .iter()
+        .map(|a| lower_expr(ctx, a))
+        .collect::<LowerResult<_>>()?;
+    let x = ctx.fresh_var("$fm_x", Ty::Error, span);
+    let k = ctx.fresh_var("$fm_k", Ty::Error, span);
+    let expr = if kind == "filterM" {
+        let b = ctx.fresh_var("$fm_b", Ty::Error, span);
+        let ys = ctx.fresh_var("$fm_ys", Ty::Error, span);
+        let kept = app(app(nullary_var(":", span), var(&x)), var(&ys));
+        let pick = make_if_expr(var(&b), kept, var(&ys), span);
+        let after_rest = app(
+            app(bind_e.clone(), var(&k)),
+            lam(ys, app(pure_e.clone(), pick)),
+        );
+        let step_body = app(
+            app(bind_e, app(lowered[0].clone(), var(&x))),
+            lam(b, after_rest),
+        );
+        let step = lam(x, lam(k, step_body));
+        let seed = app(pure_e, nullary_var("[]", span));
+        app(app(app(foldr, step), seed), lowered[1].clone())
+    } else {
+        // `k` is the action so far: `\k x -> k >>= \acc -> f acc x`.
+        let acc = ctx.fresh_var("$fm_acc", Ty::Error, span);
+        let step_body = app(
+            app(bind_e.clone(), var(&k)),
+            lam(
+                acc.clone(),
+                app(app(lowered[0].clone(), var(&acc)), var(&x)),
+            ),
+        );
+        let step = lam(k, lam(x, step_body));
+        let seed = app(pure_e.clone(), lowered[1].clone());
+        let folded = app(
+            app(app(nullary_var("foldl", span), step), seed),
+            lowered[2].clone(),
+        );
+        if kind == "foldM_" {
+            let ignored = ctx.fresh_var("$fm_ignored", Ty::Error, span);
+            app(
+                app(bind_e, folded),
+                lam(ignored, app(pure_e, nullary_var("()", span))),
+            )
+        } else {
+            folded
+        }
+    };
+    Ok(Some(expr))
+}
+
+/// Whether `name` is a traversal whose list is built from its arguments
+/// (`zipWithM`, `replicateM`, …) rather than passed in.
+fn derived_actions_name(name: Symbol) -> bool {
+    matches!(
+        name.as_str(),
+        "zipWithM" | "zipWithM_" | "replicateM" | "replicateM_"
+    )
+}
+
 fn try_lower_monadic_traversal(
     ctx: &mut LowerContext,
     f: &hir::Expr,
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<Option<core::Expr>> {
-    // Spine: either `Var name a1 a2` (two arguments) or `Var name a1` (one).
+    // Spine of up to THREE arguments: `liftM2`/`liftA2` take a function and two
+    // actions, and stopping at two left their table entries unreachable.
     let (head_ref, args): (&DefRef, Vec<&hir::Expr>) = match f {
         hir::Expr::Var(dr) => (dr, vec![x]),
         hir::Expr::App(inner, a1, _) => match inner.as_ref() {
             hir::Expr::Var(dr) => (dr, vec![a1.as_ref(), x]),
+            hir::Expr::App(inner2, a0, _) => match inner2.as_ref() {
+                hir::Expr::Var(dr) => (dr, vec![a0.as_ref(), a1.as_ref(), x]),
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
         },
         _ => return Ok(None),
     };
+    lower_monadic_traversal_spine(ctx, head_ref, args, span)
+}
+
+/// A bare `sequence`/`sequence_` used as a VALUE (`fmap sequence $ many1
+/// item` in pandoc's `bulletList`), lowered as `\xs -> sequence xs` at the
+/// monad its type names. Left as the builtin, it ran as the list version and
+/// returned a list where pandoc's `Future` reader belonged.
+fn try_lower_bare_sequence(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+) -> LowerResult<Option<core::Expr>> {
+    let is_sequence = ctx.lookup_var(def_ref.def_id).is_some_and(|v| {
+        matches!(
+            v.name.as_str(),
+            "sequence" | "sequenceA" | "sequence_" | "sequenceA_"
+        )
+    });
+    if !is_sequence {
+        return Ok(None);
+    }
+    lower_monadic_traversal_spine(ctx, def_ref, Vec::new(), def_ref.span)
+}
+
+/// [`try_lower_monadic_traversal`] once the head and its arguments are known.
+fn lower_monadic_traversal_spine(
+    ctx: &mut LowerContext,
+    head_ref: &DefRef,
+    args: Vec<&hir::Expr>,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
     let Some(name) = ctx.lookup_var(head_ref.def_id).map(|v| v.name) else {
         return Ok(None);
     };
@@ -3113,35 +4714,57 @@ fn try_lower_monadic_traversal(
     // build it, so at `ParsecT` the parser ran during construction and the
     // caller got whatever it returned.
     if let ("when" | "unless", 2) = (name.as_str(), args.len()) {
-        if let Some(monad_ty) = traversal_monad_ty(ctx, span, head_ref.span, 2) {
-            if !monad_runs_eagerly(&monad_ty) && applied_head_name(&monad_ty).is_some() {
-                if let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+        let monad_ty = traversal_monad_ty(ctx, span, head_ref.span, 2);
+        let pure_e = match &monad_ty {
+            Some(m) if !monad_runs_eagerly(m) && applied_head_name(m).is_some() => ctx
+                .resolve_method_at_concrete_type(
                     Symbol::intern("pure"),
                     Symbol::intern("Applicative"),
-                    &monad_ty,
+                    m,
                     span,
-                ) {
-                    let cond = lower_expr(ctx, args[0])?;
-                    let action = lower_expr(ctx, args[1])?;
-                    let skip =
-                        core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
-                    let (then_e, else_e) = if name.as_str() == "when" {
-                        (action, skip)
-                    } else {
-                        (skip, action)
-                    };
-                    return Ok(Some(make_if_expr(cond, then_e, else_e, span)));
-                }
-            }
+                ),
+            // Under the closure IO model, a monad that is still a variable
+            // (`report :: PandocMonad m => …`) takes `pure` from the in-scope
+            // dictionary. The builtin's skip branch is IO's `pure ()`, which
+            // pandoc's `report` returned at `PandocIO` and crashed on.
+            Some(Ty::Var(_)) | None if io_closure_mode() => ctx.select_method_via_superclass(
+                Symbol::intern("Monad"),
+                Symbol::intern("pure"),
+                head_ref.span,
+            ),
+            _ => None,
+        };
+        if let Some(pure_e) = pure_e {
+            let cond = lower_expr(ctx, args[0])?;
+            // The action is an argument at `m ()`: lowered as one, so a
+            // method inside (`unless c (S.put xs)` at `State`) gets the
+            // expected type its dictionary is resolved from.
+            let action_ty = monad_ty
+                .as_ref()
+                .filter(|m| !matches!(m, Ty::Var(_)))
+                .map(|m| Ty::App(Box::new(m.clone()), Box::new(Ty::unit())));
+            let action = lower_value_arg(ctx, args[1], action_ty.as_ref())?;
+            let skip = core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
+            let (then_e, else_e) = if name.as_str() == "when" {
+                (action, skip)
+            } else {
+                (skip, action)
+            };
+            return Ok(Some(make_if_expr(cond, then_e, else_e, span)));
         }
     }
     if let Some((n_actions, build)) = match (name.as_str(), args.len()) {
         ("void", 1) => Some((1usize, MonadicShape::Unit)),
-        ("liftM" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),
-        ("liftM2", 3) => Some((2, MonadicShape::ApplyFn)),
+        ("liftM" | "liftA" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),
+        // `liftA2` is `liftM2` for every monad; its own builtin is an RTS stub,
+        // and pandoc reaches it through `instance Semigroup (Future s a)`.
+        ("liftM2" | "liftA2", 3) => Some((2, MonadicShape::ApplyFn)),
         _ => None,
     } {
         return lower_monadic_lift(ctx, &args, n_actions, build, head_ref.span, span);
+    }
+    if let Some(e) = lower_monadic_fold_family(ctx, name, &args, head_ref.span, span)? {
+        return Ok(Some(e));
     }
     // `collect`: the result list is kept. `elems`: the arguments are already
     // actions, there is no function to apply.
@@ -3158,6 +4781,13 @@ fn try_lower_monadic_traversal(
         ("forM" | "for", 2) => (true, false, true, false),
         ("sequence_" | "sequenceA_", 1) => (false, true, false, false),
         ("sequence" | "sequenceA", 1) => (true, true, false, false),
+        // Bare, as a value: the list arrives as a lambda parameter.
+        ("sequence_" | "sequenceA_", 0) => (false, true, false, true),
+        ("sequence" | "sequenceA", 0) => (true, true, false, true),
+        // These are `sequence`/`sequence_` of a derived list of actions (see
+        // `derived_actions` below): `zipWith f xs ys`, `replicate n act`.
+        ("zipWithM", 3) | ("replicateM", 2) => (true, true, false, false),
+        ("zipWithM_", 3) | ("replicateM_", 2) => (false, true, false, false),
         _ => return Ok(None),
     };
     let n_arrows = if missing_list {
@@ -3181,27 +4811,110 @@ fn try_lower_monadic_traversal(
             applied_head_name(&monad_ty)
         );
     }
-    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+    let short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
+    if short_circuit.is_none()
+        && (monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none())
+    {
         return Ok(None);
     }
-    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern(">>="),
-        Symbol::intern("Monad"),
-        &monad_ty,
-        span,
-    ) else {
-        return Ok(None);
+    // A builtin transformer (`StateT s IO`) has no instance a dictionary can be
+    // built from, but codegen lowers the builtin `>>=`/`return` at the layer
+    // their Var's type names (see `annotate_monad_head_tys`). Codegen's own
+    // `mapM` is a plain `map` that never runs the actions.
+    let builtin_layer = !io_closure_mode()
+        && matches!(
+            applied_head_name(&monad_ty)
+                .map(|n| n.as_str().to_string())
+                .as_deref(),
+            Some("StateT" | "ReaderT" | "ExceptT" | "WriterT")
+        );
+    let typed_builtin = |name: &str| {
+        core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Fun(Box::new(Ty::Error), Box::new(monad_ty.clone())),
+            },
+            span,
+        )
     };
-    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern("pure"),
-        Symbol::intern("Applicative"),
-        &monad_ty,
-        span,
-    ) else {
-        return Ok(None);
+    let (bind_e, pure_e) = if let Some(ops) = short_circuit {
+        ops
+    } else {
+        let Some(bind_e) = ctx
+            .resolve_method_at_concrete_type(
+                Symbol::intern(">>="),
+                Symbol::intern("Monad"),
+                &monad_ty,
+                span,
+            )
+            .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
+        else {
+            return Ok(None);
+        };
+        let Some(pure_e) = ctx
+            .resolve_method_at_concrete_type(
+                Symbol::intern("pure"),
+                Symbol::intern("Applicative"),
+                &monad_ty,
+                span,
+            )
+            .or_else(|| builtin_layer.then(|| typed_builtin("return")))
+        else {
+            return Ok(None);
+        };
+        (bind_e, pure_e)
     };
 
-    let (fn_expr, list_expr) = if missing_list {
+    // The rewrite is a LIST fold. A `traverse` over another Traversable
+    // (`traverse f (Pair a b)`, a derived instance) must reach its instance;
+    // folding it as a list read the pair's fields as cons cells.
+    // The container's type: its own recorded type, else the traversal's
+    // parameter type at that position (`traverse :: … -> Pair a -> …`).
+    // (A point-free `traverse f` is retried without its container: the
+    // position is still 1, read off the head's type.)
+    let container_pos = if derived_actions_name(name) {
+        None
+    } else if elems || flipped {
+        Some(0)
+    } else {
+        Some(1)
+    };
+    let container_ty = container_pos.and_then(|pos| {
+        args.get(pos)
+            .and_then(|a| ctx.resolved_expr_ty_opt(a.span()))
+            .or_else(|| {
+                let mut t = ctx.resolved_expr_ty_opt(head_ref.span)?;
+                for _ in 0..pos {
+                    match t {
+                        Ty::Fun(_, r) => t = *r,
+                        _ => return None,
+                    }
+                }
+                match t {
+                    Ty::Fun(p, _) => Some(*p),
+                    _ => None,
+                }
+            })
+    });
+    if std::env::var("BHC_DBG_TRAV").is_ok() {
+        eprintln!("trav {}: container {:?}", name.as_str(), container_ty);
+    }
+    if let Some(cty) = container_ty {
+        {
+            let mut head = &cty;
+            while let Ty::App(f, _) = head {
+                head = f.as_ref();
+            }
+            if matches!(head, Ty::Con(tc) if tc.name.as_str() != "[]" && tc.name.as_str() != "List")
+            {
+                return Ok(None);
+            }
+        }
+    }
+    let (fn_expr, list_expr) = if missing_list && elems {
+        (None, None)
+    } else if missing_list {
         (Some(args[0]), None)
     } else if elems {
         (None, Some(args[0]))
@@ -3215,7 +4928,24 @@ fn try_lower_monadic_traversal(
     } else {
         None
     };
+    // `zipWithM f xs ys` traverses `zipWith f xs ys`, and `replicateM n act`
+    // traverses `replicate n act` — codegen's own loops apply `f` but never
+    // run the actions it returns.
+    let derived_actions = match name.as_str() {
+        "zipWithM" | "zipWithM_" => Some(("zipWith", vec![args[0], args[1], args[2]])),
+        "replicateM" | "replicateM_" => Some(("replicate", vec![args[0], args[1]])),
+        _ => None,
+    };
     let list_core = match (list_expr, &list_param) {
+        _ if derived_actions.is_some() => {
+            let (builder, parts) = derived_actions.unwrap_or_default();
+            let mut e = nullary_var(builder, span);
+            for part in parts {
+                let part = lower_expr(ctx, part)?;
+                e = core::Expr::App(Box::new(e), Box::new(part), span);
+            }
+            e
+        }
         (Some(e), _) => lower_expr(ctx, e)?,
         (None, Some(v)) => core::Expr::Var(v.clone(), span),
         (None, None) => return Ok(None),
@@ -3294,8 +5024,28 @@ fn try_lower_monadic_traversal(
         }),
         span,
     );
+    // `foldr` carries the ACTION type `m _` as its result. A consumer that
+    // picks its implementation from the action's type — `evalStateT (mapM f
+    // xs) s` reads `m`'s inner monad — otherwise found `Error` here and ran a
+    // `StateT s (ExceptT e (StateT s' IO))` traversal as `StateT s IO`.
+    let action_ty = Ty::App(Box::new(monad_ty.clone()), Box::new(Ty::Error));
+    let foldr_ty = Ty::Fun(
+        Box::new(Ty::Error),
+        Box::new(Ty::Fun(
+            Box::new(Ty::Error),
+            Box::new(Ty::Fun(Box::new(Ty::Error), Box::new(action_ty))),
+        )),
+    );
+    let foldr_var = core::Expr::Var(
+        Var {
+            name: Symbol::intern("foldr"),
+            id: VarId::new(0),
+            ty: foldr_ty,
+        },
+        span,
+    );
     let folded = core::Expr::App(
-        Box::new(app2(nullary_var("foldr", span), step, seed)),
+        Box::new(app2(foldr_var, step, seed)),
         Box::new(list_core),
         span,
     );
@@ -3303,6 +5053,806 @@ fn try_lower_monadic_traversal(
         Some(v) => core::Expr::Lam(v, Box::new(folded), span),
         None => folded,
     }))
+}
+
+/// Record each argument of a data-constructor application against the
+/// constructor's declared field type, so a literal argument can consult its
+/// expected type when it lowers (see the `Expr::Lit` arm of
+/// [`propagate_expected_ty`] and [`lower_lit_at`]).
+///
+/// typeck already records a locally-defined constructor's argument types on
+/// their spans, but an IMPORTED constructor's field types live in its interface;
+/// nothing pushes them onto the call site. `Text "hi" :: ChoiceString` (blaze's
+/// `ChoiceString` has a `Text Data.Text.Text` field) left `"hi"` an unpacked
+/// char list, which segfaulted when a `Data.Text` entry point read it as a Text
+/// header. Keying off the constructor's own signature fixes both cases.
+fn propagate_constructor_field_tys(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr) {
+    // Peel the whole application spine: App(App(Con, a), b) → (Con, [a, b]).
+    let mut head: &hir::Expr = f;
+    let mut args: Vec<&hir::Expr> = vec![x];
+    while let Expr::App(inner_f, inner_x, _) = head {
+        args.push(inner_x.as_ref());
+        head = inner_f.as_ref();
+    }
+    args.reverse();
+    while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+        head = inner.as_ref();
+    }
+    let Expr::Con(def_ref) = head else {
+        return;
+    };
+    // Prefer the constructor's recorded field types (populated for imported
+    // constructors from their interface, and for local declarations as they
+    // lower). Fall back to peeling the constructor's function type, which is
+    // `Ty::Error` for an imported constructor whose signature is not in the
+    // local type table.
+    let con_name = ctx.lookup_constructor(def_ref.def_id).map(|c| c.name);
+    let param_tys: Vec<Ty> = con_name
+        .and_then(|n| ctx.constructor_field_types(n).cloned())
+        .unwrap_or_else(|| {
+            let con_ty = ctx.lookup_type(def_ref.def_id);
+            let mut tys = Vec::new();
+            let mut cur = &con_ty;
+            while let Ty::Fun(a, r) = cur {
+                tys.push(a.as_ref().clone());
+                cur = r.as_ref();
+            }
+            tys
+        });
+    // Only `Text` fields are pushed inward. That is the sole case this exists
+    // for (packing an OverloadedStrings literal), and restricting it keeps the
+    // recorded expected type from reaching a constrained value/method argument,
+    // where it would alter dictionary resolution (see `refined_occurrence_ty`'s
+    // other callers).
+    // A field type that only CONTAINS `Text` (`Maybe Text`, `[Text]`) counts
+    // too: `Lang "en" (Just "US") …` with collate's imported `Lang` left the
+    // nested literal a char list, and `renderLang` read it as a Text header.
+    for (pty, a) in param_tys.iter().zip(args.iter()) {
+        if ty_mentions_text(pty) {
+            propagate_expected_ty(ctx, a, pty, 0);
+        }
+    }
+}
+
+/// Whether `Text` appears anywhere in a type: its head, or an argument of
+/// an application, list, tuple or function.
+fn ty_mentions_text(ty: &Ty) -> bool {
+    match ty {
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_mentions_text(f) || ty_mentions_text(a),
+        Ty::List(e) => ty_mentions_text(e),
+        Ty::Tuple(es) => es.iter().any(ty_mentions_text),
+        _ => ty_head_is_text(ty),
+    }
+}
+
+/// Whether `class` has an instance whose head constructor is concrete and
+/// agrees with `ty`'s (`[a]` for `[Char]`, `Color` for `Color`). A class with
+/// no registered instances answers `true`, leaving dispatch as it was.
+fn class_has_concrete_instance_at(ctx: &LowerContext, class: Symbol, ty: &Ty) -> bool {
+    fn head(t: &Ty) -> Option<String> {
+        match t {
+            Ty::Con(c) => Some(c.name.as_str().rsplit('.').next().unwrap_or("").to_string()),
+            Ty::App(f, _) => head(f),
+            Ty::List(_) => Some("[]".to_string()),
+            Ty::Tuple(es) => Some(format!("({})", es.len())),
+            Ty::Fun(..) => Some("->".to_string()),
+            _ => None,
+        }
+    }
+    let Some(instances) = ctx.class_registry().instances.get(&class) else {
+        return true;
+    };
+    if instances.is_empty() {
+        return true;
+    }
+    let Some(want) = head(&crate::dictionary::string_as_char_list(ty)) else {
+        return true;
+    };
+    instances.iter().any(|inst| {
+        inst.instance_types
+            .first()
+            .map(crate::dictionary::string_as_char_list)
+            .and_then(|t| head(&t))
+            .is_some_and(|h| h == want)
+    })
+}
+
+/// Whether `class.method`'s declared type takes a first parameter whose head
+/// is NOT a type variable — so the argument's type cannot name the instance.
+/// `false` when the method's type is not recorded.
+fn first_param_is_concrete(ctx: &LowerContext, class: Symbol, method: Symbol) -> bool {
+    let Some(scheme) = ctx
+        .class_registry()
+        .lookup_class(class)
+        .and_then(|c| c.method_types.get(&method))
+    else {
+        return false;
+    };
+    let mut ty = &scheme.ty;
+    while let Ty::Forall(_, body) = ty {
+        ty = body;
+    }
+    let Ty::Fun(first, _) = ty else {
+        return false;
+    };
+    let mut head = first.as_ref();
+    while let Ty::App(f, _) = head {
+        head = f;
+    }
+    // An imported class's method types are arrow skeletons of `Ty::Error`:
+    // unknown, not concrete.
+    !matches!(head, Ty::Var(_) | Ty::Error)
+}
+
+/// `Data.Text.concatMap` applied to one or two arguments, rewritten through
+/// the builtins it is made of: `concat (map f (unpack t))`.
+fn try_lower_text_concat_map(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let is_concat_map = |ctx: &LowerContext, e: &hir::Expr| match e {
+        Expr::Var(dr) => ctx
+            .lookup_var(dr.def_id)
+            .is_some_and(|v| v.name.as_str() == "Data.Text.concatMap"),
+        _ => false,
+    };
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let build = |func: core::Expr, text: core::Expr| {
+        app(
+            nullary_var("Data.Text.concat", span),
+            app(
+                app(nullary_var("map", span), func),
+                app(nullary_var("Data.Text.unpack", span), text),
+            ),
+        )
+    };
+    // Saturated: `concatMap g t`.
+    if let Expr::App(head, g, _) = f {
+        if is_concat_map(ctx, head) {
+            let g = lower_expr(ctx, g)?;
+            let t = lower_expr(ctx, x)?;
+            return Ok(Some(build(g, t)));
+        }
+    }
+    // Partial: `concatMap g` is `\t -> concat (map g (unpack t))`.
+    if is_concat_map(ctx, f) {
+        let g = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let body = build(g, core::Expr::Var(t.clone(), span));
+        return Ok(Some(core::Expr::Lam(t, Box::new(body), span)));
+    }
+    Ok(None)
+}
+
+/// `Data.Text.groupBy p t` (no codegen implementation; it stubbed at
+/// runtime in pandoc's HTML writer) as `map pack (groupBy p (unpack t))`,
+/// `Data.Text.group t` likewise through the list `group`, and
+/// `Data.Text.dropAround` through `dropWhile`/`dropWhileEnd`.
+fn try_lower_text_group_by(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let named = |ctx: &LowerContext, e: &hir::Expr, want: &str| match e {
+        Expr::Var(dr) => ctx
+            .lookup_var(dr.def_id)
+            .is_some_and(|v| v.name.as_str() == want),
+        _ => false,
+    };
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let packed = |groups: core::Expr| {
+        app(
+            app(
+                nullary_var("map", span),
+                nullary_var("Data.Text.pack", span),
+            ),
+            groups,
+        )
+    };
+    let unpack = |t: core::Expr| app(nullary_var("Data.Text.unpack", span), t);
+    // `dropAround p t` = `dropWhile p (dropWhileEnd p t)` (no codegen
+    // implementation; pandoc's inline-code reader stubbed on it).
+    if let Expr::App(head, p, _) = f {
+        if named(ctx, head, "Data.Text.dropAround") {
+            let p = lower_expr(ctx, p)?;
+            let t = lower_expr(ctx, x)?;
+            let inner = app(
+                app(nullary_var("Data.Text.dropWhileEnd", span), p.clone()),
+                t,
+            );
+            return Ok(Some(app(
+                app(nullary_var("Data.Text.dropWhile", span), p),
+                inner,
+            )));
+        }
+    }
+    if named(ctx, f, "Data.Text.dropAround") {
+        let p = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let inner = app(
+            app(nullary_var("Data.Text.dropWhileEnd", span), p.clone()),
+            core::Expr::Var(t.clone(), span),
+        );
+        let body = app(app(nullary_var("Data.Text.dropWhile", span), p), inner);
+        return Ok(Some(core::Expr::Lam(t, Box::new(body), span)));
+    }
+    // `group t`.
+    if named(ctx, f, "Data.Text.group") {
+        let t = lower_expr(ctx, x)?;
+        return Ok(Some(packed(app(nullary_var("group", span), unpack(t)))));
+    }
+    // Saturated: `groupBy p t`.
+    if let Expr::App(head, p, _) = f {
+        if named(ctx, head, "Data.Text.groupBy") {
+            let p = lower_expr(ctx, p)?;
+            let t = lower_expr(ctx, x)?;
+            let groups = app(app(nullary_var("groupBy", span), p), unpack(t));
+            return Ok(Some(packed(groups)));
+        }
+    }
+    // Partial: `groupBy p` is `\t -> map pack (groupBy p (unpack t))`.
+    if named(ctx, f, "Data.Text.groupBy") {
+        let p = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let groups = app(
+            app(nullary_var("groupBy", span), p),
+            unpack(core::Expr::Var(t.clone(), span)),
+        );
+        return Ok(Some(core::Expr::Lam(t, Box::new(packed(groups)), span)));
+    }
+    Ok(None)
+}
+
+/// `xs \\ ys` (Data.List; codegen has no implementation and stubbed — pandoc's
+/// HTML writer takes header classes out of a section's with it) as
+/// `filter (\x -> not (any (\y -> x == y) ys)) xs`. The `==` carries the
+/// element type from the occurrence, so `Text` and tuples compare by contents.
+/// Unlike the real `(\\)`, which removes one occurrence of `x` per `y`, every
+/// occurrence is removed: the two differ only when `xs` repeats an element of
+/// `ys`.
+fn try_lower_list_difference(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, xs, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(name.as_str(), "\\\\" | "Data.List.\\\\") {
+        return Ok(None);
+    }
+    let elem_ty = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, _)) => match *a {
+            Ty::List(e) => *e,
+            _ => Ty::Error,
+        },
+        _ => Ty::Error,
+    };
+    let xs = lower_expr(ctx, xs)?;
+    let ys = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let a = ctx.fresh_var("diff_x", elem_ty.clone(), span);
+    let b = ctx.fresh_var("diff_y", elem_ty.clone(), span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        b.clone(),
+        Box::new(app(
+            app(eq, core::Expr::Var(a.clone(), span)),
+            core::Expr::Var(b, span),
+        )),
+        span,
+    );
+    let found = app(app(nullary_var("any", span), same), ys);
+    let keep = core::Expr::Lam(a, Box::new(app(nullary_var("not", span), found)), span);
+    Ok(Some(app(app(nullary_var("filter", span), keep), xs)))
+}
+
+/// `elem v xs` / `notElem v xs` as `any (\y -> y == v) xs`, with `==` typed
+/// by the element type, when that type is compared by more than its machine
+/// word (a constructor, a tuple, `Text`, `Integer`).
+///
+/// Codegen's builtin `elem` compares addresses unless the value is a list, so
+/// `DefaultStyle `elem` [DefaultStyle, Decimal, Example]` was `False` and
+/// pandoc's `orderedList` demanded the `fancy_lists` extension for a plain
+/// `1.` list, which then read as a paragraph.
+fn try_lower_structural_elem(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, v, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    let negate = match name.as_str() {
+        "elem" | "Data.List.elem" | "Data.Foldable.elem" => false,
+        "notElem" | "Data.List.notElem" | "Data.Foldable.notElem" => true,
+        _ => return Ok(None),
+    };
+    let elem_ty = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, rest)) => match (*a, *rest) {
+            (a, Ty::Fun(container, _))
+                if matches!(container.as_ref(), Ty::List(_))
+                    || matches!(container.as_ref(), Ty::App(h, _)
+                        if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]")) =>
+            {
+                a
+            }
+            _ => return Ok(None),
+        },
+        // An infix use can be recorded at the whole application's span, with
+        // the RESULT type; the needle's own type is the element type then.
+        Some(t) if !matches!(t, Ty::Fun(..)) => match ctx.resolved_expr_ty_opt(v.span()) {
+            Some(t) => t,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let structural = match &elem_ty {
+        Ty::Tuple(_) => true,
+        Ty::Con(tc) => !matches!(
+            tc.name.as_str(),
+            "Int" | "Char" | "Bool" | "Word" | "Double" | "Float" | "String"
+        ),
+        Ty::App(..) => {
+            !matches!(&elem_ty, Ty::App(h, _) if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]"))
+        }
+        _ => false,
+    };
+    if !structural {
+        return Ok(None);
+    }
+    let needle = lower_expr(ctx, v)?;
+    let haystack = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let needle_var = ctx.fresh_var("elem_v", elem_ty.clone(), span);
+    let y = ctx.fresh_var("elem_y", elem_ty.clone(), span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        y.clone(),
+        Box::new(app(
+            app(eq, core::Expr::Var(y, span)),
+            core::Expr::Var(needle_var.clone(), span),
+        )),
+        span,
+    );
+    let found = app(app(nullary_var("any", span), same), haystack);
+    let result = if negate {
+        app(nullary_var("not", span), found)
+    } else {
+        found
+    };
+    Ok(Some(core::Expr::Let(
+        Box::new(Bind::NonRec(needle_var, Box::new(needle))),
+        Box::new(result),
+        span,
+    )))
+}
+
+/// Saturated `lookup k xs` at a non-scalar key type: `case find (\p -> fst p
+/// == k) xs of { Nothing -> Nothing; Just p -> Just (snd p) }`, with `==`
+/// typed at the key type.
+///
+/// The codegen builtin compares keys as machine words, which is only right
+/// for scalars: a `String` or `Text` key compared heap addresses, so the
+/// vendored `Commonmark.Entity`'s `lookup "amp;" table` was always
+/// `Nothing` and pandoc rendered `&amp;` as `&amp;amp;`.
+fn try_lower_structural_lookup(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, k, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(
+        name.as_str(),
+        "lookup" | "Data.List.lookup" | "Prelude.lookup"
+    ) {
+        return Ok(None);
+    }
+    let (key_ty, result_ty) = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, rest)) => {
+            let result = match *rest {
+                Ty::Fun(_, r) => *r,
+                _ => Ty::Error,
+            };
+            (*a, result)
+        }
+        _ => match ctx.resolved_expr_ty_opt(k.span()) {
+            Some(t) => (t, ctx.resolved_expr_ty_opt(span).unwrap_or(Ty::Error)),
+            None => return Ok(None),
+        },
+    };
+    let structural = match &key_ty {
+        Ty::Tuple(_) | Ty::List(_) | Ty::App(..) => true,
+        Ty::Con(tc) => !matches!(
+            tc.name.as_str(),
+            "Int" | "Char" | "Bool" | "Word" | "Double" | "Float" | "Integer"
+        ),
+        _ => false,
+    };
+    if !structural {
+        return Ok(None);
+    }
+    let key = lower_expr(ctx, k)?;
+    let table = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let key_var = ctx.fresh_var("lookup_k", key_ty.clone(), span);
+    let pair = ctx.fresh_var("lookup_p", Ty::Error, span);
+    let found = ctx.fresh_var("lookup_f", Ty::Error, span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(key_ty.clone(), Ty::fun(key_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        pair.clone(),
+        Box::new(app(
+            app(
+                eq,
+                app(nullary_var("fst", span), core::Expr::Var(pair, span)),
+            ),
+            core::Expr::Var(key_var.clone(), span),
+        )),
+        span,
+    );
+    let search = app(app(nullary_var("find", span), same), table);
+    let maybe = TyCon::new(Symbol::intern("Maybe"), Kind::Star);
+    let alts = vec![
+        Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern("Nothing"),
+                ty_con: maybe.clone(),
+                tag: 0,
+                arity: 0,
+            }),
+            binders: vec![],
+            rhs: nullary_var("Nothing", span),
+        },
+        Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern("Just"),
+                ty_con: maybe,
+                tag: 1,
+                arity: 1,
+            }),
+            binders: vec![found.clone()],
+            rhs: app(
+                nullary_var("Just", span),
+                app(nullary_var("snd", span), core::Expr::Var(found, span)),
+            ),
+        },
+    ];
+    let result = core::Expr::Case(Box::new(search), alts, result_ty, span);
+    Ok(Some(core::Expr::Let(
+        Box::new(Bind::NonRec(key_var, Box::new(key))),
+        Box::new(result),
+        span,
+    )))
+}
+
+/// A value-position `pure`/`return` at a list or `Maybe` type: `\x -> [x]`
+/// or `\x -> Just x`. The bare builtin carries no monad, so `fmap pure p`
+/// handed `p`'s `Char` straight through where a one-character `String` was
+/// due (pandoc's `uri` parser then `T.pack`ed a `Char` on every `.`).
+fn lower_value_pure_at_builtin(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let bare = name.as_str().rsplit('.').next().unwrap_or("");
+    if !matches!(bare, "pure" | "return") {
+        return None;
+    }
+    let Ty::Fun(_, result) = refined_occurrence_ty(ctx, span)? else {
+        return None;
+    };
+    let monad = match result.as_ref() {
+        Ty::Con(c) if c.name.as_str() == "String" => PlusMonad::List,
+        other => plus_monad_of(other)?,
+    };
+    let x = ctx.fresh_var("pure_x", Ty::Error, span);
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let body = match monad {
+        PlusMonad::Maybe => app(nullary_var("Just", span), core::Expr::Var(x.clone(), span)),
+        PlusMonad::List => app(
+            app(nullary_var(":", span), core::Expr::Var(x.clone(), span)),
+            nullary_var("[]", span),
+        ),
+    };
+    Some(core::Expr::Lam(x, Box::new(body), span))
+}
+
+/// `Data.Set.member k s` (and the other key-first container operations) with
+/// a variable key: give the key its typeck type. Codegen compares boxed keys
+/// by content only when it can tell their type, and a function parameter
+/// reaches it untyped — pandoc's `extensionEnabled x (Extensions exts) = x
+/// `Set.member` exts` compared `Extension` values by address and every
+/// extension read as disabled.
+fn try_lower_typed_container_key(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::Var(head) = f else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(head.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    let n = name.as_str();
+    let (module, op) = match n.rsplit_once('.') {
+        Some(parts) => parts,
+        None => return Ok(None),
+    };
+    let is_container = matches!(
+        module,
+        "Data.Set" | "Data.Map" | "Data.Map.Strict" | "Data.Map.Lazy" | "Data.Set.Internal"
+    );
+    if !is_container
+        || !matches!(
+            op,
+            "member"
+                | "notMember"
+                | "insert"
+                | "delete"
+                | "lookup"
+                | "findWithDefault"
+                | "insertWith"
+                | "adjust"
+                | "alter"
+        )
+    {
+        return Ok(None);
+    }
+    if !matches!(x, Expr::Var(_)) {
+        return Ok(None);
+    }
+    let key_ty = match ctx.resolved_expr_ty_opt(head.span) {
+        Some(Ty::Fun(a, _)) if is_fully_concrete_ty(&a) => *a,
+        _ => match ctx.resolved_expr_ty_opt(x.span()) {
+            Some(t) if is_fully_concrete_ty(&t) && !matches!(t, Ty::Fun(..)) => t,
+            _ => return Ok(None),
+        },
+    };
+    let head_core = lower_expr(ctx, f)?;
+    let mut key_core = lower_expr(ctx, x)?;
+    if let core::Expr::Var(v, _) = &mut key_core {
+        if matches!(v.ty, Ty::Error) {
+            v.ty = key_ty;
+        }
+    }
+    Ok(Some(core::Expr::App(
+        Box::new(head_core),
+        Box::new(key_core),
+        span,
+    )))
+}
+
+/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlusMonad {
+    Maybe,
+    List,
+}
+
+/// Which of `Maybe`/list a value type `m a` is in.
+fn plus_monad_of(ty: &Ty) -> Option<PlusMonad> {
+    match ty {
+        Ty::List(_) => Some(PlusMonad::List),
+        Ty::App(f, _) => match f.as_ref() {
+            Ty::Con(c) if c.name.as_str() == "Maybe" => Some(PlusMonad::Maybe),
+            Ty::Con(c) if c.name.as_str() == "[]" => Some(PlusMonad::List),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `mplus`/`<|>`, `mzero`/`empty` and `msum`/`asum` at `Maybe` or a list, as
+/// Core. bhc has no instances for these builtin types (the methods were
+/// runtime stubs), and pandoc's `normalizeDate` takes the first parse with
+/// `msum` over `Maybe`. `None` for any other name or monad.
+fn lower_monad_plus_builtin(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let bare = name.as_str().rsplit('.').next().unwrap_or("");
+    let bare = if name.as_str().ends_with("<|>") {
+        "<|>"
+    } else {
+        bare
+    };
+    if !matches!(
+        bare,
+        "mplus" | "<|>" | "mzero" | "empty" | "msum" | "asum" | "fail"
+    ) {
+        return None;
+    }
+    let occ = refined_occurrence_ty(ctx, span)?;
+    // An infix use can be recorded at the whole application's span, with the
+    // RESULT type (`Maybe Int`) rather than the operator's; the monad is the
+    // same, so a non-function type counts as the value type.
+    let value_ty = match (bare, &occ) {
+        // Both operands and the result share the monad; take whichever
+        // typeck resolved (in a chain the first operand can stay a variable).
+        ("mplus" | "<|>", Ty::Fun(a, rest)) => {
+            let mut cands = vec![a.as_ref().clone()];
+            if let Ty::Fun(b, r) = rest.as_ref() {
+                cands.push(b.as_ref().clone());
+                cands.push(r.as_ref().clone());
+            }
+            cands.into_iter().find(|t| plus_monad_of(t).is_some())?
+        }
+        ("msum" | "asum", Ty::Fun(container, r)) if matches!(container.as_ref(), Ty::List(_)) => {
+            // `msum :: [m a] -> m a`: the element type names the monad when
+            // the (loosely typed) result is still a variable.
+            match container.as_ref() {
+                Ty::List(elem) if plus_monad_of(r).is_none() => elem.as_ref().clone(),
+                _ => r.as_ref().clone(),
+            }
+        }
+        ("msum" | "asum", Ty::Fun(..)) => return None,
+        // `fail :: String -> m a`; at Maybe/[] it is `const mzero`.
+        ("fail", Ty::Fun(_, r)) => r.as_ref().clone(),
+        (_, t) if !matches!(t, Ty::Fun(..)) => t.clone(),
+        _ => return None,
+    };
+    let monad = plus_monad_of(&value_ty)?;
+    Some(monad_plus_expr(ctx, bare, monad, span))
+}
+
+/// The Core for `mplus`/`<|>`, `mzero`/`empty`, `msum`/`asum` or `fail`
+/// (named by `bare`) at the builtin `monad`.
+fn monad_plus_expr(ctx: &mut LowerContext, bare: &str, monad: PlusMonad, span: Span) -> core::Expr {
+    let zero = || match monad {
+        PlusMonad::Maybe => nullary_var("Nothing", span),
+        PlusMonad::List => nullary_var("[]", span),
+    };
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let plus = |ctx: &mut LowerContext| {
+        let a = ctx.fresh_var("plus_a", Ty::Error, span);
+        let b = ctx.fresh_var("plus_b", Ty::Error, span);
+        let body = match monad {
+            PlusMonad::Maybe => {
+                let nothing = DataCon {
+                    name: Symbol::intern("Nothing"),
+                    ty_con: TyCon::new(Symbol::intern("Maybe"), Kind::Star),
+                    tag: 0,
+                    arity: 0,
+                };
+                core::Expr::Case(
+                    Box::new(core::Expr::Var(a.clone(), span)),
+                    vec![
+                        Alt {
+                            con: AltCon::DataCon(nothing),
+                            binders: vec![],
+                            rhs: core::Expr::Var(b.clone(), span),
+                        },
+                        Alt {
+                            con: AltCon::Default,
+                            binders: vec![],
+                            rhs: core::Expr::Var(a.clone(), span),
+                        },
+                    ],
+                    Ty::Error,
+                    span,
+                )
+            }
+            PlusMonad::List => app(
+                app(nullary_var("++", span), core::Expr::Var(a.clone(), span)),
+                core::Expr::Var(b.clone(), span),
+            ),
+        };
+        core::Expr::Lam(a, Box::new(core::Expr::Lam(b, Box::new(body), span)), span)
+    };
+    match bare {
+        "mzero" | "empty" => zero(),
+        "mplus" | "<|>" => plus(ctx),
+        "fail" => {
+            let msg = ctx.fresh_var("fail_msg", Ty::Error, span);
+            core::Expr::Lam(msg, Box::new(zero()), span)
+        }
+        _ => {
+            let xs = ctx.fresh_var("plus_xs", Ty::Error, span);
+            let f = plus(ctx);
+            let body = app(
+                app(app(nullary_var("foldr", span), f), zero()),
+                core::Expr::Var(xs.clone(), span),
+            );
+            core::Expr::Lam(xs, Box::new(body), span)
+        }
+    }
+}
+
+/// A saturated `mplus`/`<|>` whose occurrence type typeck left unresolved
+/// (an inner link of `a <|> b <|> c` in the eager model): its monad from the
+/// operands' types.
+fn try_lower_monad_plus_app(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, a, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !(name.as_str() == "mplus" || name.as_str().ends_with("<|>")) {
+        return Ok(None);
+    }
+    let Some(monad) = [try_infer_arg_type(ctx, a), try_infer_arg_type(ctx, x)]
+        .into_iter()
+        .flatten()
+        .find_map(|t| plus_monad_of(&t))
+    else {
+        return Ok(None);
+    };
+    let op = monad_plus_expr(ctx, "mplus", monad, span);
+    let a = lower_expr(ctx, a)?;
+    let x = lower_expr(ctx, x)?;
+    Ok(Some(core::Expr::App(
+        Box::new(core::Expr::App(Box::new(op), Box::new(a), span)),
+        Box::new(x),
+        span,
+    )))
 }
 
 /// Lower a function application, handling dictionary-passing for class methods
@@ -3318,6 +5868,47 @@ fn lower_app(
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    // A constructor's declared field types are the expected types of its
+    // arguments. Push them inward before anything lowers an argument, so an
+    // OverloadedStrings literal in a `Text` field packs (see `lower_lit_at`).
+    // This is the one hint typeck does not already leave on the argument's own
+    // span for an IMPORTED constructor, whose field types come from its
+    // interface rather than local inference.
+    propagate_constructor_field_tys(ctx, f, x);
+
+    // `liftA2 f ma mb`: typeck leaves nothing on `f`, so a CLASS METHOD there
+    // (`liftA2 (<>) one two` — pandoc's `Semigroup (Future s a)`) has no type to
+    // dispatch on and reaches codegen as the builtin, which for a user type is a
+    // stub. `liftA2`'s own type says exactly what `f` is: the element types of
+    // the two actions and of the result. Push that in; `refined_occurrence_ty`
+    // reads it back when the method is lowered.
+    hint_lift_a2_function_ty(ctx, f, x, span);
+
+    // `Data.Text.concatMap f t` = `Data.Text.concat (map f (Data.Text.unpack
+    // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
+    // (point-free, `T.concatMap escape`, as well as saturated).
+    if let Some(result) = try_lower_structural_elem(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_structural_lookup(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_typed_container_key(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_text_group_by(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_text_concat_map(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_monad_plus_app(ctx, f, x, span)? {
+        return Ok(result);
+    }
+
     // `mapM_`/`mapM`/`sequence_`/… at a monad codegen does not run eagerly.
     if let Some(result) = try_lower_monadic_traversal(ctx, f, x, span)? {
         return Ok(result);
@@ -3338,7 +5929,7 @@ fn lower_app(
             let method_name = canonical_functor_method(var.name);
 
             // Case 1: Class method resolution
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
 
@@ -3411,8 +6002,17 @@ fn lower_app(
                     if param_count > 1 && is_user {
                         // Multi-param class with just one argument (user classes only).
                         // Try to infer the arg type and complete remaining
-                        // types from matching instances (fundep-style).
-                        if let Some(arg_ty) = try_infer_arg_type(ctx, x) {
+                        // types from matching instances (fundep-style) — only
+                        // in the direction the class's dependencies allow.
+                        // `throwError :: e -> m a` with `MonadError e m | m ->
+                        // e`: the argument fixes `e`, which does not determine
+                        // `m`, and completing from it picked `PandocIO`'s
+                        // instance inside a function polymorphic in `m`.
+                        let arg_ty = try_infer_arg_type(ctx, x);
+                        let completes = arg_ty.as_ref().is_none_or(|t| {
+                            ctx.completion_allowed(class_name, &[0], std::slice::from_ref(t))
+                        });
+                        if let Some(arg_ty) = arg_ty.filter(|_| completes) {
                             let mut types_for_resolution = vec![arg_ty];
                             // Search instances to complete the type list
                             if let Some(instances) = ctx.class_registry().instances.get(&class_name)
@@ -3447,6 +6047,25 @@ fn lower_app(
                                 }
                             }
                         }
+                        // No instance is pinned (`throwError e` inside
+                        // `PandocMonad m =>`, where `m` is the binding's own):
+                        // the dictionary comes from one in scope, through its
+                        // superclasses (`PandocMonad m` ⊃ `MonadError
+                        // PandocError m`). Left to the generic path, the method
+                        // was applied to that dictionary as a plain function —
+                        // a runtime stub.
+                        if !completes {
+                            if let Some(method_expr) =
+                                ctx.select_method_via_superclass(class_name, method_name, span)
+                            {
+                                let x_core = lower_expr(ctx, x)?;
+                                return Ok(core::Expr::App(
+                                    Box::new(method_expr),
+                                    Box::new(x_core),
+                                    span,
+                                ));
+                            }
+                        }
                         // Fall through to Case 3 if we couldn't resolve
                     } else {
                         // Single-param class: resolve at concrete type from argument.
@@ -3461,34 +6080,65 @@ fn lower_app(
                         // dangling closure capture). Leave `inferred` as `None` for them
                         // so control falls through to the result-type dispatch in Case
                         // 1.5 below, which is where `return` already resolves correctly.
+                        // Likewise any method whose declared first parameter is
+                        // a concrete type: `getDataFileName :: FilePath -> m
+                        // FilePath` was resolved at the argument's `[Char]` —
+                        // `PandocMonad []` — and the call jumped through a
+                        // dictionary of another monad.
                         let is_result_determined =
-                            matches!(method_name.as_str(), "pure" | "return");
+                            matches!(method_name.as_str(), "pure" | "return")
+                                || first_param_is_concrete(ctx, class_name, method_name);
                         let inferred = if is_result_determined {
                             None
                         } else {
                             try_infer_arg_type(ctx, x).or_else(|| {
                                 // Fallback: use monad context stack for >>=/>>/return/pure
+                                // — after an IO head on the occurrence's own type
+                                // (see `io_occurrence_head`).
                                 if is_monad_family {
-                                    ctx.current_monad_type().cloned().or_else(|| {
-                                        // Last resort: recover the monad constructor from
-                                        // this method application's own fixpoint-resolved
-                                        // type `N b` (strip the value arg). Lets a
-                                        // user/derived monad's `>>=` dispatch when the
-                                        // operands' types are themselves unresolved — e.g.
-                                        // `return 5 >>= \x -> ...` in a top-level do-block
-                                        // over a GND newtype, where both operands are
-                                        // as-yet-undispatched `return`s.
-                                        match ctx.resolved_expr_ty_opt(span) {
-                                            Some(Ty::App(head, _)) => Some(*head),
-                                            _ => None,
-                                        }
-                                    })
+                                    io_occurrence_head(ctx, span)
+                                        .or_else(|| own_concrete_monad(ctx, span))
+                                        .or_else(|| ctx.current_monad_type().cloned())
+                                        .or_else(|| {
+                                            // Last resort: recover the monad constructor from
+                                            // this method application's own fixpoint-resolved
+                                            // type `N b` (strip the value arg). Lets a
+                                            // user/derived monad's `>>=` dispatch when the
+                                            // operands' types are themselves unresolved — e.g.
+                                            // `return 5 >>= \x -> ...` in a top-level do-block
+                                            // over a GND newtype, where both operands are
+                                            // as-yet-undispatched `return`s.
+                                            match ctx.resolved_expr_ty_opt(span) {
+                                                Some(Ty::App(head, _)) => Some(*head),
+                                                _ => None,
+                                            }
+                                        })
                                 } else {
                                     None
                                 }
                             })
                         };
+                        // The argument names the instance only if the class HAS
+                        // one at that type. `getDataFileName "x"` (an imported
+                        // `PandocMonad` method, whose declared type the
+                        // interface does not carry) inferred `[Char]`, and a
+                        // variable-headed instance `PandocMonad (t m)` matched
+                        // it as `t = []`.
+                        let inferred = inferred.filter(|t| {
+                            is_monad_family
+                                || !is_user
+                                || class_has_concrete_instance_at(ctx, class_name, t)
+                        });
                         if let Some(concrete_ty) = inferred {
+                            // `mconcat :: [a] -> a` — the class parameter is the
+                            // list's ELEMENT type, and the argument is the list.
+                            // Dispatching on the argument itself picked the LIST
+                            // Monoid for `mconcat [Wrap 5, Wrap 3]` and ran
+                            // `Data.List.concat` over the newtypes.
+                            let concrete_ty = match (method_name.as_str(), concrete_ty) {
+                                ("mconcat", Ty::List(elem)) => *elem,
+                                (_, t) => t,
+                            };
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
                             if is_monad_family
@@ -3550,21 +6200,42 @@ fn lower_app(
                     method_name.as_str() == "return" || method_name.as_str() == "pure";
                 if is_return_or_pure {
                     // Candidate monad types, in priority order:
-                    //  1. the enclosing do-block monad, if `>>=`/`>>` pushed one;
-                    //  2. the monad constructor read off this `return`/`pure`
+                    //  1. the monad constructor read off this `return`/`pure`
                     //     application's OWN resolved type `M a` (strip the value
-                    //     arg `a`). (2) is what lets a bare `return x :: M a` with
-                    //     no surrounding do-block dispatch — e.g. the argument in
-                    //     `runIOorExplode (return 42)`, whose single-pass expr
+                    //     arg `a`). This is also what lets a bare `return x :: M
+                    //     a` with no surrounding do-block dispatch — the argument
+                    //     in `runIOorExplode (return 42)`, whose single-pass expr
                     //     type leaves the monad a variable (`App(Var, Int)`) but
                     //     whose fixpoint-resolved type is `App(PandocIO, Int)`.
+                    //  2. the enclosing do-block monad, if `>>=`/`>>` pushed one.
+                    //
+                    // (1) goes first because `return (return x)` has a DIFFERENT
+                    // monad at each level — pandoc's `symbol` ends `return (return
+                    // (B.str t))`, a `Future` inside a parser — and the monad the
+                    // surrounding `>>=` pushed answered for both, so the parser's
+                    // action became the inner value.
+                    //
+                    // A monad codegen implements itself stops the search rather
+                    // than falling through to that ambient monad: no instance is
+                    // registered for `Maybe`, so the loop below would skip it and
+                    // pick the parser again. Falling out leaves the builtin
+                    // `return`, which `annotate_ty` types from this same
+                    // occurrence so codegen reads `Just` off it.
+                    let own_monad = match ctx.resolved_expr_ty_opt(span) {
+                        Some(Ty::App(head, _)) => Some(*head),
+                        _ => None,
+                    }
+                    .filter(has_concrete_head);
+                    let own_is_codegen_monad =
+                        own_monad.as_ref().is_some_and(monad_handled_by_codegen);
                     let mut candidates: Vec<Ty> = Vec::new();
+                    if !own_is_codegen_monad {
+                        candidates.extend(own_monad.clone());
+                    }
                     if let Some(m) = ctx.current_monad_type().cloned() {
                         candidates.push(m);
                     }
-                    if let Some(Ty::App(head, _arg)) = ctx.resolved_expr_ty_opt(span) {
-                        candidates.push(*head);
-                    }
+                    candidates.extend(own_monad);
                     let pure_sym = Symbol::intern("pure");
                     let applicative_sym = Symbol::intern("Applicative");
                     //  3. the enclosing binding's signature. Inside a constrained
@@ -3599,10 +6270,24 @@ fn lower_app(
                     //     above pins the monad there, so `return x1` stayed a
                     //     builtin and handed the Char on raw — a later
                     //     dereference of `0x61`.
-                    if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                        candidates.push(inst_ty);
+                    //     Not when typeck recorded this `return` at a monad
+                    //     VARIABLE: `pure a = StT (\s -> return (a, s))` in
+                    //     `instance Monad m => Applicative (StT s m)` returns
+                    //     in the inner `m`, whose dictionary is in scope;
+                    //     taking the instance made `pure` call itself.
+                    let at_monad_var = matches!(
+                        ctx.resolved_expr_ty_opt(span),
+                        Some(Ty::App(head, _)) if matches!(*head, Ty::Var(_))
+                    );
+                    if !at_monad_var {
+                        if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                            candidates.push(inst_ty);
+                        }
                     }
                     for monad_ty in candidates {
+                        if own_is_codegen_monad {
+                            break;
+                        }
                         // Builtin monads (IO/StateT/…) take codegen's fast path.
                         if LowerContext::is_builtin_monad_type(&monad_ty) {
                             continue;
@@ -3671,9 +6356,13 @@ fn lower_app(
             // Class methods are excluded: their own class constraint must be
             // turned into a dictionary *selection* (`$sel_N $dict`) by the
             // method-selection path, not passed as an ordinary argument.
-            if ctx.is_class_method(method_name).is_none() {
+            if ctx
+                .class_method_of_def(def_ref.def_id, method_name)
+                .is_none()
+            {
                 if let Some(dicts) = resolve_constrained_fn_dicts(ctx, def_ref, &[x], span) {
-                    let mut result = core::Expr::Var(var.clone(), def_ref.span);
+                    let head = at_occurrence_ty(ctx, &var, def_ref.span);
+                    let mut result = core::Expr::Var(head, def_ref.span);
                     for dict in dicts {
                         result = core::Expr::App(Box::new(result), Box::new(dict), span);
                     }
@@ -3694,7 +6383,7 @@ fn lower_app(
                 eprintln!(
                     "[fmap] head={} is_method={:?} args={} occ={:?}",
                     method_name,
-                    ctx.is_class_method(method_name),
+                    ctx.class_method_of_def(head_def_ref.def_id, method_name),
                     collected_args.len(),
                     ctx.resolved_expr_ty_opt(x.span())
                         .or_else(|| ctx.expr_ty_opt(x.span()))
@@ -3702,9 +6391,54 @@ fn lower_app(
             }
 
             // Case 3a: Head is a class method (user-defined or monad-family)
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(head_def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
+
+                // A MULTI-parameter user class: which dictionary the use needs
+                // is decided by ALL its parameters, read off the occurrence.
+                // Several dictionaries of the class may be in scope
+                // (pandoc's `queryBlock` has nine `Walkable a X`); take the one
+                // whose arguments fit, or build it from an instance when none
+                // does — never just the last one registered.
+                if is_user && ctx.class_param_count(class_name) > 1 {
+                    if let Some(want) = ctx.class_params_from_occurrence_any(
+                        class_name,
+                        head_def_ref.def_id,
+                        head_def_ref.span,
+                    ) {
+                        let method_expr = match ctx.lookup_dict_for(class_name, &want) {
+                            Ok(Some(dict_var)) => ctx.select_method_from_dict(
+                                &dict_var,
+                                class_name,
+                                method_name,
+                                span,
+                            ),
+                            Ok(None) | Err(())
+                                if want.iter().any(has_concrete_head)
+                                    && ctx.params_pinned_by_fundeps(class_name, &want) =>
+                            {
+                                ctx.resolve_method_at_concrete_types(
+                                    method_name,
+                                    class_name,
+                                    &want,
+                                    span,
+                                )
+                            }
+                            _ => None,
+                        };
+                        if let Some(method_expr) = method_expr {
+                            let mut result = method_expr;
+                            for arg in &collected_args {
+                                let arg_core = lower_expr(ctx, arg)?;
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                            }
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                        }
+                    }
+                }
 
                 // Dict in scope (from existential pattern): select method from dict,
                 // then apply all collected args + final arg
@@ -3757,7 +6491,57 @@ fn lower_app(
                 {
                     let param_count = ctx.class_param_count(class_name);
 
+                    // A single-parameter USER class: match the method's declared
+                    // scheme against the head's recorded occurrence type — that
+                    // says which argument carries the class parameter. The
+                    // argument guess below assumes it is the FIRST argument, so
+                    // `qry :: Monoid c => (Item -> c) -> b -> c` dispatched on
+                    // the function `Item -> MinI` instead of `b`, found no
+                    // instance, and fell through to calling the bare method.
+                    if is_user && param_count == 1 {
+                        if let Some(method_expr) = ctx.select_method_by_result_type(
+                            class_name,
+                            method_name,
+                            head_def_ref.def_id,
+                            head_def_ref.span,
+                        ) {
+                            let mut result = method_expr;
+                            for arg in &collected_args {
+                                let arg_core = lower_expr(ctx, arg)?;
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                            }
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                        }
+                    }
+
                     if param_count > 1 && is_user {
+                        if let Some(types) = ctx.class_params_from_occurrence(
+                            class_name,
+                            head_def_ref.def_id,
+                            head_def_ref.span,
+                        ) {
+                            if let Some(method_expr) = ctx.resolve_method_at_concrete_types(
+                                method_name,
+                                class_name,
+                                &types,
+                                span,
+                            ) {
+                                let mut result = method_expr;
+                                for arg in &collected_args {
+                                    let arg_core = lower_expr(ctx, arg)?;
+                                    result =
+                                        core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                                }
+                                let x_core = lower_expr(ctx, x)?;
+                                return Ok(core::Expr::App(
+                                    Box::new(result),
+                                    Box::new(x_core),
+                                    span,
+                                ));
+                            }
+                        }
                         // Multi-param class: collect types from all arguments (user classes only)
                         // For `combine Red Circle`, collected_args=[Red], x=Circle
                         // We need types from each arg: [Color, Shape]
@@ -3777,8 +6561,15 @@ fn lower_app(
                         // calling `extract w` gives us only type `a` from the value arg.
                         // We search instances to find the matching `b`.
                         let mut types_for_resolution = concrete_types.clone();
+                        // Complete only what the class's dependencies
+                        // determine from the known leading parameters (see
+                        // `LowerContext::params_pinned_by_fundeps`).
+                        let known: Vec<usize> = (0..types_for_resolution.len()).collect();
+                        let completes =
+                            ctx.completion_allowed(class_name, &known, &types_for_resolution);
                         if types_for_resolution.len() < param_count
                             && !types_for_resolution.is_empty()
+                            && completes
                         {
                             if let Some(instances) = ctx.class_registry().instances.get(&class_name)
                             {
@@ -3825,10 +6616,28 @@ fn lower_app(
                         // For multi-arg methods like `runEval :: e -> String -> String`,
                         // the first collected arg carries the instance type, not the
                         // final argument. Prefer collected args over the final arg.
+                        //
+                        // `fmap`/`<$>`/`<$` and friends are the exception: their FIRST
+                        // operand is a plain function (or, for `<$`, a plain value)
+                        // whose type says nothing about the class parameter, which
+                        // every later operand carries. Letting it win dispatched `two
+                        // <$> letter` at `Functor (Char -> Char -> String)`, which
+                        // names no instance, so the method stayed a BUILTIN fmap that
+                        // walked the parser closure as a list — `two <$> letter <*>
+                        // letter` then handed `<*>` a non-closure and the CPS apply
+                        // crashed.
+                        let plain_first = method_first_operand_is_plain(method_name);
                         let inferred_args = collected_args
                             .iter()
+                            .skip(usize::from(plain_first))
                             .find_map(|arg| try_infer_arg_type(ctx, arg));
-                        let inferred_x = try_infer_arg_type(ctx, x);
+                        // An unsaturated `fmap f` has no functor operand at all; its
+                        // only argument is the function, so infer nothing from it.
+                        let inferred_x = if plain_first && collected_args.is_empty() {
+                            None
+                        } else {
+                            try_infer_arg_type(ctx, x)
+                        };
                         // Semigroup/Monoid parameterize over the VALUE type
                         // itself (Inlines), not a type constructor — the
                         // span-recorded result type IS the class parameter.
@@ -3849,163 +6658,219 @@ fn lower_app(
                         } else {
                             None
                         };
-                        let inferred =
-                            value_class_result
-                                .or(inferred_args)
-                                .or(inferred_x)
-                                .or_else(|| {
-                                    // Fallback: use monad context stack for nested >>=/>>/return
-                                    if is_value_class {
-                                        ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
-                                    } else if is_monad_family {
-                                        ctx.current_monad_type()
-                                            .cloned()
-                                            .or_else(|| {
-                                                if std::env::var("BHC_NO_CART").is_ok() {
-                                                    return None;
-                                                }
-                                                // A FULLY-CONCRETE applied operand type
-                                                // (`manyTill p $eta` with sig-typed
-                                                // params) carries the complete monad
-                                                // instantiation — dispatch AND operand
-                                                // dicting both work from it. Bare
-                                                // operands (`digit` in `digit <|>
-                                                // letter`) pin nothing and stay on the
-                                                // codegen fast paths.
-                                                collected_args
-                                                    .iter()
-                                                    .copied()
-                                                    .chain(std::iter::once(x))
-                                                    .find_map(|arg| {
-                                                        let full =
-                                                            concrete_applied_result_ty(ctx, arg)?;
-                                                        (!LowerContext::is_builtin_monad_type(
-                                                            &full,
-                                                        ))
+                        // `return`/`pure`/`fmap`/`<$`/`=<<` name their class
+                        // parameter only in the RESULT type. The enclosing bind
+                        // pushes its own monad on the context stack, which is the
+                        // wrong answer for a NESTED return — pandoc's `symbol` ends
+                        // `return (return (B.str t))`, the outer at the parser and
+                        // the inner at `Future`; taking the parser's for both made
+                        // the parser's action the `Text` itself ("not a closure").
+                        // Stripping the leading arrows also covers a partially
+                        // applied `fmap f` (`fmap B.plain . trimInlinesF`), whose
+                        // own type is still `f a -> f b`. An unresolved or variable
+                        // head falls through to the operand-driven paths as before.
+                        let result_head = matches!(
+                            method_name.as_str(),
+                            "return" | "pure" | "fmap" | "<$" | "=<<"
+                        )
+                        .then(|| ctx.resolved_expr_ty_opt(span))
+                        .flatten()
+                        .and_then(|t| {
+                            let t = ctx.expand_type_aliases(&t);
+                            let mut cur = &t;
+                            while let Ty::Fun(_, r) = cur {
+                                cur = r.as_ref();
+                            }
+                            match cur {
+                                Ty::App(head, _) => Some(head.as_ref().clone()),
+                                _ => None,
+                            }
+                        })
+                        .filter(has_concrete_head);
+                        let inferred = value_class_result
+                            .or(result_head)
+                            .or(inferred_args)
+                            .or(inferred_x)
+                            .or_else(|| {
+                                // Fallback: use monad context stack for nested >>=/>>/return
+                                if is_value_class {
+                                    ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
+                                } else if is_monad_family {
+                                    // An IO action nested inside a user monad's
+                                    // do-block — `n <- liftIO (putStrLn "x" >>
+                                    // return 7)` in `App` — has operands that pin
+                                    // nothing, and the context stack holds the
+                                    // ENCLOSING monad. Typeck recorded this
+                                    // occurrence at IO; dispatching it at `App`
+                                    // ran the IO action through App's bind and
+                                    // returned a bogus value. Trust an IO head on
+                                    // the occurrence's own type before the stack.
+                                    io_occurrence_head(ctx, span)
+                                        .or_else(|| own_concrete_monad(ctx, span))
+                                        .or_else(|| ctx.current_monad_type().cloned())
+                                        .or_else(|| {
+                                            if std::env::var("BHC_NO_CART").is_ok() {
+                                                return None;
+                                            }
+                                            // A FULLY-CONCRETE applied operand type
+                                            // (`manyTill p $eta` with sig-typed
+                                            // params) carries the complete monad
+                                            // instantiation — dispatch AND operand
+                                            // dicting both work from it. Bare
+                                            // operands (`digit` in `digit <|>
+                                            // letter`) pin nothing and stay on the
+                                            // codegen fast paths.
+                                            collected_args
+                                                .iter()
+                                                .copied()
+                                                .chain(std::iter::once(x))
+                                                .find_map(|arg| {
+                                                    let full =
+                                                        concrete_applied_result_ty(ctx, arg)?;
+                                                    (!LowerContext::is_builtin_monad_type(&full))
                                                         .then_some(full)
-                                                    })
-                                            })
-                                            .or_else(|| {
-                                                if std::env::var("BHC_NO_PRONGB").is_ok() {
-                                                    return None;
-                                                }
-                                                // Inside a CONSTRAINED function whose own
-                                                // dict params satisfy an operand's
-                                                // constraints (`many1TillChar p = fmap
-                                                // T.pack . many1Till p` — `many1Till`
-                                                // needs the same `Stream` dict the
-                                                // enclosing fn received), dispatch by the
-                                                // operand's scheme-result HEAD; operand
-                                                // dicting then resolves from those
-                                                // in-scope dicts. Unconstrained contexts
-                                                // (Main-level `digit <|> letter`) have no
-                                                // dicts in scope and keep the codegen
-                                                // fast paths; a VAR result head (runPT's
-                                                // bind at generic m) also skips.
-                                                collected_args
-                                                    .iter()
-                                                    .copied()
-                                                    .chain(std::iter::once(x))
-                                                    .find_map(|arg| {
-                                                        let mut head = arg;
-                                                        let mut nargs = 0usize;
-                                                        while let hir::Expr::App(f2, _, _) = head {
-                                                            nargs += 1;
-                                                            head = f2.as_ref();
-                                                        }
-                                                        if nargs == 0 {
-                                                            return None;
-                                                        }
-                                                        let hir::Expr::Var(dr) = head else {
+                                                })
+                                        })
+                                        .or_else(|| {
+                                            if std::env::var("BHC_NO_PRONGB").is_ok() {
+                                                return None;
+                                            }
+                                            // Inside a CONSTRAINED function whose own
+                                            // dict params satisfy an operand's
+                                            // constraints (`many1TillChar p = fmap
+                                            // T.pack . many1Till p` — `many1Till`
+                                            // needs the same `Stream` dict the
+                                            // enclosing fn received), dispatch by the
+                                            // operand's scheme-result HEAD; operand
+                                            // dicting then resolves from those
+                                            // in-scope dicts. Unconstrained contexts
+                                            // (Main-level `digit <|> letter`) have no
+                                            // dicts in scope and keep the codegen
+                                            // fast paths; a VAR result head (runPT's
+                                            // bind at generic m) also skips.
+                                            collected_args
+                                                .iter()
+                                                .copied()
+                                                .chain(std::iter::once(x))
+                                                .find_map(|arg| {
+                                                    let mut head = arg;
+                                                    let mut nargs = 0usize;
+                                                    while let hir::Expr::App(f2, _, _) = head {
+                                                        nargs += 1;
+                                                        head = f2.as_ref();
+                                                    }
+                                                    if nargs == 0 {
+                                                        return None;
+                                                    }
+                                                    let hir::Expr::Var(dr) = head else {
+                                                        return None;
+                                                    };
+                                                    let scheme = ctx.lookup_scheme(dr.def_id)?;
+                                                    let dict_scoped =
+                                                        scheme.constraints.iter().any(|c| {
+                                                            ctx.lookup_dict(c.class).is_some()
+                                                        });
+                                                    if !dict_scoped {
+                                                        return None;
+                                                    }
+                                                    let mut t = scheme.ty.clone();
+                                                    for _ in 0..nargs {
+                                                        let Ty::Fun(_, r) = t else {
                                                             return None;
                                                         };
-                                                        let scheme =
-                                                            ctx.lookup_scheme(dr.def_id)?;
-                                                        let dict_scoped =
-                                                            scheme.constraints.iter().any(|c| {
-                                                                ctx.lookup_dict(c.class).is_some()
-                                                            });
-                                                        if !dict_scoped {
-                                                            return None;
-                                                        }
-                                                        let mut t = scheme.ty.clone();
-                                                        for _ in 0..nargs {
-                                                            let Ty::Fun(_, r) = t else {
-                                                                return None;
-                                                            };
-                                                            t = *r;
-                                                        }
-                                                        let mut h = &t;
-                                                        while let Ty::App(f2, _) = h {
-                                                            h = f2.as_ref();
-                                                        }
-                                                        (matches!(h, Ty::Con(_))
-                                                            && !LowerContext::is_builtin_monad_type(
-                                                                h,
-                                                            ))
-                                                        .then(|| h.clone())
-                                                    })
-                                            })
-                                            .or_else(|| {
-                                                // Last resort: recover the monad constructor from
-                                                // this method application's own fixpoint-resolved
-                                                // type `N b` (strip the value arg). Lets a
-                                                // user/derived monad's `>>=` dispatch when the
-                                                // operands' types are themselves unresolved — e.g.
-                                                // `return 5 >>= \x -> ...` in a top-level do-block
-                                                // over a GND newtype, where both operands are
-                                                // as-yet-undispatched `return`s.
-                                                match ctx.resolved_expr_ty_opt(span) {
-                                                    Some(Ty::App(head, _)) => Some(*head),
-                                                    _ => None,
-                                                }
-                                            })
-                                            .or_else(|| {
-                                                // Nothing above pinned the monad: inside a
-                                                // constrained binding the operands can be bare
-                                                // parameters (`manyTill p end = scan where scan
-                                                // = do { x <- p; … }`), which carry no
-                                                // instantiated type of their own. Left
-                                                // undispatched, `>>=` stays a builtin whose
-                                                // generic bind ignores parser failure.
-                                                //
-                                                // The binding's signature names the monad
-                                                // applied to its (still variable) arguments,
-                                                // which is what the parametric instance
-                                                // matches. Only a CONSUMER of the instance may
-                                                // use it: inside the module implementing the
-                                                // instance, this would rewrite the generic
-                                                // implementation — parsec's own `parserBind` —
-                                                // into a call to itself, miscompiling the
-                                                // library. An imported instance means we are a
-                                                // consumer. A variable result head, as in
-                                                // `runPT`'s bind at a generic `m`, has no head
-                                                // constructor and skips.
-                                                let sig = ctx.current_binding_sig()?;
-                                                let mut result = sig;
-                                                while let Ty::Fun(_, ret) = result {
-                                                    result = ret.as_ref();
-                                                }
-                                                let Ty::App(monad, _) = result else {
-                                                    return None;
-                                                };
-                                                let mut head = monad.as_ref();
-                                                while let Ty::App(f2, _) = head {
-                                                    head = f2.as_ref();
-                                                }
-                                                let Ty::Con(con) = head else {
-                                                    return None;
-                                                };
-                                                (!LowerContext::is_builtin_monad_type(head)
-                                                    && ctx.has_imported_instance(
-                                                        class_name, con.name,
-                                                    ))
-                                                .then(|| monad.as_ref().clone())
-                                            })
-                                    } else {
-                                        None
-                                    }
-                                });
+                                                        t = *r;
+                                                    }
+                                                    let mut h = &t;
+                                                    while let Ty::App(f2, _) = h {
+                                                        h = f2.as_ref();
+                                                    }
+                                                    (matches!(h, Ty::Con(_))
+                                                        && !LowerContext::is_builtin_monad_type(h))
+                                                    .then(|| h.clone())
+                                                })
+                                        })
+                                        .or_else(|| {
+                                            // Last resort: recover the monad constructor from
+                                            // this method application's own fixpoint-resolved
+                                            // type `N b` (strip the value arg). Lets a
+                                            // user/derived monad's `>>=` dispatch when the
+                                            // operands' types are themselves unresolved — e.g.
+                                            // `return 5 >>= \x -> ...` in a top-level do-block
+                                            // over a GND newtype, where both operands are
+                                            // as-yet-undispatched `return`s.
+                                            match ctx.resolved_expr_ty_opt(span) {
+                                                Some(Ty::App(head, _)) => Some(*head),
+                                                _ => None,
+                                            }
+                                        })
+                                        .or_else(|| {
+                                            // Nothing above pinned the monad: inside a
+                                            // constrained binding the operands can be bare
+                                            // parameters (`manyTill p end = scan where scan
+                                            // = do { x <- p; … }`), which carry no
+                                            // instantiated type of their own. Left
+                                            // undispatched, `>>=` stays a builtin whose
+                                            // generic bind ignores parser failure.
+                                            //
+                                            // The binding's signature names the monad
+                                            // applied to its (still variable) arguments,
+                                            // which is what the parametric instance
+                                            // matches. Only a CONSUMER of the instance may
+                                            // use it: inside the module implementing the
+                                            // instance, this would rewrite the generic
+                                            // implementation — parsec's own `parserBind` —
+                                            // into a call to itself, miscompiling the
+                                            // library. An imported instance means we are a
+                                            // consumer. A variable result head, as in
+                                            // `runPT`'s bind at a generic `m`, has no head
+                                            // constructor and skips.
+                                            let sig = ctx.current_binding_sig()?;
+                                            let mut result = sig;
+                                            while let Ty::Fun(_, ret) = result {
+                                                result = ret.as_ref();
+                                            }
+                                            let Ty::App(monad, _) = result else {
+                                                return None;
+                                            };
+                                            let mut head = monad.as_ref();
+                                            while let Ty::App(f2, _) = head {
+                                                head = f2.as_ref();
+                                            }
+                                            let Ty::Con(con) = head else {
+                                                return None;
+                                            };
+                                            // Not when an operand's own type names a
+                                            // different monad: `evalStateT (do { modify
+                                            // (+ 1); … }) 7` in `counter :: App Int`
+                                            // binds at `StateT Int App`, and taking the
+                                            // signature's `App` ran App's `>>` on
+                                            // StateT actions.
+                                            // (Read past arrows: a partially applied
+                                            // `>>` shares its first operand's span.)
+                                            let operand_elsewhere = collected_args
+                                                .iter()
+                                                .map(|e| e.span())
+                                                .chain([x.span(), span])
+                                                .filter_map(|sp| ctx.resolved_expr_ty_opt(sp))
+                                                .any(|t| {
+                                                    let mut h = &t;
+                                                    while let Ty::Fun(_, r) = h {
+                                                        h = r.as_ref();
+                                                    }
+                                                    while let Ty::App(f2, _) = h {
+                                                        h = f2.as_ref();
+                                                    }
+                                                    matches!(h, Ty::Con(c) if c.name != con.name)
+                                                });
+                                            (!operand_elsewhere
+                                                && !LowerContext::is_builtin_monad_type(head)
+                                                && ctx.has_imported_instance(class_name, con.name))
+                                            .then(|| monad.as_ref().clone())
+                                        })
+                                } else {
+                                    None
+                                }
+                            });
 
                         // A dispatch type recovered from an operand's scheme is the
                         // bare head constructor (`ParsecT`), which names the monad but
@@ -4040,6 +6905,41 @@ fn lower_app(
                                 _ => ty,
                             }
                         });
+                        // Function-instance-head fallback. When the primary
+                        // dispatch type names NO instance of this user class, but
+                        // the receiver (first collected arg) has a solved FUNCTION
+                        // type that DOES, dispatch on the receiver instead. This is
+                        // the chained function-instance case `x ! a ! b`: the outer
+                        // `!`'s receiver is `x ! a` (a method application), whose
+                        // arguments infer to `Attribute`, which has no `Attributable`
+                        // instance — while the receiver's own type `Markup -> Markup`
+                        // does. The gate (primary resolves to nothing, receiver
+                        // resolves to something) leaves every currently-dispatching
+                        // call — `myMap`, whose class parameter is an APPLIED arg —
+                        // untouched, since its primary type already resolves.
+                        let inferred = if is_user
+                            && inferred
+                                .as_ref()
+                                .is_none_or(|ty| !ctx.has_instance_for(class_name, ty))
+                        {
+                            let receiver_fn = collected_args.first().and_then(|arg| {
+                                let ty =
+                                    ctx.expand_type_aliases(&ctx.resolved_expr_ty_opt(arg.span())?);
+                                (matches!(ty, Ty::Fun(_, _))
+                                    && is_fully_concrete_ty(&ty)
+                                    && ctx.has_instance_for(class_name, &ty))
+                                .then_some(ty)
+                            });
+                            receiver_fn.or(inferred)
+                        } else {
+                            inferred
+                        };
+                        if dispatch_dbg() {
+                            eprintln!(
+                                "[dispatch-app] {method_name} ({class_name}): value_class={is_value_class} span_ty={:?} inferred={inferred:?}",
+                                ctx.resolved_expr_ty_opt(span)
+                            );
+                        }
                         if let Some(concrete_ty) = inferred {
                             // `mconcat :: [a] -> a` — the class parameter is the
                             // list's ELEMENT type, but the argument-driven
@@ -4051,6 +6951,24 @@ fn lower_app(
                                 }
                             } else {
                                 concrete_ty
+                            };
+                            // A monad-family class abstracts over a type
+                            // CONSTRUCTOR, and an operand's own type is the
+                            // applied `m a`: `a <> b = liftA2 (<>) a b` in
+                            // `instance Semigroup (F s a)` infers `F s a` from
+                            // its parameter, while the instance to find is at
+                            // `F s`. Strip the last argument only when that is
+                            // what makes an instance resolve, so nothing that
+                            // already dispatched moves.
+                            let concrete_ty = match &concrete_ty {
+                                Ty::App(head, _)
+                                    if is_monad_family
+                                        && !ctx.has_instance_for(class_name, &concrete_ty)
+                                        && ctx.has_instance_for(class_name, head) =>
+                                {
+                                    head.as_ref().clone()
+                                }
+                                _ => concrete_ty,
                             };
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
@@ -4261,7 +7179,7 @@ fn lower_app(
                     return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                 }
             }
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(head_def_ref.def_id, method_name) {
                 if ctx.is_monad_family_class(class_name)
                     && (ctx.lookup_dict(class_name).is_none()
                         || !in_scope_dict_matches(ctx, class_name, span))
@@ -4301,10 +7219,13 @@ fn lower_app(
 
             // Case 3b: Head is a constrained function with unresolved type-variable constraints
             if let Some(scheme) = ctx.lookup_scheme(head_def_ref.def_id) {
-                let has_unresolved = scheme
-                    .constraints
-                    .iter()
-                    .any(|c| ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables));
+                // Any constraint the callee takes as a dictionary, not just a
+                // user class: a `Monad m =>` callee's arguments were otherwise
+                // lowered plainly, so a continuation that needs its OWN monad
+                // dictionary reached it bare (see `is_constrained_fn_value`).
+                let has_unresolved = scheme.constraints.iter().any(|c| {
+                    ctx.constraint_is_dict_passed(c) && c.args.iter().any(has_type_variables)
+                });
                 if has_unresolved {
                     // Clone the constraint list before any mutable ctx call so the
                     // immutable `scheme` borrow is released (its last use is here).
@@ -4336,7 +7257,8 @@ fn lower_app(
                             // applied at the concrete type — not just the callee.
                             let param_info =
                                 callee_param_tys_and_subst(ctx, head_def_ref, &all_args);
-                            let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
+                            let head = at_occurrence_ty(ctx, &var, head_def_ref.span);
+                            let mut result = core::Expr::Var(head, head_def_ref.span);
                             for dict in dicts {
                                 result = core::Expr::App(Box::new(result), Box::new(dict), span);
                             }
@@ -4496,7 +7418,7 @@ fn lower_type_app(
 
             // Check if this is a class method that needs dictionary resolution.
             // Applies to user-defined classes and monad-family classes at non-builtin types.
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
                 if is_user || (is_monad_family && !LowerContext::is_builtin_monad_type(ty)) {
@@ -4573,47 +7495,51 @@ fn lower_lambda(
     // Now lower the body (pattern vars are registered)
     let body_core = lower_expr(ctx, body)?;
 
-    // Build nested lambdas from right to left
-    let mut result = body_core;
-
-    for pat in pats.iter().rev() {
-        // Check if the pattern is simple (just a variable)
+    // Every parameter gets its lambda binder first, and the pattern matches
+    // go INSIDE all of them: `\(a, b) x -> e` is `\lam x -> case lam of
+    // (a, b) -> e`, one two-argument function. Matching between the lambdas
+    // (`\lam -> case lam of (a, b) -> \x -> e`) made a one-argument function
+    // returning a closure, and a builtin fold that applies its function to
+    // both arguments at once (`foldl (\(a, b) x -> …)`) crashed.
+    let mut binders: Vec<Var> = Vec::with_capacity(pats.len());
+    let mut matches: Vec<(Var, &hir::Pat)> = Vec::new();
+    for pat in pats {
         match pat {
             hir::Pat::Var(name, def_id, _) => {
-                // Simple case: pattern is just a variable
-                // Look up the var we registered earlier
                 let var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| Var {
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
                 });
-                result = core::Expr::Lam(var, Box::new(result), span);
+                binders.push(var);
             }
-            hir::Pat::Wild(_) => {
-                // Wildcard: just use a fresh variable that's not referenced
-                let arg_var = ctx.fresh_var("lam", Ty::Error, span);
-                result = core::Expr::Lam(arg_var, Box::new(result), span);
-            }
+            hir::Pat::Wild(_) => binders.push(ctx.fresh_var("lam", Ty::Error, span)),
             _ => {
-                // Complex pattern: need a case expression
                 let arg_var = ctx.fresh_var("lam", Ty::Error, span);
-                let alt = lower_pat_to_alt(ctx, pat, result.clone(), span)?;
-                let default_alt = Alt {
-                    con: AltCon::Default,
-                    binders: vec![],
-                    rhs: make_pattern_error(span),
-                };
-
-                let case_expr = core::Expr::Case(
-                    Box::new(core::Expr::Var(arg_var.clone(), span)),
-                    vec![alt, default_alt],
-                    Ty::Error,
-                    span,
-                );
-
-                result = core::Expr::Lam(arg_var, Box::new(case_expr), span);
+                binders.push(arg_var.clone());
+                matches.push((arg_var, pat));
             }
         }
+    }
+
+    // Wrap the body in the matches, the first pattern outermost.
+    let mut result = body_core;
+    for (arg_var, pat) in matches.into_iter().rev() {
+        let alt = lower_pat_to_alt(ctx, pat, result, span)?;
+        let default_alt = Alt {
+            con: AltCon::Default,
+            binders: vec![],
+            rhs: make_pattern_error(span),
+        };
+        result = core::Expr::Case(
+            Box::new(core::Expr::Var(arg_var, span)),
+            vec![alt, default_alt],
+            Ty::Error,
+            span,
+        );
+    }
+    for var in binders.into_iter().rev() {
+        result = core::Expr::Lam(var, Box::new(result), span);
     }
 
     Ok(result)
@@ -4730,6 +7656,70 @@ fn pattern_binders(pat: &hir::Pat, out: &mut Vec<(Symbol, DefId, Span)>) {
     }
 }
 
+/// Copy `pat` with every binder given a fresh DefId (and Core var), recording
+/// old -> new in `renamed`.
+fn freshen_pat_binders(
+    ctx: &mut LowerContext,
+    pat: &hir::Pat,
+    renamed: &mut rustc_hash::FxHashMap<DefId, DefId>,
+) -> hir::Pat {
+    let mut fresh = |ctx: &mut LowerContext, name: Symbol, old: DefId| {
+        let v = ctx.named_var(name, Ty::Error);
+        let new = DefId::new(1_600_000 + v.id.index());
+        ctx.register_var(new, v);
+        renamed.insert(old, new);
+        new
+    };
+    match pat {
+        hir::Pat::Var(name, def_id, span) => {
+            hir::Pat::Var(*name, fresh(ctx, *name, *def_id), *span)
+        }
+        hir::Pat::As(name, def_id, inner, span) => {
+            let new = fresh(ctx, *name, *def_id);
+            hir::Pat::As(
+                *name,
+                new,
+                Box::new(freshen_pat_binders(ctx, inner, renamed)),
+                *span,
+            )
+        }
+        hir::Pat::Con(r, pats, span) => hir::Pat::Con(
+            *r,
+            pats.iter()
+                .map(|p| freshen_pat_binders(ctx, p, renamed))
+                .collect(),
+            *span,
+        ),
+        hir::Pat::RecordCon(r, fps, span) => hir::Pat::RecordCon(
+            *r,
+            fps.iter()
+                .map(|fp| {
+                    let mut fp = fp.clone();
+                    fp.pat = freshen_pat_binders(ctx, &fp.pat, renamed);
+                    fp
+                })
+                .collect(),
+            *span,
+        ),
+        hir::Pat::Or(l, r, span) => hir::Pat::Or(
+            Box::new(freshen_pat_binders(ctx, l, renamed)),
+            Box::new(freshen_pat_binders(ctx, r, renamed)),
+            *span,
+        ),
+        hir::Pat::Ann(inner, ty, span) => hir::Pat::Ann(
+            Box::new(freshen_pat_binders(ctx, inner, renamed)),
+            ty.clone(),
+            *span,
+        ),
+        hir::Pat::View(e, inner, span) => hir::Pat::View(
+            e.clone(),
+            Box::new(freshen_pat_binders(ctx, inner, renamed)),
+            *span,
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Desugar a mixed let/where group: every non-Var pattern binding becomes a
 /// fresh whole-value Var binding plus one Var binding per pattern binder that
 /// cases on the whole value (see `lower_let_bindings`).
@@ -4757,16 +7747,26 @@ fn desugar_pattern_bindings(
         let mut binders = Vec::new();
         pattern_binders(&b.pat, &mut binders);
         for (name, def_id, bspan) in binders {
+            // Each selector's case pattern gets FRESH binder ids. Reusing the
+            // pattern as written bound `ident` twice under one VarId (`let
+            // ident = case pb of (ident, cls, kvs) -> ident`); the defining
+            // module tolerated the shadowing, but the monomorphizer renames
+            // binders by id when it clones a body into a caller, the two
+            // renames collided, and the outer `ident` came out unbound — a
+            // "not implemented" stub in every specialized pandoc HTML writer.
+            let mut renamed: rustc_hash::FxHashMap<DefId, DefId> = rustc_hash::FxHashMap::default();
+            let sel_pat = freshen_pat_binders(ctx, &b.pat, &mut renamed);
+            let sel_def = renamed.get(&def_id).copied().unwrap_or(def_id);
             let selector = hir::Expr::Case(
                 Box::new(hir::Expr::Var(hir::DefRef {
                     def_id: pb_def,
                     span: b.span,
                 })),
                 vec![hir::CaseAlt {
-                    pat: b.pat.clone(),
+                    pat: sel_pat,
                     guards: Vec::new(),
                     rhs: hir::Expr::Var(hir::DefRef {
-                        def_id,
+                        def_id: sel_def,
                         span: bspan,
                     }),
                     span: b.span,
@@ -5146,7 +8146,14 @@ fn lower_case(
 
     // Check if any alternative has a nested/complex sub-pattern that needs
     // fallthrough support (e.g., `Lit 0` where the literal match may fail).
-    let needs_fallthrough = alts.iter().any(|alt| has_complex_subpatterns(&alt.pat));
+    // So does a guarded alternative: when its guards all fail, the match
+    // resumes at the next alternative.
+    // So does an as- or view-pattern over a refutable pattern: it lowers to a
+    // default alternative that binds, then inspects, and must resume at the
+    // next alternative when the inspection fails.
+    let needs_fallthrough = alts.iter().any(|alt| {
+        has_complex_subpatterns(&alt.pat) || !alt.guards.is_empty() || binds_then_inspects(&alt.pat)
+    });
 
     if !needs_fallthrough {
         // Simple case: no nested patterns, use the fast path
@@ -5195,10 +8202,22 @@ fn lower_case(
     // Bind the scrutinee to a variable so fallthrough can re-case on it.
     let scrut_var = ctx.fresh_var("scrut", Ty::Error, span);
 
+    // A local multi-clause function cases on the tuple of its parameters;
+    // their types let a nested literal sub-pattern compare as `Text`.
+    let scrut_ty = case_scrutinee_ty(ctx, scrutinee);
+
+    // The resume point of each alternative after the first, named up front:
+    // a guarded alternative whose guards all fail resumes at the NEXT
+    // alternative, so its RHS refers to that variable before it is bound.
+    let n = alts.len();
+    let resume_vars: Vec<Option<core::Var>> = (0..=n)
+        .map(|i| (i > 0 && i < n).then(|| ctx.fresh_var(&format!("$fallthru{i}"), Ty::Error, span)))
+        .collect();
+
     // First, lower all alternatives' RHS and patterns (we need them all
     // to build fallthrough expressions).
     let mut lowered_alts: Vec<(hir::Pat, core::Expr)> = Vec::with_capacity(alts.len());
-    for alt in alts {
+    for (i, alt) in alts.iter().enumerate() {
         bind_pattern_vars(ctx, &alt.pat, None);
 
         let existential_classes = get_existential_classes(ctx, &alt.pat);
@@ -5217,7 +8236,11 @@ fn lower_case(
         let rhs = if alt.guards.is_empty() {
             lower_expr(ctx, &alt.rhs)?
         } else {
-            lower_guarded_rhs(ctx, &alt.guards, &alt.rhs, span)?
+            let on_failure = match &resume_vars[i + 1] {
+                Some(v) => core::Expr::Var(v.clone(), span),
+                None => make_pattern_error(span),
+            };
+            lower_guarded_rhs_or(ctx, &alt.guards, &alt.rhs, on_failure, span)?
         };
         if !existential_classes.is_empty() {
             ctx.pop_dict_scope();
@@ -5235,8 +8258,6 @@ fn lower_case(
     //   $fallthru_i = case scrut of { alt_i; _ -> $fallthru_{i+1} }
     // — and reference it by VARIABLE. Each alternative body appears at most
     // twice (outer dispatch + its resume point), keeping the total linear.
-    let n = lowered_alts.len();
-    let mut resume_vars: Vec<Option<_>> = (0..=n).map(|_| None).collect();
     let mut resume_binds: Vec<core::Bind> = Vec::new(); // pushed f_{n-1} first
     let mut outer_alts_rev: Vec<core::Alt> = Vec::with_capacity(n);
 
@@ -5245,7 +8266,11 @@ fn lower_case(
         let fallthrough = resume_vars[i + 1]
             .as_ref()
             .map(|v: &core::Var| core::Expr::Var(v.clone(), span));
-        let core_alt = lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
+        let mut core_alt =
+            lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
+        if let Some(t) = &scrut_ty {
+            type_tuple_alt_binders(&mut core_alt, t);
+        }
 
         // Resume point used by alternatives BEFORE i: try alt i, else resume
         // at i+1 (or fail the match).
@@ -5267,14 +8292,27 @@ fn lower_case(
                 Ty::Error,
                 span,
             );
-            let f = ctx.fresh_var(&format!("$fallthru{i}"), Ty::Error, span);
-            resume_binds.push(core::Bind::NonRec(f.clone(), Box::new(resume_case)));
-            resume_vars[i] = Some(f);
+            let f = resume_vars[i]
+                .clone()
+                .expect("resume var for alternative i > 0");
+            resume_binds.push(core::Bind::NonRec(f, Box::new(resume_case)));
         }
 
         outer_alts_rev.push(core_alt);
     }
     outer_alts_rev.reverse();
+    // Codegen dispatches on constructors first and takes a default only when
+    // none matches, so a default alternative (an as- or view-pattern, which
+    // binds and then inspects) must be the last one: a later `x : rest`
+    // alternative otherwise beat an earlier `inp@('<' : _)` for every
+    // non-empty list. What follows the first default is reachable only
+    // through its resume point anyway.
+    if let Some(first_default) = outer_alts_rev
+        .iter()
+        .position(|alt| matches!(alt.con, core::AltCon::Default))
+    {
+        outer_alts_rev.truncate(first_default + 1);
+    }
 
     let mut case_expr = core::Expr::Case(
         Box::new(core::Expr::Var(scrut_var.clone(), span)),
@@ -5292,6 +8330,126 @@ fn lower_case(
     Ok(core::Expr::Let(Box::new(bind), Box::new(case_expr), span))
 }
 
+/// The type of a `case` scrutinee that is a tuple of variables, field by
+/// field; a field whose type is unknown or not concrete is `Ty::Error`.
+///
+/// A local multi-clause function cases on the tuple of its synthetic
+/// parameters, which share the function's span and have no typeck scheme of
+/// their own; the type recorded at that span is the whole function's, so its
+/// argument types are the fields'.
+fn case_scrutinee_ty(ctx: &LowerContext, scrutinee: &hir::Expr) -> Option<Ty> {
+    let Expr::Tuple(elems, _) = scrutinee else {
+        return None;
+    };
+    let concrete = |t: Ty| {
+        if crate::expr::is_fully_concrete_ty(&t) {
+            t
+        } else {
+            Ty::Error
+        }
+    };
+    let spans: Vec<Span> = elems
+        .iter()
+        .filter_map(|e| match e {
+            Expr::Var(dr) => Some(dr.span),
+            _ => None,
+        })
+        .collect();
+    let shared_fn_args = (spans.len() == elems.len() && spans.windows(2).all(|w| w[0] == w[1]))
+        .then(|| ctx.resolved_expr_ty_opt(spans[0]))
+        .flatten()
+        .and_then(|mut t| {
+            let mut args = Vec::with_capacity(elems.len());
+            while args.len() < elems.len() {
+                let Ty::Fun(a, r) = t else {
+                    return None;
+                };
+                args.push(*a);
+                t = *r;
+            }
+            Some(args)
+        });
+    let tys: Vec<Ty> = match shared_fn_args {
+        Some(args) => args.into_iter().map(concrete).collect(),
+        None => elems
+            .iter()
+            .map(|e| match e {
+                Expr::Var(dr) => concrete(ctx.lookup_type(dr.def_id)),
+                _ => Ty::Error,
+            })
+            .collect(),
+    };
+    tys.iter()
+        .any(|t| !matches!(t, Ty::Error))
+        .then_some(Ty::Tuple(tys))
+}
+
+/// Give a tuple alternative's untyped binders their field types from the
+/// scrutinee's tuple type, at the binders and at every use in the body. A
+/// `"\""` sub-pattern on a `Text` field is matched by codegen only when the
+/// cased variable is known to be `Text`; untyped, it was compared as a
+/// `[Char]` and never matched (pandoc's `strToHtml` escaped every quote).
+fn type_tuple_alt_binders(alt: &mut core::Alt, scrut_ty: &Ty) {
+    let AltCon::DataCon(con) = &alt.con else {
+        return;
+    };
+    let Ty::Tuple(tys) = scrut_ty else {
+        return;
+    };
+    if !con.name.as_str().starts_with("(,") || alt.binders.len() != tys.len() {
+        return;
+    }
+    for (binder, ty) in alt.binders.iter_mut().zip(tys) {
+        if matches!(binder.ty, Ty::Error) && !matches!(ty, Ty::Error) {
+            binder.ty = ty.clone();
+            retype_var_uses(&mut alt.rhs, binder.id, ty);
+        }
+    }
+}
+
+/// Set the type of every untyped occurrence (and binder) of variable `id`.
+fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
+    let fix = |v: &mut Var| {
+        if v.id == id && matches!(v.ty, Ty::Error) {
+            v.ty = ty.clone();
+        }
+    };
+    match expr {
+        core::Expr::Var(v, _) => fix(v),
+        core::Expr::App(f, a, _) => {
+            retype_var_uses(f, id, ty);
+            retype_var_uses(a, id, ty);
+        }
+        core::Expr::TyApp(e, _, _)
+        | core::Expr::TyLam(_, e, _)
+        | core::Expr::Lazy(e, _)
+        | core::Expr::Cast(e, _, _)
+        | core::Expr::Tick(_, e, _) => retype_var_uses(e, id, ty),
+        core::Expr::Lam(_, body, _) => retype_var_uses(body, id, ty),
+        core::Expr::Let(bind, body, _) => {
+            match bind.as_mut() {
+                Bind::NonRec(_, rhs) => retype_var_uses(rhs, id, ty),
+                Bind::Rec(bs) => {
+                    for (_, rhs) in bs {
+                        retype_var_uses(rhs, id, ty);
+                    }
+                }
+            }
+            retype_var_uses(body, id, ty);
+        }
+        core::Expr::Case(scrut, alts, _, _) => {
+            retype_var_uses(scrut, id, ty);
+            for alt in alts {
+                for b in &mut alt.binders {
+                    fix(b);
+                }
+                retype_var_uses(&mut alt.rhs, id, ty);
+            }
+        }
+        core::Expr::Lit(..) | core::Expr::Type(..) | core::Expr::Coercion(..) => {}
+    }
+}
+
 /// Get the existential class names for a constructor pattern.
 /// Returns empty vec for non-existential constructors.
 fn get_existential_classes(ctx: &LowerContext, pat: &hir::Pat) -> Vec<Symbol> {
@@ -5305,6 +8463,18 @@ fn get_existential_classes(ctx: &LowerContext, pat: &hir::Pat) -> Vec<Symbol> {
             vec![]
         }
         _ => vec![],
+    }
+}
+
+/// An as-pattern over a refutable pattern, or a view pattern.
+fn binds_then_inspects(pat: &hir::Pat) -> bool {
+    match pat {
+        hir::Pat::As(_, _, inner, _) => {
+            !matches!(inner.as_ref(), hir::Pat::Var(..) | hir::Pat::Wild(_))
+        }
+        hir::Pat::View(..) => true,
+        hir::Pat::Ann(inner, _, _) => binds_then_inspects(inner),
+        _ => false,
     }
 }
 
@@ -5329,10 +8499,21 @@ fn lower_guarded_rhs(
     rhs: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    lower_guarded_rhs_or(ctx, guards, rhs, make_pattern_error(span), span)
+}
+
+/// [`lower_guarded_rhs`] resuming at `on_failure` when every guard fails.
+fn lower_guarded_rhs_or(
+    ctx: &mut LowerContext,
+    guards: &[hir::Guard],
+    rhs: &hir::Expr,
+    on_failure: core::Expr,
+    span: Span,
+) -> LowerResult<core::Expr> {
     let rhs_core = lower_expr(ctx, rhs)?;
 
     // Build nested ifs from right to left
-    let mut result = make_pattern_error(span); // Default if no guard matches
+    let mut result = on_failure;
 
     for guard in guards.iter().rev() {
         let cond = lower_expr(ctx, &guard.cond)?;
@@ -5463,6 +8644,20 @@ fn lower_record(
     // Record construction becomes constructor application
     // The fields must be in the correct order for the constructor
     let con_core = lower_con(ctx, con_ref)?;
+
+    // A `Text` field's declared type is its value's expected type, exactly as
+    // for positional construction (`propagate_constructor_field_tys`), so an
+    // OverloadedStrings literal there packs.
+    let field_tys = ctx
+        .lookup_constructor(con_ref.def_id)
+        .map(|c| c.name)
+        .and_then(|n| ctx.constructor_field_types(n).cloned())
+        .unwrap_or_default();
+    for (fty, field) in field_tys.iter().zip(fields) {
+        if ty_head_is_text(fty) {
+            propagate_expected_ty(ctx, &field.value, fty, 0);
+        }
+    }
 
     let mut result = con_core;
     for field in fields {

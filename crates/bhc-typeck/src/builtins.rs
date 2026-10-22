@@ -608,6 +608,16 @@ impl Builtins {
             )
         };
 
+        let power_op = || {
+            Scheme::poly(
+                vec![a.clone(), b.clone()],
+                Ty::fun(
+                    Ty::Var(a.clone()),
+                    Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                ),
+            )
+        };
+
         let bool_binop = || {
             Scheme::mono(Ty::fun(
                 self.bool_ty.clone(),
@@ -626,8 +636,9 @@ impl Builtins {
             ("/", num_binop()),
             ("div", num_binop()),
             ("mod", num_binop()),
-            ("^", num_binop()),
-            ("^^", num_binop()),
+            // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
+            ("^", power_op()),
+            ("^^", power_op()),
             ("**", num_binop()),
             // Comparison operators
             ("==", eq_binop()),
@@ -694,6 +705,16 @@ impl Builtins {
                 )
             }),
             ("$", {
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                    ),
+                )
+            }),
+            // ($!) has ($)'s type; it forces its argument first.
+            ("$!", {
                 Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(
@@ -1410,6 +1431,45 @@ impl Builtins {
                     Box::new(either_result),
                 );
                 Scheme::poly(vec![a.clone(), e], Ty::fun(io_a, io_either))
+            }),
+            ("tryIOError", {
+                // tryIOError :: IO a -> IO (Either IOError a)
+                //
+                // The error type is left a variable (as for `try`): there is
+                // no `IOError` constructor here, and its uses only pass the
+                // value on (`PandocIOError (pack u) e`).
+                let e = TyVar::new_star(996);
+                let io_a = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                let either_result = Ty::App(
+                    Box::new(Ty::App(
+                        Box::new(Ty::Con(self.either_con.clone())),
+                        Box::new(Ty::Var(e.clone())),
+                    )),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                let io_either = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(either_result),
+                );
+                Scheme::poly(vec![a.clone(), e], Ty::fun(io_a, io_either))
+            }),
+            ("catchIOError", {
+                // catchIOError :: IO a -> (IOError -> IO a) -> IO a
+                let e = TyVar::new_star(996);
+                let io_a = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                Scheme::poly(
+                    vec![a.clone(), e.clone()],
+                    Ty::fun(
+                        io_a.clone(),
+                        Ty::fun(Ty::fun(Ty::Var(e), io_a.clone()), io_a),
+                    ),
+                )
             }),
             ("throw", {
                 // throw :: e -> a
@@ -2860,8 +2920,11 @@ impl Builtins {
             }),
             // Numeric conversion (simplified)
             ("toInteger", {
-                // toInteger :: Int -> Int (identity for Int)
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))
+                // toInteger :: Integral a => a -> Integer
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.integer_ty.clone()),
+                )
             }),
             ("toRational", {
                 // toRational :: Real a => a -> Rational
@@ -5055,7 +5118,7 @@ impl Builtins {
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                 ),
             ),
-            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12322 below
             // Data.Text PrimOps: packed UTF-8 text
             ("Data.Text.empty", Scheme::mono(self.text_ty.clone())),
             (
@@ -5810,18 +5873,64 @@ impl Builtins {
                 "<=<",
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
             ),
-            (
-                "liftA",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
-            (
-                "liftA2",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
-            (
-                "liftA3",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
+            // `liftA`/`liftA2`/`liftA3` had `forall a b. a` — a type that says
+            // nothing, so their OPERANDS stayed unconstrained: in `liftA2 (<>)
+            // one two` the `(<>)` had a variable type, no Semigroup dictionary
+            // could be chosen for it, and it reached the runtime as a stub.
+            ("liftA", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(f_a, f_b),
+                    ),
+                )
+            }),
+            ("liftA2", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                let f_c = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(c.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
+                        ),
+                        Ty::fun(f_a, Ty::fun(f_b, f_c)),
+                    ),
+                )
+            }),
+            ("liftA3", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                let d = TyVar::new_star(BUILTIN_TYVAR_B + 2);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                let f_c = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(c.clone())));
+                let f_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(
+                                Ty::Var(b.clone()),
+                                Ty::fun(Ty::Var(c.clone()), Ty::Var(d.clone())),
+                            ),
+                        ),
+                        Ty::fun(f_a, Ty::fun(f_b, Ty::fun(f_c, f_d))),
+                    ),
+                )
+            }),
             (
                 "myThreadId",
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
@@ -8074,7 +8183,10 @@ impl Builtins {
             );
         }
 
-        // Data.Sequence at fixed DefIds 12300-12320
+        // Data.Sequence at fixed DefIds 12300-12322. typeck models `Seq a`
+        // as `[a]` (see the alias in lib.rs), so element and container
+        // positions must differ: `singleton :: a -> a` made `a -> Seq a`
+        // an infinite type.
         {
             let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
             let b = TyVar::new(BUILTIN_TYVAR_B, Kind::Star);
@@ -8091,7 +8203,7 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.singleton"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                 ),
             );
             // null :: Seq a -> Bool
@@ -8117,10 +8229,10 @@ impl Builtins {
                 DefId::new(12304),
                 Symbol::intern("Data.Sequence.index"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(self.int_ty.clone(), Ty::Var(b.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::fun(self.int_ty.clone(), Ty::Var(a.clone())),
                     ),
                 ),
             );
@@ -8141,10 +8253,13 @@ impl Builtins {
                 DefId::new(12306),
                 Symbol::intern("Data.Sequence.<|"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                        Ty::fun(
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                        ),
                     ),
                 ),
             );
@@ -8153,10 +8268,10 @@ impl Builtins {
                 DefId::new(12307),
                 Symbol::intern("Data.Sequence.|>"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                     ),
                 ),
             );
@@ -8210,12 +8325,15 @@ impl Builtins {
                 DefId::new(12312),
                 Symbol::intern("Data.Sequence.update"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                            ),
                         ),
                     ),
                 ),
@@ -8225,12 +8343,15 @@ impl Builtins {
                 DefId::new(12313),
                 Symbol::intern("Data.Sequence.insertAt"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                            ),
                         ),
                     ),
                 ),
@@ -8253,7 +8374,10 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.fromList"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
                 ),
             );
             // toList :: Seq a -> [a]
@@ -8262,7 +8386,10 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.toList"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
                 ),
             );
             // replicate :: Int -> a -> Seq a
@@ -8273,7 +8400,7 @@ impl Builtins {
                     vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                     ),
                 ),
             );
@@ -8300,13 +8427,41 @@ impl Builtins {
                 DefId::new(12320),
                 Symbol::intern("Data.Sequence.filter"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                        Ty::fun(
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                        ),
                     ),
                 ),
             );
+            // dropWhileL, dropWhileR :: (a -> Bool) -> Seq a -> Seq a
+            for (id, name) in [
+                (12321, "Data.Sequence.dropWhileL"),
+                (12322, "Data.Sequence.dropWhileR"),
+            ] {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+                            Ty::fun(list_a.clone(), list_a),
+                        ),
+                    ),
+                );
+            }
+        }
+
+        // Under the closure IO model the transformers are the Haskell library
+        // in stdlib/bhc-transformers/hs (spec/BHC-BRIEF-0005), so none of
+        // their types, classes or operations are builtins.
+        if crate::io_closure_mode() {
+            return;
         }
 
         // Register transformer types and operations at fixed DefIds (10000+)

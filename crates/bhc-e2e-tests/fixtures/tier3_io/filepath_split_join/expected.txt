@@ -1,0 +1,10 @@
+["/","usr","local","bin"]
+["a","b"]
+["/","usr/","local/","bin"]
+["a//","b/"]
+/usr/bin
+a/b/c.txt
+/abs/c
+data/translations/en.yaml
+3
+[3,4,1]

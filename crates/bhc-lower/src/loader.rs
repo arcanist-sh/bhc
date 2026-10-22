@@ -940,15 +940,27 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                     }
                     ast::Import::Type(ident, cons, _) => {
                         filtered.types.remove(&ident.name);
-                        // Remove constructors
-                        if let Some(constructors) = cons {
-                            for con in constructors {
-                                filtered.constructors.remove(&con.name);
+                        match cons {
+                            // `hiding (T)`: a capitalized name hides the type
+                            // AND a data constructor of that name. Pandoc's
+                            // `import Text.DocLayout hiding (Text, Empty)`
+                            // relies on it so blaze's `Empty`/`Text`
+                            // constructors are the ones in scope.
+                            None => {
+                                filtered.constructors.remove(&ident.name);
                             }
-                        } else {
-                            // Type(..) - hide all constructors
-                            // For now, we'd need to track which constructors belong to which type
-                            // This is a simplification
+                            // `hiding (T(..))` (the parser's empty list): every
+                            // constructor of `T`.
+                            Some(constructors) if constructors.is_empty() => {
+                                filtered
+                                    .constructors
+                                    .retain(|_, info| info.type_con_name != ident.name);
+                            }
+                            Some(constructors) => {
+                                for con in constructors {
+                                    filtered.constructors.remove(&con.name);
+                                }
+                            }
                         }
                     }
                     ast::Import::Pattern(ident, _) => {
@@ -1017,8 +1029,45 @@ pub fn register_imported_names(
         // nothing is bound yet, OR when this is an imported class method (which
         // must shadow a same-named builtin).
         let leaked = ctx.qualified_leak_names.contains(&name);
+        // A genuine definition whose name is also a codegen BUILTIN must win
+        // over that always-in-scope builtin, as it does in Haskell, where the
+        // builtin would only be in scope through its own import. The interface
+        // loader marks such a definition by giving it a module-qualified Core
+        // name. Without this, `import Text.Parsec (try)` left bare `try` as
+        // `Control.Exception.try`, and every backtracking parser in pandoc ran
+        // its argument as an IO action. A Prelude name is left alone: using an
+        // imported one bare would be ambiguous in Haskell anyway.
+        let shadows_builtin =
+            ctx.lookup_value(name).is_some_and(|existing| {
+                bhc_index::Idx::index(existing) < crate::context::BUILTIN_DEF_LIMIT
+            }) && ctx.defs.get(&def_id).is_some_and(|info| {
+                info.name != name && info.name.as_str().ends_with(name.as_str())
+            }) && !crate::lower::is_prelude_export(name.as_str());
+        // A name the import lists explicitly is the import's, not a same-named
+        // builtin's — unless it is a Prelude name, which would be ambiguous in
+        // Haskell. `import Text.Pandoc.Class (PandocMonad, lookupEnv)` re-exports
+        // the class method, and the builtin System.Environment.lookupEnv kept
+        // the name. Closure IO model only for now (spec/BHC-BRIEF-0005).
+        let explicitly_listed = bhc_types::io_closure_mode()
+            && matches!(&import.spec, Some(ast::ImportSpec::Only(items))
+            if items.iter().any(|i| match i {
+                ast::Import::Var(id, _) => id.name == name,
+                // `PandocMonad(lookupEnv)`: a listed class method.
+                ast::Import::Type(_, Some(children), _) => {
+                    children.iter().any(|c| c.name == name)
+                }
+                _ => false,
+            }))
+            && ctx.lookup_value(name).is_some_and(|existing| {
+                bhc_index::Idx::index(existing) < crate::context::BUILTIN_DEF_LIMIT
+            })
+            && !crate::lower::is_prelude_export(name.as_str());
         if !import.qualified
-            && (ctx.lookup_value(name).is_none() || imported_methods.contains(&name) || leaked)
+            && (ctx.lookup_value(name).is_none()
+                || imported_methods.contains(&name)
+                || leaked
+                || shadows_builtin
+                || explicitly_listed)
         {
             ctx.bind_value(name, def_id);
             // A name held only by a qualified import's alias-backing stub is

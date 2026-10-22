@@ -313,6 +313,21 @@ impl TypeEnv {
         }
     }
 
+    /// The names in the outermost scope — the builtins after
+    /// `TyCtxt::register_builtins` — whose scheme satisfies `pred`.
+    pub fn top_level_names_where(&self, pred: impl Fn(&Scheme) -> bool) -> Vec<Symbol> {
+        self.locals
+            .first()
+            .map(|scope| {
+                scope
+                    .iter()
+                    .filter(|(_, scheme)| pred(scheme))
+                    .map(|(name, _)| *name)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Insert a global binding by name only (for class methods).
     ///
     /// This is used for type class methods which don't have a DefId at definition

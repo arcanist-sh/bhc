@@ -1,0 +1,7 @@
+("ab","<cd")
+("ab","<cd")
+("t&lt; x","</p><br>")
+("a < b","")
+tag <p>
+char x
+empty

@@ -1,0 +1,4 @@
+1 rest=cd
+2 rest=!
+100 rest=tail
+none

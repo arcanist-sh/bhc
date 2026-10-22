@@ -1,0 +1,9 @@
+True
+False
+True
+2
+True
+False
+Just "b"
+True
+False

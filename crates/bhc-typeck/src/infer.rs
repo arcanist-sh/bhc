@@ -213,6 +213,24 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 crate::binding_groups::local_binding_order(&binds, &refs)
             };
 
+            // Local functions passed or stored as values somewhere in the
+            // block or its body: those may be used at more than one monad
+            // (EPUB's `writeHtml`, called at `m` and handed to
+            // `createCoverPage` at `StateT EPUBState m`), so they stay
+            // generalized below.
+            let escaping: Vec<DefId> = {
+                let mut r = Vec::new();
+                for b in bindings.iter() {
+                    crate::binding_groups::collect_escaping_references(
+                        &b.rhs,
+                        ctx.dollar_def,
+                        &mut r,
+                    );
+                }
+                crate::binding_groups::collect_escaping_references(body, ctx.dollar_def, &mut r);
+                r
+            };
+
             for group in &group_order {
                 // Step 2: Check each binding's RHS and unify with pre-registered type
                 for &i in group {
@@ -248,7 +266,69 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             .lookup_def_id(*def_id)
                             .map(|s| ctx.apply_subst(&s.ty))
                             .unwrap_or_else(|| ctx.fresh_ty());
-                        let scheme = ctx.generalize(&var_ty);
+                        // A guard-fallthrough join point (`$caseresumeN`, and
+                        // the shared scrutinee `$cscrut`) is used exactly once,
+                        // at the enclosing case's own type. Generalizing it made
+                        // `return x` inside a `StateT s m` alternative a
+                        // `forall n. Monad n => n a`, whose `return` then
+                        // resolved through the only dictionary in scope — the
+                        // inner `m`'s — returning an `m` action where a StateT
+                        // computation belonged.
+                        let scheme = if is_join_point_name(name.as_str()) {
+                            Scheme::mono(var_ty)
+                        } else if binding.sig.is_none()
+                            && (!matches!(binding.rhs, Expr::Lam(..))
+                                || (crate::io_closure_mode() && !escaping.contains(def_id)))
+                        {
+                            // The monomorphism restriction, for the variables
+                            // it matters for here: a local VALUE binding with no
+                            // signature does not generalize its monad. `where
+                            // go = do { a <- one; s <- get; … }` run as
+                            // `evalStateT go s` must stay at THAT StateT; made
+                            // `forall n. n String`, its binds resolved through
+                            // the enclosing `Monad m` dictionary instead.
+                            //
+                            // Under the closure IO model a local FUNCTION keeps
+                            // its monad too: Core does not abstract a local
+                            // binding over dictionaries, so pandoc's
+                            // `getTranslations`' `getTrans fp = readDataFile fp
+                            // >>= toTextM fp …`, made `forall m. PandocMonad m
+                            // => …`, had its dictionary resolved at a bogus
+                            // instance and its binds left to IO's builtin.
+                            let mut scheme = ctx.generalize(&var_ty);
+                            let mut applied = Vec::new();
+                            applied_head_vars(&var_ty, &mut applied);
+                            // Likewise a variable a pending constraint of a
+                            // DICTIONARY-PASSED class mentions: generalizing
+                            // `space' wrap = if wrap then space else char ' '`
+                            // (pandoc's Writers.Blaze) to `forall a. HasChars
+                            // a => …` left `char` with no dictionary.
+                            if crate::io_closure_mode() {
+                                constrained_local_vars(ctx, &mut applied);
+                                value_class_constrained_vars(ctx, &mut applied);
+                            }
+                            scheme
+                                .vars
+                                .retain(|v| !applied.iter().any(|a| a.id == v.id));
+                            scheme
+                        } else if crate::io_closure_mode() {
+                            // A local function used as a value stays general
+                            // over its monad (EPUB's `writeHtml` runs at two),
+                            // but not over a value-class variable: the body is
+                            // compiled once, so generalizing `toDoc t | t ==
+                            // " " = space | otherwise = literal t` (pandoc's
+                            // Writers.Blaze) to `forall t. (Eq t, IsString t)
+                            // => …` let the literal default `t` to `String` —
+                            // the use at `Text` instantiated a fresh copy — and
+                            // `literal` got the `[Char]` HasChars dictionary.
+                            let mut scheme = ctx.generalize(&var_ty);
+                            let mut fixed = Vec::new();
+                            value_class_constrained_vars(ctx, &mut fixed);
+                            scheme.vars.retain(|v| !fixed.iter().any(|a| a.id == v.id));
+                            scheme
+                        } else {
+                            ctx.generalize(&var_ty)
+                        };
                         ctx.env.insert_local(*name, scheme.clone());
                         ctx.env.insert_global(*def_id, scheme);
                     }
@@ -476,6 +556,16 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         if let Some(expected) = all_field_types.get(&field.name) {
                             ctx.unify(&field_val_ty, expected, field.span);
                         }
+                        // An imported record's constructor carries fresh field
+                        // types; its declared ones type the new value
+                        // (closure IO model).
+                        if let Some((owner, declared)) =
+                            ctx.record_field_types.get(&field.name).cloned()
+                        {
+                            if owner == name {
+                                ctx.unify(&field_val_ty, &declared, field.span);
+                            }
+                        }
                     }
                 } else {
                     // Type has no registered constructors — just infer field values
@@ -541,15 +631,25 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             });
 
             if let Some(scheme) = scheme {
-                // Instantiate the scheme, substituting the provided type args
-                // for the first N forall-bound vars, and fresh vars for the rest
+                // Instantiate the scheme with a FRESH type var for every
+                // forall-bound var, then unify the first N fresh vars with the
+                // explicitly-applied type arguments. Routing the type args
+                // through unification (rather than substituting them straight
+                // into the scheme's constraints) canonicalizes them exactly as
+                // a type annotation does, so the class constraints they produce
+                // (e.g. `ToValue Text` from `toValue @Text`) match instances
+                // loaded from a `.bhi`. Substituting the raw lowered con
+                // directly left `method @ConcreteType` unable to resolve an
+                // imported instance, even though `toValue (x :: Text)` did.
                 let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-                for (i, var) in scheme.vars.iter().enumerate() {
-                    if i < type_args.len() {
-                        subst.insert(var.id, type_args[i].clone());
-                    } else {
-                        let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
-                        subst.insert(var.id, Ty::Var(fresh));
+                for var in scheme.vars.iter() {
+                    let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
+                    subst.insert(var.id, Ty::Var(fresh));
+                }
+                for (i, ty_arg) in type_args.iter().enumerate() {
+                    if let Some(fresh_ty) = scheme.vars.get(i).and_then(|v| subst.get(&v.id)) {
+                        let fresh_ty = fresh_ty.clone();
+                        ctx.unify(&fresh_ty, ty_arg, *_span);
                     }
                 }
 
@@ -613,6 +713,124 @@ fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
             }
         }
     }
+}
+
+/// Names `bhc-lower` gives the bindings of a desugared guard-fallthrough
+/// `case` (see `lower_case_with_guard_fallthrough`).
+/// Type variables in the HEAD of a type application (`m` in `m a`): the
+/// monad (or other constructor) variables of a type.
+/// The type variables mentioned by pending constraints of classes whose
+/// methods are dictionary-passed (not the builtin classes, whose operations
+/// codegen implements directly). A local binding cannot be abstracted over a
+/// dictionary, so such a variable must stay monomorphic.
+/// The builtin classes, whose operations codegen implements directly rather
+/// than through dictionaries.
+pub(crate) fn is_builtin_class(class: Symbol) -> bool {
+    matches!(
+        class.as_str(),
+        "Eq" | "Ord"
+            | "Show"
+            | "Read"
+            | "Enum"
+            | "Bounded"
+            | "Num"
+            | "Real"
+            | "Integral"
+            | "Fractional"
+            | "Floating"
+            | "RealFrac"
+            | "RealFloat"
+            | "Functor"
+            | "Applicative"
+            | "Monad"
+            | "MonadFail"
+            | "Foldable"
+            | "Traversable"
+            | "Semigroup"
+            | "Monoid"
+            | "IsString"
+    )
+}
+
+/// Variables mentioned by a pending constraint of a builtin VALUE class
+/// (`Eq`, `IsString`, the numeric classes, …) — not the monad/functor family,
+/// over which a local function may legitimately stay general.
+fn value_class_constrained_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
+    for c in &ctx.constraints {
+        if !matches!(
+            c.class.as_str(),
+            "Eq" | "Ord"
+                | "IsString"
+                | "Show"
+                | "Num"
+                | "Integral"
+                | "Real"
+                | "Fractional"
+                | "Floating"
+                | "RealFrac"
+                | "RealFloat"
+                | "Enum"
+                | "Bounded"
+        ) {
+            continue;
+        }
+        for arg in &c.args {
+            out.extend(ctx.apply_subst(arg).free_vars());
+        }
+    }
+}
+
+fn constrained_local_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
+    fn vars(ty: &Ty, out: &mut Vec<bhc_types::TyVar>) {
+        match ty {
+            Ty::Var(v) => out.push(v.clone()),
+            Ty::App(f, a) | Ty::Fun(f, a) => {
+                vars(f, out);
+                vars(a, out);
+            }
+            Ty::List(a) => vars(a, out),
+            Ty::Tuple(ts) => ts.iter().for_each(|t| vars(t, out)),
+            _ => {}
+        }
+    }
+    for c in &ctx.constraints {
+        if is_builtin_class(c.class) {
+            continue;
+        }
+        for arg in &c.args {
+            vars(&ctx.apply_subst(arg), out);
+        }
+    }
+    for arg in &ctx.dict_constraint_args {
+        vars(&ctx.apply_subst(arg), out);
+    }
+}
+
+fn applied_head_vars(ty: &Ty, out: &mut Vec<bhc_types::TyVar>) {
+    match ty {
+        Ty::App(f, a) => {
+            let mut head = f.as_ref();
+            while let Ty::App(g, _) = head {
+                head = g.as_ref();
+            }
+            if let Ty::Var(v) = head {
+                out.push(v.clone());
+            }
+            applied_head_vars(f, out);
+            applied_head_vars(a, out);
+        }
+        Ty::Fun(a, b) => {
+            applied_head_vars(a, out);
+            applied_head_vars(b, out);
+        }
+        Ty::List(a) => applied_head_vars(a, out),
+        Ty::Tuple(ts) => ts.iter().for_each(|t| applied_head_vars(t, out)),
+        _ => {}
+    }
+}
+
+fn is_join_point_name(name: &str) -> bool {
+    name.starts_with("$caseresume") || name == "$cscrut"
 }
 
 /// Check a binding (pattern = expression).

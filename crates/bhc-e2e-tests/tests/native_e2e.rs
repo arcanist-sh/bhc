@@ -223,6 +223,20 @@ fn test_tier2_multimodule_basic_native() {
     run_native_test("tier2_functions/multimodule_basic", Profile::Default);
 }
 
+/// `StateT` over a GND newtype monad imported from another module.
+#[test]
+fn test_tier2_multimodule_newtype_monad_native() {
+    run_native_test(
+        "tier2_functions/multimodule_newtype_monad",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_multimodule_text_field_native() {
+    run_native_test("tier2_functions/multimodule_text_field", Profile::Default);
+}
+
 #[test]
 fn test_tier2_multimodule_chain_native() {
     run_native_test("tier2_functions/multimodule_chain", Profile::Default);
@@ -408,6 +422,266 @@ fn test_tier3_text_equality_native() {
 #[test]
 fn test_tier3_string_literal_case_native() {
     run_native_test("tier3_io/string_literal_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_enum_compare_vars_native() {
+    run_native_test("tier3_io/enum_compare_vars", Profile::Default);
+}
+
+#[test]
+fn test_tier3_system_env_io_native() {
+    run_native_test("tier3_io/system_env_io", Profile::Default);
+}
+
+/// Library transformers only (spec/BHC-BRIEF-0005): the builtin eager-mode
+/// `StateT` loses the error value in the handler, a separate known gap.
+#[test]
+fn test_tier3_monad_error_statet_newtype_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/monad_error_statet_newtype", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lambda_pattern_fold_native() {
+    run_native_test("tier3_io/lambda_pattern_fold", Profile::Default);
+}
+
+#[test]
+fn test_tier3_fmap_default_native() {
+    run_native_test("tier3_io/fmap_default", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_concat_map_native() {
+    run_native_test("tier3_io/text_concat_map", Profile::Default);
+}
+
+/// Library transformers only (closure IO model): eager mode's builtin
+/// `fmap` cannot see the container inside a generic instance.
+#[test]
+fn test_tier3_traversable_instance_fmap_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/traversable_instance_fmap", Profile::Default);
+}
+
+#[test]
+fn test_tier3_multiparam_default_identity_native() {
+    run_native_test("tier3_io/multiparam_default_identity", Profile::Default);
+}
+
+#[test]
+fn test_tier3_tuple_equality_native() {
+    run_native_test("tier3_io/tuple_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_integer_conversions_native() {
+    run_native_test("tier3_io/integer_conversions", Profile::Default);
+}
+
+/// Closure IO model only: eager mode erases the element type `(\\)` and the
+/// list comparison need.
+#[test]
+fn test_tier3_list_difference_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/list_difference", Profile::Default);
+}
+
+/// Closure IO model only: eager mode does not resolve a dictionary whose
+/// class argument is fixed only by a functional dependency.
+#[test]
+fn test_tier3_constrained_fn_composed_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/constrained_fn_composed", Profile::Default);
+}
+
+/// Closure IO model only (library transformers): eager mode's hard-coded
+/// State cannot dispatch a method of a class generic in the state.
+#[test]
+fn test_tier3_monadstate_generic_state_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/monadstate_generic_state", Profile::Default);
+}
+
+/// Closure IO model only: eager mode erases the element types the
+/// comparison needs.
+#[test]
+fn test_tier3_list_eq_by_contents_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/list_eq_by_contents", Profile::Default);
+}
+
+#[test]
+fn test_tier3_case_qualified_scrutinee_native() {
+    run_native_test("tier3_io/case_qualified_scrutinee", Profile::Default);
+}
+
+#[test]
+fn test_tier3_nub_ord_reads_native() {
+    run_native_test("tier3_io/nub_ord_reads", Profile::Default);
+}
+
+#[test]
+fn test_tier3_local_multiclause_param_native() {
+    run_native_test("tier3_io/local_multiclause_param", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_prefix_ops_native() {
+    run_native_test("tier3_io/text_prefix_ops", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_group_by_native() {
+    run_native_test("tier3_io/text_group_by", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_literal_nested_pattern_native() {
+    run_native_test("tier3_io/text_literal_nested_pattern", Profile::Default);
+}
+
+#[test]
+fn test_tier3_recursive_parser_knot_native() {
+    run_native_test("tier3_io/recursive_parser_knot", Profile::Default);
+}
+
+#[test]
+fn test_tier3_local_named_like_method_native() {
+    run_native_test("tier3_io/local_named_like_method", Profile::Default);
+}
+
+#[test]
+fn test_tier3_digit_hex_native() {
+    run_native_test("tier3_io/digit_hex", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bare_sequence_value_native() {
+    run_native_test("tier3_io/bare_sequence_value", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monadplus_poly_builtin_native() {
+    run_native_test("tier3_io/monadplus_poly_builtin", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monad_witness_builtin_native() {
+    run_native_test("tier3_io/monad_witness_builtin", Profile::Default);
+}
+
+#[test]
+fn test_tier3_elem_structural_native() {
+    run_native_test("tier3_io/elem_structural", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monadfail_user_instance_native() {
+    run_native_test("tier3_io/monadfail_user_instance", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lookup_structural_native() {
+    run_native_test("tier3_io/lookup_structural", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_passes_own_dict_native() {
+    run_native_test("tier3_io/instance_passes_own_dict", Profile::Default);
+}
+
+#[test]
+fn test_tier3_guard_fallthrough_clauses_native() {
+    run_native_test("tier3_io/guard_fallthrough_clauses", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_literal_local_clauses_native() {
+    run_native_test("tier3_io/text_literal_local_clauses", Profile::Default);
+}
+
+#[test]
+fn test_tier3_pure_value_builtin_native() {
+    run_native_test("tier3_io/pure_value_builtin", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_char_key_local_native() {
+    run_native_test("tier3_io/map_char_key_local", Profile::Default);
+}
+
+#[test]
+fn test_tier3_set_enum_keys_native() {
+    run_native_test("tier3_io/set_enum_keys", Profile::Default);
+}
+
+#[test]
+fn test_tier3_view_pattern_fallthrough_native() {
+    run_native_test("tier3_io/view_pattern_fallthrough", Profile::Default);
+}
+
+#[test]
+fn test_tier3_as_pattern_order_native() {
+    run_native_test("tier3_io/as_pattern_order", Profile::Default);
+}
+
+#[test]
+fn test_tier3_eq_parametric_field_native() {
+    run_native_test("tier3_io/eq_parametric_field", Profile::Default);
+}
+
+/// Closure IO model only: eager mode still generalizes local functions over
+/// value-class variables.
+#[test]
+fn test_tier3_local_value_class_mono_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/local_value_class_mono", Profile::Default);
+}
+
+#[test]
+fn test_tier3_foreign_import_io_native() {
+    run_native_test("tier3_io/foreign_import_io", Profile::Default);
+}
+
+/// Closure IO model only: eager mode erases the types of pattern binders and
+/// operators, so an Integer pattern field cannot be told from an Int.
+#[test]
+fn test_tier3_numeric_typing_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/numeric_typing", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monadplus_builtin_native() {
+    run_native_test("tier3_io/monadplus_builtin", Profile::Default);
+}
+
+#[test]
+fn test_tier3_handle_setters_native() {
+    run_native_test("tier3_io/handle_setters", Profile::Default);
+}
+
+#[test]
+fn test_tier3_ordering_eq_native() {
+    run_native_test("tier3_io/ordering_eq", Profile::Default);
 }
 
 #[test]
@@ -729,6 +1003,16 @@ fn test_tier3_filepath_basic_native() {
     run_native_test("tier3_io/filepath_basic", Profile::Default);
 }
 
+#[test]
+fn test_tier3_filepath_split_join_native() {
+    run_native_test("tier3_io/filepath_split_join", Profile::Default);
+}
+
+#[test]
+fn test_tier3_try_io_error_native() {
+    run_native_test("tier3_io/try_io_error", Profile::Default);
+}
+
 // System.Directory operations
 #[test]
 fn test_tier3_directory_ops_native() {
@@ -853,6 +1137,236 @@ fn test_tier3_async_mask() {
 #[test]
 fn test_tier2_derive_eq() {
     run_native_test("tier2_functions/derive_eq", Profile::Default);
+}
+
+/// `f <$> x <*> y` must reach the user `Functor`/`Applicative` instance: the
+/// functor value is `<$>`'s LAST operand, and dispatching on the first one
+/// resolved `Functor` at a function type and fell back to the builtin fmap.
+#[test]
+fn test_tier2_applicative_user_instance() {
+    run_native_test(
+        "tier2_functions/applicative_user_instance",
+        Profile::Default,
+    );
+}
+
+/// `return $ return x` spans two monads, and `$` must not hide the head of
+/// either `return`.
+#[test]
+fn test_tier2_nested_return_user_monads() {
+    run_native_test(
+        "tier2_functions/nested_return_user_monads",
+        Profile::Default,
+    );
+}
+
+/// `f =<< m` must reach the same instance as `m >>= f`.
+#[test]
+fn test_tier2_flipped_bind_user_monad() {
+    run_native_test("tier2_functions/flipped_bind_user_monad", Profile::Default);
+}
+
+/// `deriving (Functor, Applicative, Monad)` on a newtype that carries a
+/// parameter before the monad's own, and `liftA2` over it.
+#[test]
+fn test_tier2_gnd_newtype_extra_param() {
+    run_native_test("tier2_functions/gnd_newtype_extra_param", Profile::Default);
+}
+
+/// Dispatch inside instance bodies: `mappend = (<>)` under a `Semigroup a`
+/// constraint, and constructor-bound `Text` fields combined with `<>`.
+#[test]
+fn test_tier2_instance_method_alias() {
+    run_native_test("tier2_functions/instance_method_alias", Profile::Default);
+}
+
+/// Point-free `fmap f . g` under only a base-monad `Monad m` constraint uses
+/// the parser type's Functor, not `fmap` via the `Monad m` dictionary.
+#[test]
+fn test_tier2_point_free_fmap_transformer() {
+    run_native_test(
+        "tier2_functions/point_free_fmap_transformer",
+        Profile::Default,
+    );
+}
+
+/// A failing guard in a `case` alternative falls through to the next one.
+#[test]
+fn test_tier2_case_guard_fallthrough() {
+    run_native_test("tier2_functions/case_guard_fallthrough", Profile::Default);
+}
+
+/// An explicitly recursive parser (`go n = p >> go n`) over a user monad that
+/// defines only `>>=`: lazy self-calls, default `>>`, literal-pattern binders.
+#[test]
+fn test_tier2_recursive_parser_loop() {
+    run_native_test("tier2_functions/recursive_parser_loop", Profile::Default);
+}
+
+/// Semigroup/Monoid instances written at a synonym over a user newtype named
+/// `Many` (pandoc-types' `Inlines`): no list reading, superclass `(<>)` as a
+/// value, and the instance bodies' own `mempty`/`(<>)` dispatch.
+#[test]
+fn test_tier2_newtype_monoid_synonym_instance() {
+    run_native_test(
+        "tier2_functions/newtype_monoid_synonym_instance",
+        Profile::Default,
+    );
+}
+
+/// `Data.Sequence.filter`/`dropWhileL`/`dropWhileR` with a named predicate
+/// (closure code pointer, Bool result, PHI predecessor after the Bool test).
+#[test]
+fn test_tier2_seq_filter_drop_while() {
+    run_native_test("tier2_functions/seq_filter_drop_while", Profile::Default);
+}
+
+/// A constrained `(Semigroup a, Monoid a) => Monoid (F s a)` instance over a
+/// function newtype (pandoc's `Future`), used directly and via `Monoid m =>`.
+#[test]
+fn test_tier2_constrained_newtype_monoid() {
+    run_native_test(
+        "tier2_functions/constrained_newtype_monoid",
+        Profile::Default,
+    );
+}
+
+/// Inside `instance C m => C (T m)`, class methods used at `T m` come from the
+/// instance being defined, not from the constraint dictionary for `m`.
+#[test]
+fn test_tier2_instance_body_own_class_dispatch() {
+    run_native_test(
+        "tier2_functions/instance_body_own_class_dispatch",
+        Profile::Default,
+    );
+}
+
+/// A `where`-bound helper called from a guard of a sole clause.
+#[test]
+fn test_tier2_where_helper_in_guard() {
+    run_native_test("tier2_functions/where_helper_in_guard", Profile::Default);
+}
+
+/// `Data.Text.any`/`all` with a predicate that returns a boxed `False`.
+#[test]
+fn test_tier2_text_pred_boxed_bool() {
+    run_native_test("tier2_functions/text_pred_boxed_bool", Profile::Default);
+}
+
+/// `show` of a tuple/`Either`/`Maybe` whose components are only known from
+/// the TYPE (a variable or call, not a constructor application).
+#[test]
+fn test_tier2_show_compound_from_type() {
+    run_native_test("tier2_functions/show_compound_from_type", Profile::Default);
+}
+
+/// `StateT` over a GND newtype monad whose representation is a transformer
+/// stack (pandoc's `PandocIO` shape).
+#[test]
+fn test_tier2_statet_poly_dict() {
+    run_native_test("tier2_functions/statet_poly_dict", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_guard_fallthrough() {
+    run_native_test("tier2_functions/statet_guard_fallthrough", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_stes_when() {
+    run_native_test("tier2_functions/statet_stes_when", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_poly_monad_helper() {
+    run_native_test("tier2_functions/statet_poly_monad_helper", Profile::Default);
+}
+
+#[test]
+fn test_tier2_poly_monad_evalstatet() {
+    run_native_test("tier2_functions/poly_monad_evalstatet", Profile::Default);
+}
+
+#[test]
+fn test_tier2_newtype_monoid_map() {
+    run_native_test("tier2_functions/newtype_monoid_map", Profile::Default);
+}
+
+#[test]
+fn test_tier2_newtype_monad_error() {
+    run_native_test("tier2_functions/newtype_monad_error", Profile::Default);
+}
+
+#[test]
+fn test_tier2_liftio_except_over_state() {
+    run_native_test("tier2_functions/liftio_except_over_state", Profile::Default);
+}
+
+#[test]
+fn test_tier2_instance_alias_homonym() {
+    run_native_test("tier2_functions/instance_alias_homonym", Profile::Default);
+}
+
+#[test]
+fn test_tier2_multimodule_poly_helper_in_statet() {
+    run_native_test(
+        "tier2_functions/multimodule_poly_helper_in_statet",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_statet_stes_runners() {
+    run_native_test("tier2_functions/statet_stes_runners", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_stes_applicative() {
+    run_native_test("tier2_functions/statet_stes_applicative", Profile::Default);
+}
+
+#[test]
+fn test_tier2_applicative_partial_builtin() {
+    run_native_test(
+        "tier2_functions/applicative_partial_builtin",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_statet_over_newtype_monad() {
+    run_native_test(
+        "tier2_functions/statet_over_newtype_monad",
+        Profile::Default,
+    );
+}
+
+/// `print` of a case-alternative binder shows it at its solved type.
+#[test]
+fn test_tier2_show_case_binder() {
+    run_native_test("tier2_functions/show_case_binder", Profile::Default);
+}
+
+/// `mapM` over `StateT s IO` runs each action in order.
+#[test]
+fn test_tier2_statet_mapm() {
+    run_native_test("tier2_functions/statet_mapm", Profile::Default);
+}
+
+/// `deriving instance Monoid Blocks` where `Blocks` is a synonym of a newtype.
+#[test]
+fn test_tier2_standalone_derived_monoid_synonym() {
+    run_native_test(
+        "tier2_functions/standalone_derived_monoid_synonym",
+        Profile::Default,
+    );
+}
+
+/// A constrained function whose signature uses a parameter-dropping type
+/// synonym resolves its dictionary at the synonym-expanded type.
+#[test]
+fn test_tier2_synonym_dict_resolution() {
+    run_native_test("tier2_functions/synonym_dict_resolution", Profile::Default);
 }
 
 #[test]

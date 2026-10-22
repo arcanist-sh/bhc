@@ -1,0 +1,2 @@
+a&lt;b &amp; c
+x&lt;y

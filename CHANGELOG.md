@@ -36,6 +36,9 @@ All notable changes to BHC are recorded here. The format follows
   the HTML writer's `qualified AnnotatedTable as Ann`). The qualified one was
   registered under the bare name too, so a table matched `Plain`, or no
   alternative at all.
+- `()` has builtin `Semigroup` and `Monoid` instances. An `RWS` computation
+  with a `()` writer (pandoc's `AnnotatedTable`) combined its output through a
+  `<>` stub and crashed.
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

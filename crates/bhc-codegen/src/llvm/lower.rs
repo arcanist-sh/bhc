@@ -7586,6 +7586,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.List.append" => self.lower_builtin_append(args[0], args[1]),
             "Data.Maybe.append" => self.lower_builtin_maybe_append(args[0], args[1]),
             "Data.List.concat" => self.lower_builtin_concat(args[0]),
+            // The builtin `Semigroup ()` / `Monoid ()`: every method is `()`,
+            // and none forces its arguments (`_ <> _ = ()`).
+            "Data.Unit.append" | "Data.Unit.empty" | "Data.Unit.concat" => {
+                self.lower_constructor_application(0, 0, &[])
+            }
             "Data.Text.singleton" => {
                 self.lower_builtin_text_unary_int_to_ptr(args[0], 1000201, "text_singleton")
             }
@@ -51787,6 +51792,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.List.append" => self.append_values(args[0], args[1]),
             "Data.List.empty" => Ok(Some(self.build_nil()?.into())),
             "Data.List.concat" => self.concat_values(args[0]),
+            "Data.Unit.append" | "Data.Unit.empty" | "Data.Unit.concat" => {
+                self.lower_constructor_application(0, 0, &[])
+            }
             "Data.Text.append" | "Data.Text.<>" => {
                 let rts_fn = self.functions.get(&VarId::new(1000210)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_append not declared".to_string())
@@ -61238,6 +61246,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.List.append" => Some(2),
         "Data.Maybe.append" => Some(2),
         "Data.List.concat" => Some(1),
+        "Data.Unit.append" => Some(2),
+        "Data.Unit.empty" => Some(0),
+        "Data.Unit.concat" => Some(1),
         "Data.Text.singleton" => Some(1),
         "Data.Text.pack" => Some(1),
         "Data.Text.unpack" => Some(1),

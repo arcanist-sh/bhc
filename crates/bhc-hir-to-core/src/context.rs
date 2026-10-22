@@ -1302,6 +1302,44 @@ impl LowerContext {
                 });
         }
 
+        // `Semigroup ()` / `Monoid ()`. A writer of `()` — pandoc's
+        // `AnnotatedTable` runs `RWS ([ColSpec], Int) () RowNumber` — combines
+        // its output with `<>` and starts from `mempty` at `()`, and with no
+        // instance both lowered to a `<>` stub (the RWS bind segfaulted).
+        // `()` is spelled both as the empty tuple and as the `()` constructor.
+        for unit_ty in [
+            Ty::Tuple(Vec::new()),
+            Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("()"),
+                bhc_types::Kind::Star,
+            )),
+        ] {
+            let mut sg_methods = FxHashMap::default();
+            sg_methods.insert(Symbol::intern("<>"), DefId::new(790_014));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Semigroup"),
+                    instance_types: vec![unit_ty.clone()],
+                    methods: sg_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            let mut mo_methods = FxHashMap::default();
+            mo_methods.insert(Symbol::intern("mempty"), DefId::new(790_015));
+            mo_methods.insert(Symbol::intern("mappend"), DefId::new(790_014));
+            mo_methods.insert(Symbol::intern("mconcat"), DefId::new(790_016));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Monoid"),
+                    instance_types: vec![unit_ty.clone()],
+                    methods: mo_methods,
+                    superclass_instances: vec![unit_ty],
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // `Semigroup (Maybe a)`. bhc had no instance, so pandoc's option
         // parser — `optInputFiles opts <> mbArgs` — lowered `<>` to an
         // unresolved method and segfaulted. The Nothing cases are exact; two
@@ -1691,6 +1729,10 @@ impl LowerContext {
             "Data.Maybe.append",
             // 790_013: list `fmap` (the builtin `Functor []` instance).
             "map",
+            // 790_014–790_016: the builtin `Semigroup ()` / `Monoid ()`.
+            "Data.Unit.append",
+            "Data.Unit.empty",
+            "Data.Unit.concat",
         ]
         .iter()
         .enumerate()

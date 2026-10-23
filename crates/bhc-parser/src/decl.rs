@@ -822,7 +822,12 @@ impl<'src> Parser<'src> {
             // Note: `in` can also end a let-block (e.g., `let x = 1 in ...`)
             if !self.check(&TokenKind::VirtualRBrace) && !self.check(&TokenKind::In) {
                 decls.push(self.parse_value_decl()?);
-                while self.eat(&TokenKind::VirtualSemi) {
+                // An explicit `;` separates declarations inside a layout block
+                // too: `let x = a + 1; y = b + 2 in x * y`. Only the virtual
+                // one was accepted, so the explicit `;` ended the enclosing
+                // declaration — `y = …` became a separate one, out of scope of
+                // the function's arguments, or an instance was dropped whole.
+                while self.eat(&TokenKind::VirtualSemi) || self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::VirtualRBrace) || self.check(&TokenKind::In) {
                         break;
                     }
@@ -1631,7 +1636,8 @@ impl<'src> Parser<'src> {
             // Layout-based declarations
             if !self.check(&TokenKind::VirtualRBrace) {
                 self.parse_gadt_con_into(&mut constrs, &mut record_constrs)?;
-                while self.eat(&TokenKind::VirtualSemi) {
+                // Explicit `;` separates items in a layout block too.
+                while self.eat(&TokenKind::VirtualSemi) || self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
@@ -2308,7 +2314,8 @@ impl<'src> Parser<'src> {
             // Layout-based
             if !self.check(&TokenKind::VirtualRBrace) {
                 equations.push(self.parse_type_family_equation()?);
-                while self.eat(&TokenKind::VirtualSemi) {
+                // Explicit `;` separates items in a layout block too.
+                while self.eat(&TokenKind::VirtualSemi) || self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
@@ -2725,7 +2732,8 @@ impl<'src> Parser<'src> {
             // Layout-based declarations
             if !self.check(&TokenKind::VirtualRBrace) {
                 self.parse_class_body_item(&mut methods, &mut assoc_types)?;
-                while self.eat(&TokenKind::VirtualSemi) {
+                // Explicit `;` separates items in a layout block too.
+                while self.eat(&TokenKind::VirtualSemi) || self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
@@ -2967,7 +2975,8 @@ impl<'src> Parser<'src> {
             // Layout-based declarations
             if !self.check(&TokenKind::VirtualRBrace) {
                 self.parse_instance_body_item(&mut methods, &mut assoc_type_defs)?;
-                while self.eat(&TokenKind::VirtualSemi) {
+                // Explicit `;` separates items in a layout block too.
+                while self.eat(&TokenKind::VirtualSemi) || self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }

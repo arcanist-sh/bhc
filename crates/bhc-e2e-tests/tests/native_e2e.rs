@@ -1400,6 +1400,16 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_layout_explicit_semicolons() {
+    run_native_test("tier2_functions/layout_explicit_semicolons", Profile::Default);
+}
+
+#[test]
+fn test_tier2_mapm_pointfree_import() {
+    run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);
+}
+
+#[test]
 fn test_tier2_data_declared_after_use() {
     run_native_test("tier2_functions/data_declared_after_use", Profile::Default);
 }

@@ -59,6 +59,13 @@ All notable changes to BHC are recorded here. The format follows
   constructor tags. Constructors were registered in declaration order, so an
   earlier `case` switched on made-up tags; pandoc's HTML writer crashed on
   every table (`TablePart` is declared below `tablePartToHtml`).
+- An explicit `;` separates declarations inside a layout block (`let x = 1;
+  y = 2 in …`, a class or instance body). It used to end the enclosing
+  declaration, so later bindings lost the function's arguments, and an
+  instance written this way inside a lambda was dropped without an error.
+- `mapM` and `forM` brought in by `import Control.Monad` keep their
+  Traversable-general types, so a point-free `fmap sequence . mapM f` runs in
+  `f`'s monad instead of the list builtin.
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

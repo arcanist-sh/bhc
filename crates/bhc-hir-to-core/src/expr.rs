@@ -4921,6 +4921,9 @@ fn lower_monadic_traversal_spine(
             )
             .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
         else {
+            if std::env::var("BHC_DBG_TRAV").is_ok() {
+                eprintln!("trav {}: no >>= at {:?}", name.as_str(), monad_ty);
+            }
             return Ok(None);
         };
         let Some(pure_e) = ctx
@@ -4932,6 +4935,9 @@ fn lower_monadic_traversal_spine(
             )
             .or_else(|| builtin_layer.then(|| typed_builtin("return")))
         else {
+            if std::env::var("BHC_DBG_TRAV").is_ok() {
+                eprintln!("trav {}: no pure at {:?}", name.as_str(), monad_ty);
+            }
             return Ok(None);
         };
         (bind_e, pure_e)

@@ -7920,14 +7920,17 @@ impl TyCtxt {
         // mis-dispatched programs that the permissive placeholder let through.
         // `intersperse`/`intercalate` (Data.List) are exact; typed fresh,
         // pandoc's `intersperse nl <$> mapM …` lost its element type and the
-        // `mconcat` of the result found no Monoid instance.
+        // `mconcat` of the result found no Monoid instance. `mapM`/`forM`
+        // (re-exported by `import Control.Monad`) carry the Traversable-general
+        // scheme; typed fresh, a point-free `fmap sequence . mapM f` had no
+        // monad to expand at and ran the list builtin on parsers.
         let builtin_by_name: rustc_hash::FxHashMap<Symbol, Scheme> = defs
             .values()
             .filter(|d| matches!(d.kind, DefKind::Value))
             .filter(|d| {
                 matches!(
                     d.name.as_str(),
-                    "when" | "unless" | "intersperse" | "intercalate"
+                    "when" | "unless" | "intersperse" | "intercalate" | "mapM" | "forM"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))

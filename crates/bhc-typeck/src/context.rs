@@ -7930,7 +7930,20 @@ impl TyCtxt {
             .filter(|d| {
                 matches!(
                     d.name.as_str(),
-                    "when" | "unless" | "intersperse" | "intercalate" | "mapM" | "forM"
+                    // `sequence`/`sequence_`/`mapM_`/`forM_` re-exported by
+                    // `import Control.Monad` take exactly the scheme their
+                    // Prelude spelling gets; typed fresh, the `sequence` in
+                    // `fmap sequence` was expanded at the enclosing monad.
+                    "when"
+                        | "unless"
+                        | "intersperse"
+                        | "intercalate"
+                        | "mapM"
+                        | "forM"
+                        | "sequence"
+                        | "sequence_"
+                        | "mapM_"
+                        | "forM_"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))

@@ -63,11 +63,14 @@ All notable changes to BHC are recorded here. The format follows
   y = 2 in …`, a class or instance body). It used to end the enclosing
   declaration, so later bindings lost the function's arguments, and an
   instance written this way inside a lambda was dropped without an error.
-- `mapM` and `forM` brought in by `import Control.Monad` keep their
-  Traversable-general types, so a point-free `fmap sequence . mapM f` runs in
-  `f`'s monad instead of the list builtin.
-- With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
-  divs render (13 of 21 extension test inputs now match pandoc).
+- `mapM`, `forM`, `sequence`, `sequence_`, `mapM_` and `forM_` brought in by
+  `import Control.Monad` keep their types (the Prelude spellings' schemes), so
+  a point-free `fmap sequence . mapM f` runs each traversal in its own monad.
+  The inner `sequence` was expanded at the enclosing monad, and pandoc's pipe
+  tables lost their rows.
+- With all pandoc extensions enabled, emphasis, links, smart quotes, fenced
+  divs and pipe tables render (14 of 21 extension test inputs now match
+  pandoc).
 
 ## [0.2.23] - 2026-10-22
 

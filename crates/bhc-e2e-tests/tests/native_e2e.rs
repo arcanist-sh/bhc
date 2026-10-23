@@ -1404,6 +1404,16 @@ fn test_tier2_layout_explicit_semicolons() {
     run_native_test("tier2_functions/layout_explicit_semicolons", Profile::Default);
 }
 
+/// Closure IO model only: eager mode cannot pass a constrained function as a
+/// value (`fmap sequence . mapM f`) at all.
+#[test]
+fn test_tier2_nested_sequence_future() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier2_functions/nested_sequence_future", Profile::Default);
+}
+
 #[test]
 fn test_tier2_mapm_pointfree_import() {
     run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);

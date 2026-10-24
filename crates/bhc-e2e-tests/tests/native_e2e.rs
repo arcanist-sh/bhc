@@ -1425,6 +1425,11 @@ fn test_tier2_arrow_function_combinators() {
 }
 
 #[test]
+fn test_tier2_text_literal_field_pattern() {
+    run_native_test("tier2_functions/text_literal_field_pattern", Profile::Default);
+}
+
+#[test]
 fn test_tier2_mapm_pointfree_import() {
     run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);
 }

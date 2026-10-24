@@ -70,9 +70,13 @@ All notable changes to BHC are recorded here. The format follows
   tables lost their rows.
 - `Control.Arrow`'s `(***)` and `(&&&)` work at the function arrow (closure IO
   model). Both ran as stubs; pandoc-types' `definitionList` uses `(***)`.
+- A `Text` string literal matched against a constructor field inside a local
+  function without a signature compares as `Text`. The field binder was
+  untyped, so the literal was compared as a list and never matched; pandoc
+  never recognized task lists.
 - With all pandoc extensions enabled, emphasis, links, smart quotes, fenced
-  divs, pipe tables and definition lists render (15 of 21 extension test
-  inputs now match pandoc).
+  divs, pipe tables, definition lists and task lists render (16 of 21
+  extension test inputs now match pandoc).
 
 ## [0.2.23] - 2026-10-22
 

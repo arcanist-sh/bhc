@@ -98,11 +98,27 @@ pub fn lower_pat_to_alt_with_fallthrough(
             let mut binders = Vec::with_capacity(sub_pats.len());
             let mut inner_rhs = rhs;
 
+            // A field's declared type, when it is concrete, types the binder
+            // that a nested pattern then scrutinizes. Codegen reads the
+            // scrutinee's type to compare string literals as `Text` or as a
+            // list; erased (in a local function without a signature),
+            // pandoc's `fromMd (Str "[" : …)` compared a Text field against a
+            // list literal and never matched, so task lists were not found.
+            let field_tys: Vec<Ty> = ctx
+                .lookup_constructor_or_by_name(def_ref.def_id)
+                .map(|info| info.field_types.clone())
+                .unwrap_or_default();
+
             // Process sub-patterns from right to left
             // For complex sub-patterns, we need to wrap the RHS in nested cases
             for (i, sub_pat) in sub_pats.iter().enumerate().rev() {
                 let binder_name = format!("pat_{i}");
-                let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
+                let binder_ty = field_tys
+                    .get(i)
+                    .filter(|t| !crate::context::has_type_variables(t))
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                let binder = ctx.fresh_var(&binder_name, binder_ty, span);
 
                 match sub_pat {
                     Pat::Var(name, def_id, _) => {

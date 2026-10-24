@@ -1134,6 +1134,19 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
 
+    // `pi` (builtin at fixed DefId 10351, see bhc-lower) is a `Double`
+    // constant.
+    if def_ref.def_id.index() == 10351 {
+        return Ok(core::Expr::Lit(
+            core::Literal::Double(std::f64::consts::PI),
+            Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Double"),
+                bhc_types::Kind::Star,
+            )),
+            def_ref.span,
+        ));
+    }
+
     if let Some(name) = var_name {
         if let Some(e) = lower_function_arrow_combinator(ctx, name, def_ref.span) {
             return Ok(e);

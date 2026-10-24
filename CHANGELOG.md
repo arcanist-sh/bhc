@@ -74,6 +74,12 @@ All notable changes to BHC are recorded here. The format follows
   function without a signature compares as `Text`. The field binder was
   untyped, so the literal was compared as a list and never matched; pandoc
   never recognized task lists.
+- `pi` is in scope (#19).
+- `Data.Map.Strict` and `Data.Map.Lazy` (and the `Data.IntMap` variants) reach
+  the same container primops as `Data.Map`; their functions ran as "not
+  implemented" stubs (#26).
+- `Data.List.union` drops the second list's duplicates and elements already
+  in the first; it was a plain append (#27).
 - With all pandoc extensions enabled, emphasis, links, smart quotes, fenced
   divs, pipe tables, definition lists and task lists render (16 of 21
   extension test inputs now match pandoc).

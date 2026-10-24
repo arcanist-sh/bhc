@@ -6211,14 +6211,25 @@ fn register_standard_module_exports(
                 // exists and runs. Bind the alias straight to the primop when one
                 // is present; only synthesize a stub when there is genuinely no
                 // builtin (e.g. `T.groupBy`), keeping it distinct from Prelude's.
+                //
+                // The strict and lazy container modules export the same
+                // functions as their base module, and the primops are
+                // registered under the base name only (`Data.Map.toList`);
+                // a `Data.Map.Strict.toList` stub ran as "not implemented".
+                let builtin_module = match module_name {
+                    "Data.Map.Strict" | "Data.Map.Lazy" => "Data.Map",
+                    "Data.IntMap.Strict" | "Data.IntMap.Lazy" => "Data.IntMap",
+                    other => other,
+                };
+                let builtin_qualified = Symbol::intern(&format!("{builtin_module}.{export}"));
                 let real_builtin = ctx
-                    .lookup_value(full_qualified)
+                    .lookup_value(builtin_qualified)
                     .filter(|d| prefer_real_builtin && !ctx.is_stub(*d));
                 if let Some(def_id) = real_builtin {
                     ctx.bind_value(aliased_qualified, def_id);
                 } else {
                     let qual_def_id = ctx.fresh_def_id();
-                    let qual_def_name = full_qualified;
+                    let qual_def_name = builtin_qualified;
                     if is_constructor {
                         ctx.define(
                             qual_def_id,

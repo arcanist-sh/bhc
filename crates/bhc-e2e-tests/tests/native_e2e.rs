@@ -1430,6 +1430,21 @@ fn test_tier2_text_literal_field_pattern() {
 }
 
 #[test]
+fn test_tier2_prelude_pi() {
+    run_native_test("tier2_functions/prelude_pi", Profile::Default);
+}
+
+#[test]
+fn test_tier2_data_map_strict() {
+    run_native_test("tier2_functions/data_map_strict", Profile::Default);
+}
+
+#[test]
+fn test_tier2_list_union() {
+    run_native_test("tier2_functions/list_union", Profile::Default);
+}
+
+#[test]
 fn test_tier2_mapm_pointfree_import() {
     run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);
 }

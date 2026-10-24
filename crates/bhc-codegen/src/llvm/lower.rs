@@ -37017,7 +37017,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_append(list1_expr, list2_expr)
+        // `union xs ys = xs ++ filter (\y -> not (elem y xs)) (nub ys)`: the
+        // elements of `ys` not already in `xs`, without duplicates. This was
+        // a plain append, so `union [1,2] [2,3]` kept the second `2`.
+        let xs_val = self
+            .lower_expr(list1_expr)?
+            .ok_or_else(|| CodegenError::Internal("union: no first list".to_string()))?;
+        let ys_val = self
+            .lower_expr(list2_expr)?
+            .ok_or_else(|| CodegenError::Internal("union: no second list".to_string()))?;
+        let span = bhc_span::Span::DUMMY;
+        let var = |name: &str, id: usize| Var {
+            name: bhc_intern::Symbol::intern(name),
+            id: VarId::new(id),
+            ty: Ty::Error,
+        };
+        // Ids from the top of the range: bound only while this body is
+        // lowered, and never produced by the front end.
+        let xs = var("$union_xs", usize::MAX - 20);
+        let ys = var("$union_ys", usize::MAX - 21);
+        let y = var("$union_y", usize::MAX - 22);
+        let builtin = |name: &str, id: usize| Expr::Var(var(name, id), span);
+        let ev = |v: &Var| Expr::Var(v.clone(), span);
+        let app = |f: Expr, x: Expr| Expr::App(Box::new(f), Box::new(x), span);
+        let not_in_xs = Expr::Lam(
+            y.clone(),
+            Box::new(app(
+                builtin("not", usize::MAX - 23),
+                app(app(builtin("elem", usize::MAX - 24), ev(&y)), ev(&xs)),
+            )),
+            span,
+        );
+        let new_ys = app(
+            app(builtin("filter", usize::MAX - 25), not_in_xs),
+            app(builtin("nub", usize::MAX - 26), ev(&ys)),
+        );
+        let body = app(app(builtin("++", usize::MAX - 27), ev(&xs)), new_ys);
+        let saved_xs = self.env.insert(xs.id, xs_val);
+        let saved_ys = self.env.insert(ys.id, ys_val);
+        let result = self.lower_expr(&body);
+        for (id, saved) in [(xs.id, saved_xs), (ys.id, saved_ys)] {
+            match saved {
+                Some(v) => {
+                    self.env.insert(id, v);
+                }
+                None => {
+                    self.env.remove(&id);
+                }
+            }
+        }
+        result
     }
 
     /// Lower `intersect :: Eq a => [a] -> [a] -> [a]`.

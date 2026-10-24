@@ -6338,6 +6338,14 @@ impl Builtins {
             );
         }
 
+        // `pi` at fixed DefId 10351 (kept in sync with bhc-lower). `Double`,
+        // like `sqrt` and the other `Floating` builtins here.
+        env.register_value(
+            DefId::new(10351),
+            Symbol::intern("pi"),
+            Scheme::mono(self.float_ty.clone()),
+        );
+
         // IORef operations at fixed DefIds 10400-10404
         {
             let a = TyVar::new_star(BUILTIN_TYVAR_A);

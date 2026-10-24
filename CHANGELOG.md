@@ -68,9 +68,11 @@ All notable changes to BHC are recorded here. The format follows
   a point-free `fmap sequence . mapM f` runs each traversal in its own monad.
   The inner `sequence` was expanded at the enclosing monad, and pandoc's pipe
   tables lost their rows.
+- `Control.Arrow`'s `(***)` and `(&&&)` work at the function arrow (closure IO
+  model). Both ran as stubs; pandoc-types' `definitionList` uses `(***)`.
 - With all pandoc extensions enabled, emphasis, links, smart quotes, fenced
-  divs and pipe tables render (14 of 21 extension test inputs now match
-  pandoc).
+  divs, pipe tables and definition lists render (15 of 21 extension test
+  inputs now match pandoc).
 
 ## [0.2.23] - 2026-10-22
 

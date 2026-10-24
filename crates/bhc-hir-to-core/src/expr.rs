@@ -1029,6 +1029,77 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     }
 }
 
+/// `Control.Arrow`'s `(***)` and `(&&&)` at the function arrow, as Core:
+///
+/// ```text
+/// (***) = \f g p -> case p of (a, b) -> (f a, g b)
+/// (&&&) = \f g x -> (f x, g x)
+/// ```
+///
+/// Neither had an implementation, so they ran as stubs (pandoc-types'
+/// `definitionList = … map (toList *** map toList)`). Only when the
+/// occurrence's first argument is a function: another `Arrow` instance
+/// (pandoc's ODT readers) keeps its own methods.
+fn lower_function_arrow_combinator(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let base = name.as_str().rsplit('.').next().unwrap_or(name.as_str());
+    if !matches!(base, "***" | "&&&") {
+        return None;
+    }
+    let occ = refined_occurrence_ty(ctx, span)?;
+    let Ty::Fun(first_param, _) = &occ else {
+        return None;
+    };
+    if !matches!(first_param.as_ref(), Ty::Fun(..)) {
+        return None;
+    }
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let pair_con = Var {
+        name: Symbol::intern("(,)"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let pair = |a: core::Expr, b: core::Expr| app(app(var(&pair_con), a), b);
+    let f = ctx.fresh_var("$arr_f", Ty::Error, span);
+    let g = ctx.fresh_var("$arr_g", Ty::Error, span);
+    let x = ctx.fresh_var("$arr_x", Ty::Error, span);
+    let body = if base == "&&&" {
+        pair(app(var(&f), var(&x)), app(var(&g), var(&x)))
+    } else {
+        let a = ctx.fresh_var("$arr_a", Ty::Error, span);
+        let b = ctx.fresh_var("$arr_b", Ty::Error, span);
+        let con = core::DataCon {
+            name: Symbol::intern("(,)"),
+            ty_con: bhc_types::TyCon::new(Symbol::intern("(,)"), bhc_types::Kind::Star),
+            tag: 0,
+            arity: 2,
+        };
+        core::Expr::Case(
+            Box::new(var(&x)),
+            vec![core::Alt {
+                con: core::AltCon::DataCon(con),
+                binders: vec![a.clone(), b.clone()],
+                rhs: pair(app(var(&f), var(&a)), app(var(&g), var(&b))),
+            }],
+            Ty::Error,
+            span,
+        )
+    };
+    Some(core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(
+            g,
+            Box::new(core::Expr::Lam(x, Box::new(body), span)),
+            span,
+        )),
+        span,
+    ))
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
@@ -1064,6 +1135,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     }
 
     if let Some(name) = var_name {
+        if let Some(e) = lower_function_arrow_combinator(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         if let Some(e) = lower_monad_plus_builtin(ctx, name, def_ref.span) {
             return Ok(e);
         }

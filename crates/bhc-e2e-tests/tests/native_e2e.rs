@@ -1414,6 +1414,16 @@ fn test_tier2_nested_sequence_future() {
     run_native_test("tier2_functions/nested_sequence_future", Profile::Default);
 }
 
+/// Closure IO model only: eager mode does not record the occurrence types
+/// the rewrite keys on, so the combinators still stub there.
+#[test]
+fn test_tier2_arrow_function_combinators() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier2_functions/arrow_function_combinators", Profile::Default);
+}
+
 #[test]
 fn test_tier2_mapm_pointfree_import() {
     run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);

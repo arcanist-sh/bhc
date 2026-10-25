@@ -2585,7 +2585,11 @@ pub extern "C" fn bhc_signum_double(a: f64) -> f64 {
 pub extern "C" fn bhc_getLine() -> *mut c_char {
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(0) => ptr::null_mut(), // EOF
+        Ok(0) => {
+            // Like GHC: reading past the end of stdin is an IO error.
+            eprintln!("Prelude.getLine: end of file");
+            std::process::exit(1);
+        }
         Ok(_) => {
             // Remove trailing newline
             if line.ends_with('\n') {
@@ -4126,13 +4130,13 @@ pub unsafe extern "C" fn bhc_is_directory(path: *const c_char) -> c_int {
     }
 }
 
-/// Get an environment variable. Returns heap-allocated C string, or null if not set.
+/// Look up an environment variable as a heap-allocated C string, or null if
+/// it is not set.
 ///
 /// # Safety
 ///
 /// `name` must be either null or a pointer to a valid, NUL-terminated C string.
-#[no_mangle]
-pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
+unsafe fn env_var_cstring(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return ptr::null_mut();
     }
@@ -4146,6 +4150,29 @@ pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
     }
 }
 
+/// `getEnv`: the variable's value as a heap-allocated C string. An unset
+/// variable is an IO error, as in GHC.
+///
+/// # Safety
+///
+/// `name` must be either null or a pointer to a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
+    let value = unsafe { env_var_cstring(name) };
+    if value.is_null() {
+        let shown = if name.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        eprintln!("{shown}: getEnv: does not exist (no environment variable)");
+        std::process::exit(1);
+    }
+    value
+}
+
 /// Lookup an environment variable. Returns heap-allocated C string, or null for Nothing.
 ///
 /// # Safety
@@ -4153,8 +4180,8 @@ pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
 /// `name` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_lookupEnv(name: *const c_char) -> *mut c_char {
-    // Same as bhc_get_env; null encodes Nothing
-    unsafe { bhc_get_env(name) }
+    // null encodes Nothing
+    unsafe { env_var_cstring(name) }
 }
 
 /// Get command line arguments as a cons-cell list of C strings.

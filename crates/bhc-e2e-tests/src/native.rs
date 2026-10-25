@@ -103,10 +103,14 @@ fn add_bhc_library_path(cmd: &mut Command) {
 }
 
 /// Run a native executable and capture its output.
+///
+/// `stdin` is fed to the program (fixtures with a `stdin.txt`); without it
+/// the program reads an empty stdin rather than the test harness's.
 pub fn run_native(
     exe_path: &Path,
     timeout: Duration,
     work_dir: Option<&Path>,
+    stdin: Option<Vec<u8>>,
 ) -> Result<ExecutionOutput, E2EError> {
     let start = Instant::now();
 
@@ -120,7 +124,9 @@ pub fn run_native(
     }
 
     let mut cmd = Command::new(exe_path);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(dir) = work_dir {
         cmd.current_dir(dir);
     }
@@ -132,6 +138,15 @@ pub fn run_native(
     let mut child = cmd
         .spawn()
         .map_err(|e| E2EError::ExecutionError(format!("Failed to spawn process: {}", e)))?;
+
+    // Write stdin from a thread so a program that prints before reading
+    // cannot deadlock on a full pipe; dropping the handle signals EOF.
+    if let Some(mut pipe) = child.stdin.take() {
+        let bytes = stdin.unwrap_or_default();
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &bytes);
+        });
+    }
 
     // Wait with timeout
     let result = wait_with_timeout(&mut child, timeout)?;
@@ -218,6 +233,7 @@ mod tests {
         let result = run_native(
             Path::new("/nonexistent/binary"),
             Duration::from_secs(1),
+            None,
             None,
         );
         assert!(result.is_err());

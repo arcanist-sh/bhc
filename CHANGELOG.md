@@ -8,6 +8,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `getLine` and `getEnv` return a `String` instead of a raw C string, which
+  crashed the program as soon as the result was printed (#20, #21).
+  `lookupEnv` returns `Nothing`/`Just`, `getEnv` of an unset variable and
+  `getLine` at end of input fail with an error instead of a null pointer.
+- `read` works at `Double`, `[Int]` and `[Double]` (`read "3.25" :: Double`,
+  `read "[1,2,3]" :: [Int]`); it parsed integers only and exited with
+  `no parse` (#29).
 - `--dump-ir=ast|hir|core|llvm|all` prints that stage to stdout, and
   `--emit llvm-ir` prints the optimized LLVM IR; both were parsed and ignored.
   `--dump-ir=tensor|loop` and unknown `--emit` formats are errors, and

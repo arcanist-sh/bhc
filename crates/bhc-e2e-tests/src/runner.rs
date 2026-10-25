@@ -260,7 +260,12 @@ impl E2ERunner {
         work_dir: &Path,
     ) -> Result<ExecutionOutput, E2EError> {
         match self.config.backend {
-            Backend::Native => crate::native::run_native(artifact_path, timeout, Some(work_dir)),
+            Backend::Native => crate::native::run_native(
+                artifact_path,
+                timeout,
+                Some(work_dir),
+                test_case.stdin_bytes(),
+            ),
             Backend::Wasm => crate::wasm::run_wasm(artifact_path, timeout, test_case.stdin_bytes()),
             Backend::Gpu => crate::gpu::run_gpu(artifact_path, timeout, self.config.gpu_mock),
         }

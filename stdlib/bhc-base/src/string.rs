@@ -234,6 +234,103 @@ pub unsafe extern "C" fn bhc_read_int(str_list: *mut u8) -> i64 {
     }
 }
 
+/// Collect a BHC char list into a Rust string.
+unsafe fn char_list_to_string(str_list: *mut u8) -> String {
+    list_to_vec(str_list)
+        .iter()
+        .map(|&c| char::from_u32(char_val(c) as u32).unwrap_or('\0'))
+        .collect()
+}
+
+/// Exit like GHC's `read` does on input it cannot parse.
+fn read_no_parse(s: &str) -> ! {
+    eprintln!("Prelude.read: no parse: \"{}\"", s);
+    std::process::exit(1);
+}
+
+/// Parse a `Double` the way `read` does: an optional `-`, digits, an
+/// optional fraction and exponent, or `Infinity`/`NaN`. A leading `+` is
+/// rejected, as in Haskell.
+fn parse_double(s: &str) -> Option<f64> {
+    match s {
+        "Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        "NaN" => return Some(f64::NAN),
+        _ => {}
+    }
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    s.parse::<f64>().ok()
+}
+
+/// Parse a list literal `[a, b, c]` whose elements `parse_elem` accepts.
+fn parse_list<T>(s: &str, parse_elem: impl Fn(&str) -> Option<T>) -> Option<Vec<T>> {
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    inner.split(',').map(|e| parse_elem(e.trim())).collect()
+}
+
+/// `read :: String -> Double`.
+///
+/// Returns the `Double`'s bit pattern as an `i64`, which is how codegen boxes
+/// a `Double` into a pointer-sized value.
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_read_double(str_list: *mut u8) -> i64 {
+    let s = char_list_to_string(str_list);
+    let trimmed = s.trim();
+    match parse_double(trimmed) {
+        Some(d) => d.to_bits() as i64,
+        None => read_no_parse(trimmed),
+    }
+}
+
+/// `read :: String -> [Int]`; elements are int-as-pointer values.
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_read_int_list(str_list: *mut u8) -> *mut u8 {
+    let s = char_list_to_string(str_list);
+    let trimmed = s.trim();
+    match parse_list(trimmed, |e| e.parse::<i64>().ok()) {
+        Some(ints) => {
+            let elems: Vec<*mut u8> = ints.into_iter().map(|n| n as *mut u8).collect();
+            vec_to_list(&elems)
+        }
+        None => read_no_parse(trimmed),
+    }
+}
+
+/// `read :: String -> [Double]`; elements are boxed as their bit patterns.
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_read_double_list(str_list: *mut u8) -> *mut u8 {
+    let s = char_list_to_string(str_list);
+    let trimmed = s.trim();
+    match parse_list(trimmed, parse_double) {
+        Some(doubles) => {
+            let elems: Vec<*mut u8> = doubles
+                .into_iter()
+                .map(|d| d.to_bits() as usize as *mut u8)
+                .collect();
+            vec_to_list(&elems)
+        }
+        None => read_no_parse(trimmed),
+    }
+}
+
 /// `readMaybe :: String -> Maybe Int` (monomorphic for Int).
 ///
 /// Walks a BHC char list, tries to parse as i64.
@@ -277,6 +374,37 @@ mod tests {
     unsafe fn make_string(s: &str) -> *mut u8 {
         let ptrs: Vec<*mut u8> = s.chars().map(|c| box_char(c as i64)).collect();
         vec_to_list(&ptrs)
+    }
+
+    #[test]
+    fn parse_double_accepts_haskell_literals() {
+        assert_eq!(parse_double("3.25"), Some(3.25));
+        assert_eq!(parse_double("-1.5e2"), Some(-150.0));
+        assert_eq!(parse_double("3"), Some(3.0));
+        assert_eq!(parse_double("Infinity"), Some(f64::INFINITY));
+        assert_eq!(parse_double("+1.0"), None);
+        assert_eq!(parse_double(".5"), None);
+        assert_eq!(parse_double("inf"), None);
+    }
+
+    #[test]
+    fn read_lists() {
+        unsafe {
+            let ints = bhc_read_int_list(make_string(" [1, -2,3] "));
+            let ints: Vec<i64> = list_to_vec(ints).into_iter().map(|p| p as i64).collect();
+            assert_eq!(ints, [1, -2, 3]);
+            assert!(list_to_vec(bhc_read_int_list(make_string("[]"))).is_empty());
+            let ds = bhc_read_double_list(make_string("[0.5,2]"));
+            let ds: Vec<f64> = list_to_vec(ds)
+                .into_iter()
+                .map(|p| f64::from_bits(p as u64))
+                .collect();
+            assert_eq!(ds, [0.5, 2.0]);
+            assert_eq!(
+                f64::from_bits(bhc_read_double(make_string("3.25")) as u64),
+                3.25
+            );
+        }
     }
 
     unsafe fn collect_string(list: *mut u8) -> String {

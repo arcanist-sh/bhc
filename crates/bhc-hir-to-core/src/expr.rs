@@ -1101,6 +1101,26 @@ fn lower_function_arrow_combinator(
 }
 
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
+    let mut expr = lower_var_inner(ctx, def_ref)?;
+    // The builtin `read` is dispatched on its result type in codegen
+    // (`read "3.25" :: Double`). Its own type is `String -> a`, so give the
+    // occurrence the type it was resolved at. (Builtins reach here untyped.)
+    if let core::Expr::Var(v, _) = &mut expr {
+        let generic = match &v.ty {
+            Ty::Error => true,
+            Ty::Fun(_, r) => matches!(**r, Ty::Var(_)),
+            _ => false,
+        };
+        if v.name.as_str() == "read" && generic {
+            if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                v.ty = resolved;
+            }
+        }
+    }
+    Ok(expr)
+}
+
+fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
     if let (Some(want), Some(n)) = (occ_dbg_name(), var_name) {

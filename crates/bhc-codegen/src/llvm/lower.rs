@@ -5156,6 +5156,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .llvm_module()
             .add_function("bhc_reads_int", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000542), reads_int);
+        // bhc_read_double(ptr) -> i64 (the Double's bits), bhc_read_int_list
+        // and bhc_read_double_list(ptr) -> ptr (a cons list)
+        let read_double =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_double", ptr_to_i64, None);
+        self.functions.insert(VarId::new(1000543), read_double);
+        let read_int_list =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_int_list", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000544), read_int_list);
+        let read_double_list =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_double_list", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000545), read_double_list);
 
         // ---- Rational RTS functions (VarId 1000900-1000915) ----
         // bhc_rational_make(i64, i64) -> ptr
@@ -17758,6 +17775,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         if name == "read" && !self.derived_read_fns.is_empty() {
                             return false; // read returns ADT, not Int
                         }
+                        if name == "read" {
+                            // `read` at a resolved non-Int type (Double, [Int]).
+                            let mut r = &var.ty;
+                            while let Ty::Fun(_, next) = r {
+                                r = next;
+                            }
+                            if matches!(r, Ty::Con(_) | Ty::List(_) | Ty::App(..))
+                                && !matches!(r, Ty::Con(c) if c.name.as_str() == "Int")
+                            {
+                                return false;
+                            }
+                        }
                         matches!(
                             name,
                             "length"
@@ -18084,7 +18113,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("getLine: returned void".to_string()))?;
-        Ok(Some(result))
+        // The RTS returns a C string; a Haskell String is a [Char] list.
+        let char_list = self.cstring_to_char_list(result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
     }
 
     /// Lower `>>=` (bind) for monads.
@@ -27296,10 +27327,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let name_val = self
             .lower_expr(name_expr)?
             .ok_or_else(|| CodegenError::Internal("getEnv: no name".to_string()))?;
-        let name_ptr = match name_val {
+        let name_list = match name_val {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("getEnv expects string".to_string())),
         };
+        // The RTS takes and returns C strings; Haskell Strings are [Char] lists.
+        let name_ptr = self.char_list_to_cstring(name_list)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000068))
@@ -27311,7 +27344,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("getEnv: returned void".to_string()))?;
-        Ok(Some(result))
+        let char_list = self.cstring_to_char_list(result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
     }
 
     /// Lower `lookupEnv` (simplified: wraps getEnv).
@@ -27319,7 +27353,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         name_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_get_env(name_expr)
+        let name_list = self
+            .lower_expr(name_expr)?
+            .ok_or_else(|| CodegenError::Internal("lookupEnv: no name".to_string()))?
+            .into_pointer_value();
+        let name_ptr = self.char_list_to_cstring(name_list)?;
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(1000314))
+            .ok_or_else(|| CodegenError::Internal("bhc_lookupEnv not declared".to_string()))?;
+        let value = self
+            .builder()
+            .build_call(rts_fn, &[name_ptr.into()], "lookup_env")
+            .map_err(|e| CodegenError::Internal(format!("lookupEnv call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("lookupEnv: returned void".to_string()))?
+            .into_pointer_value();
+
+        // A null C string (unset variable) is Nothing; anything else is Just.
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let unset_block = self.llvm_ctx.append_basic_block(current_fn, "env_unset");
+        let set_block = self.llvm_ctx.append_basic_block(current_fn, "env_set");
+        let merge_block = self.llvm_ctx.append_basic_block(current_fn, "env_merge");
+        let is_null = self
+            .builder()
+            .build_is_null(value, "env_is_null")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_null, unset_block, set_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(unset_block);
+        let nothing = self.alloc_adt(0, 0)?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let unset_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        self.builder().position_at_end(set_block);
+        let chars = self.cstring_to_char_list(value)?;
+        let just = self.alloc_adt(1, 1)?;
+        self.store_adt_field(just, 1, 0, chars.into())?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let set_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        self.builder().position_at_end(merge_block);
+        let phi = self
+            .builder()
+            .build_phi(self.type_mapper().ptr_type(), "lookup_env_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        phi.add_incoming(&[(&nothing, unset_end), (&just, set_end)]);
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Continue building in a FRESH block after a terminator.
@@ -38192,36 +38289,85 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         str_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Check for derived Read instance on the result type
-        if let Some(type_name) = self.infer_read_target_type(str_expr) {
-            if self.derived_read_fns.contains_key(&type_name) {
-                // Collect constructor names and tags for this type
-                let constructors: Vec<(String, u32)> = self
-                    .constructor_metadata
-                    .iter()
-                    .filter_map(|(name, meta)| {
-                        if meta.type_name.as_deref() == Some(&type_name) {
-                            Some((name.clone(), meta.tag))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        // Dispatch on the instantiated result type: Double/Float and flat
+        // lists of Int or Double have RTS parsers; everything else reads as Int.
+        let mut result_ty = &self.current_builtin_ty;
+        loop {
+            match result_ty {
+                Ty::Forall(_, body) => result_ty = body,
+                Ty::Fun(_, r) => result_ty = r,
+                _ => break,
+            }
+        }
+        let is_double =
+            |t: &Ty| matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float"));
+        let is_int = |t: &Ty| matches!(t, Ty::Con(c) if c.name.as_str() == "Int");
+        let list_elem = match result_ty {
+            Ty::List(elem) => Some(elem.as_ref()),
+            Ty::App(f, elem) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                Some(elem.as_ref())
+            }
+            _ => None,
+        };
+        let list_reader = match list_elem {
+            Some(e) if is_int(e) => Some(1000544),
+            Some(e) if is_double(e) => Some(1000545),
+            _ => None,
+        };
+        if let Some(id) = list_reader {
+            let str_val = self
+                .lower_expr(str_expr)?
+                .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+            let str_ptr = self.value_to_ptr(str_val)?;
+            let rts_fn = *self
+                .functions
+                .get(&VarId::new(id))
+                .ok_or_else(|| CodegenError::Internal("list read not declared".to_string()))?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[str_ptr.into()], "read_list")
+                .map_err(|e| CodegenError::Internal(format!("read call failed: {:?}", e)))?
+                .try_as_basic_value()
+                .basic());
+        }
+        let read_fn_id = if is_double(result_ty) {
+            1000543
+        } else {
+            1000540
+        };
 
-                if !constructors.is_empty() {
-                    return self.lower_read_adt_inline(str_expr, &constructors);
+        // Check for derived Read instance on the result type
+        if read_fn_id == 1000540 && !is_int(result_ty) {
+            if let Some(type_name) = self.infer_read_target_type(str_expr) {
+                if self.derived_read_fns.contains_key(&type_name) {
+                    // Collect constructor names and tags for this type
+                    let constructors: Vec<(String, u32)> = self
+                        .constructor_metadata
+                        .iter()
+                        .filter_map(|(name, meta)| {
+                            if meta.type_name.as_deref() == Some(&type_name) {
+                                Some((name.clone(), meta.tag))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if !constructors.is_empty() {
+                        return self.lower_read_adt_inline(str_expr, &constructors);
+                    }
                 }
             }
         }
 
-        // Default: read as Int via RTS
+        // Int and Double both come back as 64 bits that box into a pointer.
         let str_val = self
             .lower_expr(str_expr)?
             .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
         let str_ptr = self.value_to_ptr(str_val)?;
         let rts_fn = self
             .functions
-            .get(&VarId::new(1000540))
+            .get(&VarId::new(read_fn_id))
             .ok_or_else(|| CodegenError::Internal("bhc_read_int not declared".to_string()))?;
         let result = self
             .builder()

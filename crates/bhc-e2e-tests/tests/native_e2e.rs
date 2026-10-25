@@ -1401,7 +1401,10 @@ fn test_tier2_synonym_dict_resolution() {
 
 #[test]
 fn test_tier2_layout_explicit_semicolons() {
-    run_native_test("tier2_functions/layout_explicit_semicolons", Profile::Default);
+    run_native_test(
+        "tier2_functions/layout_explicit_semicolons",
+        Profile::Default,
+    );
 }
 
 /// Closure IO model only: eager mode cannot pass a constrained function as a
@@ -1421,17 +1424,33 @@ fn test_tier2_arrow_function_combinators() {
     if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
         return;
     }
-    run_native_test("tier2_functions/arrow_function_combinators", Profile::Default);
+    run_native_test(
+        "tier2_functions/arrow_function_combinators",
+        Profile::Default,
+    );
 }
 
 #[test]
 fn test_tier2_text_literal_field_pattern() {
-    run_native_test("tier2_functions/text_literal_field_pattern", Profile::Default);
+    run_native_test(
+        "tier2_functions/text_literal_field_pattern",
+        Profile::Default,
+    );
 }
 
 #[test]
 fn test_tier2_prelude_pi() {
     run_native_test("tier2_functions/prelude_pi", Profile::Default);
+}
+
+#[test]
+fn test_tier3_getline_env() {
+    run_native_test("tier3_io/getline_env", Profile::Default);
+}
+
+#[test]
+fn test_tier2_read_double_list() {
+    run_native_test("tier2_functions/read_double_list", Profile::Default);
 }
 
 #[test]
@@ -1479,7 +1498,10 @@ fn test_tier2_multimodule_qualified_con_collision() {
 
 #[test]
 fn test_tier2_partial_constructor_value() {
-    run_native_test("tier2_functions/partial_constructor_value", Profile::Default);
+    run_native_test(
+        "tier2_functions/partial_constructor_value",
+        Profile::Default,
+    );
 }
 
 #[test]

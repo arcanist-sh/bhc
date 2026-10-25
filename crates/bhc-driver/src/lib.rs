@@ -4906,7 +4906,8 @@ impl Compiler {
         source: impl Into<String>,
     ) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_source(module_name, source);
-        self.run_unit(unit)
+        let outcome = self.run_unit(unit, None)?;
+        Ok((outcome.value, outcome.display))
     }
 
     /// Run a file and return the result value and display string.
@@ -4916,12 +4917,35 @@ impl Compiler {
     /// Returns an error if compilation or execution fails.
     pub fn run_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
-        self.run_unit(unit)
+        let outcome = self.run_unit(unit, None)?;
+        Ok((outcome.value, outcome.display))
+    }
+
+    /// Run a file with the given program arguments (what `getArgs` returns).
+    ///
+    /// Unlike [`Self::run_file`], the outcome records whether the program
+    /// wrote IO output: the interpreter prints that output as it runs, so a
+    /// caller must not print [`RunOutcome::display`] again in that case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compilation or execution fails.
+    pub fn run_file_with_args(
+        &self,
+        path: impl AsRef<Utf8Path>,
+        args: &[String],
+    ) -> CompileResult<RunOutcome> {
+        let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
+        self.run_unit(unit, Some(args))
     }
 
     /// Compile and run a compilation unit.
-    #[instrument(skip(self, unit), fields(module = %unit.module_name))]
-    fn run_unit(&self, unit: CompilationUnit) -> CompileResult<(Value, String)> {
+    #[instrument(skip(self, unit, args), fields(module = %unit.module_name))]
+    fn run_unit(
+        &self,
+        unit: CompilationUnit,
+        args: Option<&[String]>,
+    ) -> CompileResult<RunOutcome> {
         info!(module = %unit.module_name, "compiling for execution");
 
         // Allocate a file ID for diagnostics
@@ -4954,12 +4978,12 @@ impl Compiler {
         // Phase 4: Execute
         self.callbacks
             .on_phase_start(CompilePhase::Execute, &unit.module_name);
-        let (result, display) = self.run_module_with_display(&core)?;
+        let outcome = self.run_module_outcome(&core, args)?;
         self.callbacks
             .on_phase_complete(CompilePhase::Execute, &unit.module_name);
 
         info!(module = %unit.module_name, "execution complete");
-        Ok((result, display))
+        Ok(outcome)
     }
 
     /// Execute a Core module by finding and evaluating the `main` function.
@@ -4981,10 +5005,23 @@ impl Compiler {
     ///
     /// Returns an error if `main` is not found or evaluation fails.
     pub fn run_module_with_display(&self, module: &CoreModule) -> CompileResult<(Value, String)> {
+        let outcome = self.run_module_outcome(module, None)?;
+        Ok((outcome.value, outcome.display))
+    }
+
+    /// Execute a Core module, optionally overriding the program arguments.
+    fn run_module_outcome(
+        &self,
+        module: &CoreModule,
+        args: Option<&[String]>,
+    ) -> CompileResult<RunOutcome> {
         debug!("executing module: {}", module.name);
 
         // Create evaluator with the session's profile
         let evaluator = Evaluator::with_profile(self.session.profile());
+        if let Some(args) = args {
+            evaluator.set_program_args(args.to_vec());
+        }
 
         // Build environment from module bindings
         let env = self.build_module_env(module, &evaluator)?;
@@ -5005,13 +5042,18 @@ impl Compiler {
 
         // If there was IO output, use that as the display string;
         // otherwise fall back to the value's display representation
-        let display = if io_output.is_empty() {
-            value_display
-        } else {
+        let produced_io = !io_output.is_empty();
+        let display = if produced_io {
             io_output
+        } else {
+            value_display
         };
 
-        Ok((forced, display))
+        Ok(RunOutcome {
+            value: forced,
+            display,
+            produced_io,
+        })
     }
 
     /// Build an environment from the module's top-level bindings.
@@ -6845,6 +6887,17 @@ fn qualify_expr_mut(
     }
 }
 
+/// The result of interpreting a program with [`Compiler::run_file_with_args`].
+#[derive(Debug)]
+pub struct RunOutcome {
+    /// The value `main` evaluated to.
+    pub value: Value,
+    /// The IO output when the program wrote any, else the value's display form.
+    pub display: String,
+    /// Whether the program wrote IO output (already printed while running).
+    pub produced_io: bool,
+}
+
 /// Builder for configuring and creating a compiler.
 #[derive(Default)]
 pub struct CompilerBuilder {
@@ -7510,6 +7563,20 @@ exposed-modules: Data.Text Data.Text.Internal
             CompileError::NoMainFunction => {}
             other => panic!("Expected NoMainFunction, got: {other:?}"),
         }
+    }
+
+    /// `run_file_with_args` reports that IO output was produced (#44), so
+    /// `bhc run` does not print it a second time.
+    #[test]
+    fn test_run_file_with_args_reports_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("Main.hs");
+        std::fs::write(&path, "main = putStrLn \"hi\"\n").unwrap();
+        let path = Utf8PathBuf::from_path_buf(path).unwrap();
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let outcome = compiler.run_file_with_args(&path, &[]).unwrap();
+        assert!(outcome.produced_io);
+        assert_eq!(outcome.display, "hi\n");
     }
 
     /// Test compiling to a standalone executable and running it

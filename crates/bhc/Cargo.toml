@@ -20,6 +20,7 @@ bhc-ast = { workspace = true }
 bhc-parser = { workspace = true }
 bhc-session = { workspace = true }
 bhc-driver = { workspace = true }
+bhc-target = { workspace = true }
 
 clap = { workspace = true }
 clap_complete = { workspace = true }

@@ -249,7 +249,10 @@ fn main() -> Result<()> {
 
 fn real_main() -> Result<()> {
     install_ice_hook();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(target) = cli.target.take() {
+        cli.target = Some(normalize_target(&target)?);
+    }
 
     // --numeric-version: print bare version and exit (used by hx-bhc for toolchain detection)
     if cli.numeric_version {
@@ -321,6 +324,29 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
+/// Map a `--target` value onto the triple the driver understands.
+///
+/// Accepts the short names from the documentation (`wasi`, `cuda`, `rocm`,
+/// `riscv64`) as well as full triples. An unknown target is an error rather
+/// than a silent native build for the host.
+fn normalize_target(target: &str) -> Result<String> {
+    let normalized = match target {
+        "wasi" | "wasm" | "wasm32" | "wasm32-wasi" | "wasm32-wasip1" | "wasm32-unknown-wasi" => {
+            "wasm32-wasi"
+        }
+        "cuda" | "ptx" | "nvptx" | "nvptx64" | "nvptx64-nvidia-cuda" => "nvptx64-nvidia-cuda",
+        "rocm" | "amdgcn" | "amdgcn-amd-amdhsa" => "amdgcn-amd-amdhsa",
+        "riscv64" => "riscv64-unknown-linux-gnu",
+        "riscv32" => "riscv32-unknown-none",
+        triple if bhc_target::parse_triple(triple).is_ok() => triple,
+        _ => anyhow::bail!(
+            "unknown target `{target}`; expected one of wasi, cuda, rocm, riscv64, \
+             or a triple such as x86_64-unknown-linux-gnu or aarch64-apple-darwin"
+        ),
+    };
+    Ok(normalized.to_string())
+}
+
 /// Generate shell completions
 fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
@@ -349,8 +375,7 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Determine output type based on target and emit flags
     let output_type = if cli.emit.as_deref() == Some("ptx") {
         bhc_session::OutputType::Object // PTX is emitted as object
-    } else if cli.target.as_deref() == Some("wasm32-wasi") || cli.target.as_deref() == Some("wasm")
-    {
+    } else if cli.target.as_deref() == Some("wasm32-wasi") {
         bhc_session::OutputType::Wasm
     } else {
         bhc_session::OutputType::Executable
@@ -612,7 +637,7 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
 }
 
 /// Run a Haskell program
-fn run_file(file: &Path, _args: &[String], cli: &Cli) -> Result<()> {
+fn run_file(file: &Path, args: &[String], cli: &Cli) -> Result<()> {
     use bhc_driver::CompilerBuilder;
     use camino::Utf8PathBuf;
 
@@ -636,10 +661,13 @@ fn run_file(file: &Path, _args: &[String], cli: &Cli) -> Result<()> {
     let path = Utf8PathBuf::from_path_buf(file.to_path_buf())
         .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in path"))?;
 
-    // Run the file
-    match compiler.run_file(&path) {
-        Ok((_value, display)) => {
-            println!("{}", display);
+    // Run the file. The interpreter prints IO output as it runs, so only a
+    // pure, non-unit result of `main` is shown afterwards.
+    match compiler.run_file_with_args(&path, args) {
+        Ok(outcome) => {
+            if !outcome.produced_io && outcome.display != "()" {
+                println!("{}", outcome.display);
+            }
             Ok(())
         }
         Err(e) => {
@@ -796,4 +824,27 @@ fn print_version() {
     println!("Supported profiles: Default, Server, Numeric, Edge");
     println!();
     println!("Repository: https://github.com/raskell-io/bhc");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_target;
+
+    #[test]
+    fn target_aliases_normalize() {
+        assert_eq!(normalize_target("wasi").unwrap(), "wasm32-wasi");
+        assert_eq!(normalize_target("wasm32-wasip1").unwrap(), "wasm32-wasi");
+        assert_eq!(normalize_target("cuda").unwrap(), "nvptx64-nvidia-cuda");
+        assert_eq!(normalize_target("rocm").unwrap(), "amdgcn-amd-amdhsa");
+        assert_eq!(
+            normalize_target("x86_64-unknown-linux-gnu").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn unknown_target_is_rejected() {
+        assert!(normalize_target("bogus").is_err());
+        assert!(normalize_target("sparc-sun-solaris").is_err());
+    }
 }

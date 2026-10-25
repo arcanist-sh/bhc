@@ -126,6 +126,8 @@ pub struct Evaluator {
     /// When the REPL evaluates `let x = 5`, it stores `("x", Value::Int(5))`.
     /// Subsequent evaluations can reference `x` even though they have different `VarIds`.
     named_bindings: RefCell<HashMap<Symbol, Value>>,
+    /// Arguments returned by `getArgs`; `None` falls back to the process args.
+    program_args: RefCell<Option<Vec<String>>>,
 }
 
 impl Evaluator {
@@ -144,6 +146,7 @@ impl Evaluator {
             rec_env_stack: RefCell::new(Vec::new()),
             io_output: RefCell::new(String::new()),
             named_bindings: RefCell::new(HashMap::new()),
+            program_args: RefCell::new(None),
         }
     }
 
@@ -221,6 +224,11 @@ impl Evaluator {
         for name in names {
             bindings.remove(name);
         }
+    }
+
+    /// Sets the arguments `getArgs` returns, instead of the host process's.
+    pub fn set_program_args(&self, args: Vec<String>) {
+        *self.program_args.borrow_mut() = Some(args);
     }
 
     /// Returns the captured IO output from print/putStrLn/putStr operations.
@@ -6408,8 +6416,12 @@ impl Evaluator {
 
             // === System.Environment PrimOps ===
             PrimOp::GetArgs => {
-                let args_list: Vec<Value> = std::env::args()
-                    .skip(1)
+                let args: Vec<String> = match &*self.program_args.borrow() {
+                    Some(args) => args.clone(),
+                    None => std::env::args().skip(1).collect(),
+                };
+                let args_list: Vec<Value> = args
+                    .iter()
                     .map(|s| Value::String(Arc::from(s.as_str())))
                     .collect();
                 Ok(Value::from_list(args_list))
@@ -8442,6 +8454,23 @@ mod tests {
 
     fn make_int(n: i64) -> Expr {
         Expr::Lit(Literal::Int(n), Ty::Error, Span::default())
+    }
+
+    #[test]
+    fn test_get_args_uses_program_args() {
+        let eval = Evaluator::new(EvalMode::Strict);
+        eval.set_program_args(vec!["one".into(), "two".into()]);
+        let args = eval.apply_primop(PrimOp::GetArgs, vec![]).unwrap();
+        let args: Vec<String> = args
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.to_string(),
+                other => panic!("expected a String, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(args, ["one", "two"]);
     }
 
     #[test]

@@ -508,13 +508,52 @@ pub struct SchedulerStats {
 // Scheduler
 // ============================================================================
 
+/// How many empty polling rounds a worker makes before it parks.
+const IDLE_SPINS_BEFORE_PARK: u32 = 64;
+
+/// Upper bound on one park, so a missed wakeup only delays a worker.
+const MAX_PARK: Duration = Duration::from_millis(50);
+
+/// Parking spot for idle workers.
+///
+/// Workers that find no work park on the condvar instead of spinning, so an
+/// idle runtime costs no CPU. Producers notify after pushing; a worker
+/// re-checks the global queue under the lock before waiting, so a push
+/// between its last poll and the wait still wakes it.
+#[derive(Default)]
+struct IdleWorkers {
+    lock: Mutex<()>,
+    wakeup: Condvar,
+}
+
+impl IdleWorkers {
+    fn notify_one(&self) {
+        let _guard = self.lock.lock();
+        self.wakeup.notify_one();
+    }
+
+    fn notify_all(&self) {
+        let _guard = self.lock.lock();
+        self.wakeup.notify_all();
+    }
+
+    fn park(&self, global: &Injector<RawTask>, shutdown: &AtomicBool) {
+        let mut guard = self.lock.lock();
+        if global.is_empty() && !shutdown.load(Ordering::Acquire) {
+            self.wakeup.wait_for(&mut guard, MAX_PARK);
+        }
+    }
+}
+
 /// A work-stealing task scheduler.
 ///
 /// The scheduler manages a pool of worker threads that execute tasks.
-/// Each worker has a local work queue and can steal from others when idle.
+/// Each worker has a local work queue and can steal from others when idle;
+/// workers with nothing to do park until a task is spawned.
 pub struct Scheduler {
     config: SchedulerConfig,
     global_queue: Arc<Injector<RawTask>>,
+    idle: Arc<IdleWorkers>,
     #[allow(dead_code)]
     stealers: Arc<Vec<Stealer<RawTask>>>,
     workers: Vec<JoinHandle<()>>,
@@ -537,6 +576,7 @@ impl Scheduler {
     #[must_use]
     pub fn with_config(config: SchedulerConfig) -> Self {
         let global_queue = Arc::new(Injector::new());
+        let idle = Arc::new(IdleWorkers::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(RwLock::new(SchedulerStats::default()));
         let active_tasks = Arc::new(AtomicUsize::new(0));
@@ -557,6 +597,7 @@ impl Scheduler {
         // Spawn worker threads
         for (id, local_queue) in local_queues.into_iter().enumerate() {
             let global = Arc::clone(&global_queue);
+            let idle = Arc::clone(&idle);
             let stealers = Arc::clone(&stealers);
             let shutdown = Arc::clone(&shutdown);
             let stats = Arc::clone(&stats);
@@ -565,7 +606,7 @@ impl Scheduler {
                 .name(format!("bhc-worker-{id}"))
                 .stack_size(config.stack_size)
                 .spawn(move || {
-                    worker_loop(id, local_queue, global, stealers, shutdown, stats);
+                    worker_loop(id, local_queue, global, idle, stealers, shutdown, stats);
                 })
                 .expect("failed to spawn worker thread");
 
@@ -575,6 +616,7 @@ impl Scheduler {
         Self {
             config,
             global_queue,
+            idle,
             stealers,
             workers,
             stats,
@@ -712,6 +754,7 @@ impl Scheduler {
         });
 
         self.global_queue.push(raw_task);
+        self.idle.notify_one();
         task
     }
 
@@ -736,6 +779,7 @@ impl Scheduler {
     /// Shutdown the scheduler and wait for all workers to finish.
     pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.idle.notify_all();
 
         for worker in std::mem::take(&mut self.workers) {
             let _ = worker.join();
@@ -746,6 +790,7 @@ impl Scheduler {
 impl Drop for Scheduler {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.idle.notify_all();
     }
 }
 
@@ -753,6 +798,7 @@ fn worker_loop(
     id: usize,
     local: WorkerDeque<RawTask>,
     global: Arc<Injector<RawTask>>,
+    idle: Arc<IdleWorkers>,
     stealers: Arc<Vec<Stealer<RawTask>>>,
     shutdown: Arc<AtomicBool>,
     stats: Arc<RwLock<SchedulerStats>>,
@@ -760,6 +806,7 @@ fn worker_loop(
     // Set worker ID in thread-local storage
     CURRENT_WORKER.with(|w| w.set(Some(id)));
 
+    let mut idle_rounds = 0u32;
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -775,6 +822,7 @@ fn worker_loop(
             task.run();
             let mut s = stats.write();
             s.tasks_completed += 1;
+            idle_rounds = 0;
             continue;
         }
 
@@ -783,6 +831,7 @@ fn worker_loop(
             task.run();
             let mut s = stats.write();
             s.tasks_completed += 1;
+            idle_rounds = 0;
             continue;
         }
 
@@ -802,12 +851,18 @@ fn worker_loop(
             }
         }
 
-        if !stolen {
+        if stolen {
+            idle_rounds = 0;
+        } else {
             let mut s = stats.write();
             s.steal_failures += 1;
             drop(s);
-            // Yield to avoid busy-waiting
-            thread::yield_now();
+            idle_rounds += 1;
+            if idle_rounds < IDLE_SPINS_BEFORE_PARK {
+                thread::yield_now();
+            } else {
+                idle.park(&global, &shutdown);
+            }
         }
     }
 }
@@ -1225,6 +1280,38 @@ mod tests {
 
         task.cancel();
         assert!(task.is_cancelled());
+    }
+
+    /// Workers park when idle (#39) and still pick up work spawned later.
+    #[test]
+    fn test_parked_workers_wake_for_new_tasks() {
+        let scheduler = Scheduler::new(4);
+        // Long enough for every worker to exhaust its spins and park.
+        thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        let tasks: Vec<_> = (0..8).map(|i| scheduler.spawn(move || i * 2)).collect();
+        let results: Vec<i32> = tasks
+            .into_iter()
+            .map(|t| match t.await_result() {
+                TaskResult::Ok(v) => v,
+                _ => panic!("task did not complete"),
+            })
+            .collect();
+        assert_eq!(results, vec![0, 2, 4, 6, 8, 10, 12, 14]);
+        assert!(
+            start.elapsed() < MAX_PARK * 4,
+            "wakeup took {:?}",
+            start.elapsed()
+        );
+        let failures = scheduler.stats().steal_failures;
+        thread::sleep(Duration::from_millis(100));
+        // A spinning pool racks up steal failures continuously; a parked one
+        // only fails a bounded number of times per MAX_PARK timeout.
+        let delta = scheduler.stats().steal_failures - failures;
+        assert!(
+            delta < 4 * 64 * 4,
+            "workers kept spinning: {delta} failed polls"
+        );
     }
 
     #[test]

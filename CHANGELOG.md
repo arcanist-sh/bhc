@@ -8,6 +8,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `bhc run` no longer prints the program's output twice, and `getArgs` returns
+  the arguments after the file name instead of bhc's own command line (#44).
+- `--target` accepts the documented short names (`wasi`, `cuda`, `rocm`,
+  `riscv64`) and rejects an unknown target with an error. Before,
+  `--target=wasi` and typos silently built a native binary for the host (#42).
+- Idle runtime worker threads park instead of spinning on `yield_now`. A
+  compiled program waiting on stdin used about 8 cores (#39).
 - Methods of multi-parameter classes whose result type wraps the class's
   monad (pandoc's `HasQuoteContext st m`) are selected from their dictionary:
   from the one in scope, from an instance whose monad parameter is a variable

@@ -8,6 +8,19 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `show` passed as a function (`map show [True, False]`) shows each element at
+  its type; it showed every element as an `Int`, printing addresses.
+- `show` on strings and characters escapes like Haskell, not Rust: `"it's"`
+  rather than `"it\'s"`, non-ASCII as `\233` rather than `\u{e9}`, control
+  characters by name (`\DEL`, `\SOH`), with `\&` where needed.
+- An instance method defined as a builtin class method (`sh = show`,
+  `same = (==)`) works. The builtin `Eq`/`Ord`/`Num`/`Show` instances named
+  their methods by DefIds from an old builtin numbering, so their
+  dictionaries held other functions (`show` was `++`), and the eta-expanded
+  method's arguments had no type to dispatch the builtin on (#30).
+- Kind-annotated binders in `data`, `newtype`, `class` and type family heads
+  (`data Vec (n :: *) a`, `class C (f :: Type -> Type)`) are parsed; the
+  declaration was dropped and its constructors and methods were unbound (#31).
 - `getLine` and `getEnv` return a `String` instead of a raw C string, which
   crashed the program as soon as the result was printed (#20, #21).
   `lookupEnv` returns `Nothing`/`Just`, `getEnv` of an unset variable and

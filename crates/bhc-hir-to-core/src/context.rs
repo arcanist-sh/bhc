@@ -1706,6 +1706,33 @@ impl LowerContext {
             self.var_map.insert(def_info.id, var);
         }
 
+        // The builtin Eq/Ord/Num/Show instances name their methods by small
+        // hardcoded DefIds that predate the current builtin numbering (`show`
+        // was 92, which is now `++`), so a dictionary built from them held
+        // the wrong functions: `sh = show` in `instance Sh Bool` ran `++`
+        // (#30). Point each stale slot at the builtin of the method's name.
+        const HARDCODED_METHOD_IDS: usize = 1000;
+        let mut builtin_by_name: FxHashMap<Symbol, DefId> = FxHashMap::default();
+        for def_info in defs.values() {
+            builtin_by_name
+                .entry(def_info.name)
+                .and_modify(|id| {
+                    if def_info.id.index() < id.index() {
+                        *id = def_info.id;
+                    }
+                })
+                .or_insert(def_info.id);
+        }
+        let var_map = &self.var_map;
+        self.class_registry.remap_instance_methods(|name, def_id| {
+            if def_id.index() >= HARDCODED_METHOD_IDS
+                || var_map.get(&def_id).is_some_and(|v| v.name == name)
+            {
+                return def_id;
+            }
+            builtin_by_name.get(&name).copied().unwrap_or(def_id)
+        });
+
         // The clear above wiped the synthetic method vars behind the builtin
         // `Semigroup Text` / `Monoid Text` instances (DefIds 790_000–790_002,
         // registered at context construction); restore them so dictionary
@@ -2949,6 +2976,13 @@ impl LowerContext {
     /// 2. Select the method from the dictionary
     ///
     /// Returns the method selection expression with any necessary let bindings.
+    /// Whether the class registry has an instance of `class_name` at `ty`.
+    pub fn has_registered_instance(&self, class_name: Symbol, ty: &Ty) -> bool {
+        self.class_registry
+            .resolve_instance(class_name, &self.expand_type_aliases(ty))
+            .is_some()
+    }
+
     pub fn resolve_method_at_concrete_type(
         &mut self,
         method_name: Symbol,
@@ -5868,6 +5902,9 @@ impl LowerContext {
             .any(|c| c.field_names.contains(&value_def.name));
         if !is_selector {
             body = self.eta_expand_point_free_method(body, value_def);
+            if let Some(sig) = self.current_binding_sig.clone() {
+                Self::type_eta_params(&mut body, &sig);
+            }
         }
 
         // If there are constraints, wrap the body in dictionary lambdas.
@@ -6003,13 +6040,19 @@ impl LowerContext {
 
         // Compile the method body (now with constraint dicts in scope)
         let body = self.compile_equations(method_def);
-        self.current_binding_sig = saved_binding_sig;
+        let instance_sig = std::mem::replace(&mut self.current_binding_sig, saved_binding_sig);
         self.current_instance_context = saved_context;
         let mut body = body?;
 
         self.pop_dict_scope();
 
         body = self.eta_expand_point_free_method(body, method_def);
+        // Eta-expanded parameters of a point-free method (`sh = show`) take
+        // the instance's argument types, so a builtin applied to them is
+        // dispatched at the instance type (#30).
+        if let Some(sig) = instance_sig {
+            Self::type_eta_params(&mut body, &sig);
+        }
 
         // Wrap body with dict lambdas (outermost first)
         for (_, dict_var) in dict_vars.into_iter().rev() {
@@ -6444,14 +6487,13 @@ impl LowerContext {
                     lspan,
                 );
             }
+            // Every argument goes inside a wrapping `let` (a dictionary
+            // binding), so `(let d = … in (==) x) y` becomes a saturated
+            // `let d = … in (==) x y` rather than a partial `==` under a let.
             let mut b = body;
-            for (i, p) in params.iter().enumerate() {
+            for p in params {
                 let arg = core::Expr::Var(p.clone(), span);
-                b = if i == 0 {
-                    unroll(b, arg, span)
-                } else {
-                    core::Expr::App(Box::new(b), Box::new(arg), span)
-                };
+                b = unroll(b, arg, span);
             }
             for p in params.iter().rev() {
                 b = core::Expr::Lam(p.clone(), Box::new(b), span);
@@ -6459,6 +6501,24 @@ impl LowerContext {
             b
         }
         expand_under(body, &params, method_def.span, &apply_unrolling_composition)
+    }
+
+    /// Give untyped `$eta` parameters of a method's leading lambdas the
+    /// argument types of `sig`, at the binder and at every use.
+    fn type_eta_params(body: &mut core::Expr, sig: &Ty) {
+        let mut sig = sig;
+        while let Ty::Forall(_, inner) = sig {
+            sig = inner;
+        }
+        let mut expr = body;
+        while let (core::Expr::Lam(param, inner, _), Ty::Fun(arg_ty, rest)) = (expr, sig) {
+            if param.name.as_str().starts_with("$eta") && matches!(param.ty, Ty::Error) {
+                param.ty = (**arg_ty).clone();
+                crate::expr::retype_var_uses(inner, param.id, arg_ty);
+            }
+            expr = inner.as_mut();
+            sig = rest.as_ref();
+        }
     }
 
     /// Lower a default method implementation from a class definition.

@@ -49510,6 +49510,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             return Ok(Some(self.build_io_action(expr)?.into()));
                         }
                         self.lower_builtin(name, &[])
+                    } else if let Some(lam) = Self::typed_show_lambda(name, var) {
+                        // `map show xs`: a generic wrapper closure has no
+                        // argument type and showed every element as an Int.
+                        self.lower_expr(&lam)
                     } else {
                         self.create_builtin_closure(name, arity)
                     }
@@ -50098,6 +50102,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.stub_functions.insert(name.to_string(), stub_fn);
         Ok(stub_fn)
+    }
+
+    /// `\x -> show x` for a bare `show` whose occurrence type is a ground
+    /// `a -> String`, with `x` typed `a`, so the applied `show` dispatches on
+    /// the element type instead of guessing from the value.
+    fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
+        if name != "show" {
+            return None;
+        }
+        let Ty::Fun(arg_ty, _) = &var.ty else {
+            return None;
+        };
+        if matches!(arg_ty.as_ref(), Ty::Var(_) | Ty::Error | Ty::Forall(..)) {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$show_arg"),
+            id: VarId::new(usize::MAX - 30),
+            ty: arg_ty.as_ref().clone(),
+        };
+        let body = Expr::App(
+            Box::new(Expr::Var(var.clone(), span)),
+            Box::new(Expr::Var(x.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(x, Box::new(body), span))
     }
 
     fn create_builtin_closure(

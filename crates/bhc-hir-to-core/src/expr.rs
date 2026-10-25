@@ -1401,7 +1401,16 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
             // in-scope `Semigroup` dictionary is the ELEMENT's, and taking it
             // ran Inlines' `<>` on two Futures.
             if ctx.is_instance_alias(def_ref.span) {
-                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                // Only through an instance the program declares: `sh = show`
+                // in `instance Sh Bool` has no `Show Bool` instance to
+                // resolve, and constructing one built a bogus dictionary
+                // whose `show` was `++` (#30). The bare builtin below is the
+                // instance-typed `show` once the method is eta-expanded.
+                if let Some(inst_ty) = ctx
+                    .current_instance_type()
+                    .cloned()
+                    .filter(|t| ctx.has_registered_instance(class_name, t))
+                {
                     if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                         name,
                         class_name,
@@ -8703,7 +8712,7 @@ fn type_tuple_alt_binders(alt: &mut core::Alt, scrut_ty: &Ty) {
 }
 
 /// Set the type of every untyped occurrence (and binder) of variable `id`.
-fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
+pub(crate) fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
     let fix = |v: &mut Var| {
         if v.id == id && matches!(v.ty, Ty::Error) {
             v.ty = ty.clone();

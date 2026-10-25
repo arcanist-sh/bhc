@@ -2017,11 +2017,69 @@ pub extern "C" fn bhc_int_to_char(n: i64) -> u32 {
     n as u32
 }
 
+/// ASCII control-character names, as Haskell's `showLitChar` prints them.
+const ASCII_CONTROL_NAMES: [&str; 32] = [
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "a", "b", "t", "n", "v", "f", "r", "SO", "SI",
+    "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM", "SUB", "ESC", "FS", "GS",
+    "RS", "US",
+];
+
+/// Append `ch` escaped as Haskell's `showLitChar` does, inside a string
+/// literal (`in_string`) or a character literal. Returns whether a following
+/// digit (or `H` after `\SO`) needs a `\&` separator.
+fn push_hs_lit_char(out: &mut String, ch: char, in_string: bool) -> Option<char> {
+    match ch {
+        '\\' => out.push_str("\\\\"),
+        '"' if in_string => out.push_str("\\\""),
+        '\'' if !in_string => out.push_str("\\'"),
+        '\x7f' => out.push_str("\\DEL"),
+        c if (c as u32) < 0x20 => {
+            out.push('\\');
+            out.push_str(ASCII_CONTROL_NAMES[c as usize]);
+            if c == '\x0e' {
+                return Some('H');
+            }
+        }
+        c if (c as u32) > 0x7f => {
+            out.push_str(&format!("\\{}", c as u32));
+            return Some('0');
+        }
+        c => out.push(c),
+    }
+    None
+}
+
+/// `show` for a `String`: quoted, escaped like Haskell (not Rust).
+pub(crate) fn hs_show_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut pending: Option<char> = None;
+    for ch in s.chars() {
+        // `"\1234" ++ "5"` must not read back as `\12345`.
+        match pending {
+            Some('0') if ch.is_ascii_digit() => out.push_str("\\&"),
+            Some('H') if ch == 'H' => out.push_str("\\&"),
+            _ => {}
+        }
+        pending = push_hs_lit_char(&mut out, ch, true);
+    }
+    out.push('"');
+    out
+}
+
+/// `show` for a `Char`: single-quoted, escaped like Haskell.
+pub(crate) fn hs_show_char(ch: char) -> String {
+    let mut out = String::from("'");
+    push_hs_lit_char(&mut out, ch, false);
+    out.push('\'');
+    out
+}
+
 /// Show Char - returns the character representation with quotes
 #[no_mangle]
 pub extern "C" fn bhc_show_char(c: u32) -> *mut c_char {
     let s = if let Some(ch) = char::from_u32(c) {
-        format!("'{}'", ch.escape_default())
+        hs_show_char(ch)
     } else {
         format!("'\\x{:x}'", c)
     };
@@ -2070,7 +2128,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 // Char: stored as u32 via int-to-ptr
                 let c = ptr as u32;
                 if let Some(ch) = char::from_u32(c) {
-                    format!("'{}'", ch.escape_default())
+                    hs_show_char(ch)
                 } else {
                     format!("'\\x{:x}'", c)
                 }
@@ -2078,7 +2136,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
             5 => {
                 // String: [Char] linked list, show with quotes
                 let s = read_char_list(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
             }
             _ => {
                 // Default: treat as Int
@@ -2116,10 +2174,7 @@ unsafe fn bhc_text_show_str(text: *const u8) -> String {
 /// `text` must be null or a live `BhcText`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_show_text(text: *const u8) -> *mut c_char {
-    let shown = format!(
-        "\"{}\"",
-        unsafe { bhc_text_show_str(text) }.escape_default()
-    );
+    let shown = hs_show_string(&unsafe { bhc_text_show_str(text) });
     CString::new(shown)
         .unwrap_or_else(|_| CString::new("\"\"").expect("static"))
         .into_raw()
@@ -2209,7 +2264,7 @@ pub unsafe extern "C" fn bhc_string_eq_cstr(list_ptr: *const u8, pat: *const c_c
 #[no_mangle]
 pub extern "C" fn bhc_show_string(list_ptr: *const u8) -> *mut c_char {
     let s = unsafe { read_char_list(list_ptr) };
-    let shown = format!("\"{}\"", s.escape_default());
+    let shown = hs_show_string(&s);
     let c_string = CString::new(shown).unwrap();
     c_string.into_raw()
 }
@@ -2351,7 +2406,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Char: stored as u32 via int-to-ptr
                 let c = ptr as u32;
                 if let Some(ch) = char::from_u32(c) {
-                    format!("'{}'", ch.escape_default())
+                    hs_show_char(ch)
                 } else {
                     format!("'\\x{:x}'", c)
                 }
@@ -2359,13 +2414,13 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             5 => {
                 // String: [Char] linked list, show with quotes
                 let s = read_char_list(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
             }
             6 => "()".to_string(),
             8 => {
                 // Text: an opaque handle, shown like the String it holds.
                 let s = bhc_text_show_str(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
             }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
@@ -2448,7 +2503,7 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
         // Special case: [Char] is shown as a String
         if elem_desc.tag == 4 {
             let s = read_char_list(list_ptr);
-            return format!("\"{}\"", s.escape_default());
+            return hs_show_string(&s);
         }
 
         let mut elems = Vec::new();
@@ -5073,6 +5128,23 @@ pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn haskell_show_escaping() {
+        use super::{hs_show_char, hs_show_string};
+        // Expected values are GHC's `show` output.
+        assert_eq!(hs_show_string("it's"), r#""it's""#);
+        assert_eq!(hs_show_string("say \"hi\"\n"), r#""say \"hi\"\n""#);
+        assert_eq!(hs_show_string("a\\b\tc"), r#""a\\b\tc""#);
+        assert_eq!(hs_show_string("caf\u{e9}"), r#""caf\233""#);
+        assert_eq!(hs_show_string("\u{e9}1"), r#""\233\&1""#);
+        assert_eq!(hs_show_string("\u{e}H"), r#""\SO\&H""#);
+        assert_eq!(hs_show_string("\u{7f}\u{0}"), r#""\DEL\NUL""#);
+        assert_eq!(hs_show_char('a'), "'a'");
+        assert_eq!(hs_show_char('\''), r"'\''");
+        assert_eq!(hs_show_char('"'), "'\"'");
+        assert_eq!(hs_show_char('\n'), r"'\n'");
+    }
+
     use super::*;
 
     fn strs(parts: &[&str]) -> Vec<String> {

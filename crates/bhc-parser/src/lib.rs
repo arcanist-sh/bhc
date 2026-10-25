@@ -882,6 +882,42 @@ mod tests {
         assert!(!module.decls.is_empty());
     }
 
+    /// Kind-annotated binders keep their variables (#31).
+    #[test]
+    fn test_kind_annotated_binders() {
+        let module = parse_module_ok(
+            "data Vec (n :: *) a = Vec [a]\n\
+             newtype W (f :: Type -> Type) a = W (f a)\n\
+             class C (f :: k -> Type) where\n  m :: f a -> Int",
+        );
+        let names = |params: &[bhc_ast::TyVar]| -> Vec<String> {
+            params
+                .iter()
+                .map(|p| p.name.name.as_str().to_string())
+                .collect()
+        };
+        let mut seen = 0;
+        for decl in &module.decls {
+            match decl {
+                Decl::DataDecl(d) => {
+                    assert_eq!(names(&d.params), ["n", "a"]);
+                    assert_eq!(d.constrs.len(), 1);
+                    seen += 1;
+                }
+                Decl::Newtype(d) => {
+                    assert_eq!(names(&d.params), ["f", "a"]);
+                    seen += 1;
+                }
+                Decl::ClassDecl(d) => {
+                    assert_eq!(names(&d.params), ["f"]);
+                    seen += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, 3);
+    }
+
     #[test]
     fn test_newtype_declaration() {
         let module = parse_module_ok("newtype Foo = Foo Int");

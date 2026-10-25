@@ -1449,6 +1449,21 @@ fn test_tier3_getline_env() {
 }
 
 #[test]
+fn test_tier3_instance_builtin_alias() {
+    run_native_test("tier3_io/instance_builtin_alias", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_as_value() {
+    run_native_test("tier2_functions/show_as_value", Profile::Default);
+}
+
+#[test]
+fn test_tier2_kind_signatures() {
+    run_native_test("tier2_functions/kind_signatures", Profile::Default);
+}
+
+#[test]
 fn test_tier2_read_double_list() {
     run_native_test("tier2_functions/read_double_list", Profile::Default);
 }

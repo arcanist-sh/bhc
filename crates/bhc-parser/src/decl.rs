@@ -1802,6 +1802,31 @@ impl<'src> Parser<'src> {
                     self.advance();
                     vars.push(TyVar { name, span });
                 }
+                // A kind-annotated binder `(n :: *)` / `(f :: Type -> Type)`
+                // (KindSignatures). The kind is not tracked; the variable is.
+                TokenKind::LParen
+                    if matches!(
+                        self.peek_nth(1).map(|t| &t.node.kind),
+                        Some(TokenKind::Ident(_))
+                    ) && matches!(
+                        self.peek_nth(2).map(|t| &t.node.kind),
+                        Some(TokenKind::DoubleColon)
+                    ) =>
+                {
+                    self.advance();
+                    let Some(TokenKind::Ident(sym)) = self.current_kind().cloned() else {
+                        break;
+                    };
+                    let span = self.current_span();
+                    self.advance();
+                    self.expect(&TokenKind::DoubleColon)?;
+                    self.parse_kind()?;
+                    self.expect(&TokenKind::RParen)?;
+                    vars.push(TyVar {
+                        name: Ident::new(sym),
+                        span,
+                    });
+                }
                 _ => break,
             }
         }
@@ -2497,20 +2522,8 @@ impl<'src> Parser<'src> {
         let context = self.parse_optional_context()?;
         let name = self.parse_conid()?;
 
-        // Parse one or more type parameters
-        let mut params = Vec::new();
-        while self.check_ident() {
-            let tok = self.current().unwrap();
-            if let TokenKind::Ident(sym) = &tok.node.kind {
-                let param_name = Ident::new(*sym);
-                let span = tok.span;
-                self.advance();
-                params.push(TyVar {
-                    name: param_name,
-                    span,
-                });
-            }
-        }
+        // Parse one or more type parameters (plain or kind-annotated)
+        let params = self.parse_ty_var_list()?;
 
         // Parse optional functional dependencies: | a -> b, c -> d
         let fundeps = if self.eat(&TokenKind::Pipe) {
@@ -2879,6 +2892,13 @@ impl<'src> Parser<'src> {
                 return Ok(Kind::Star);
             }
             // Named kind variable
+            let name = Ident::new(*sym);
+            self.advance();
+            return Ok(Kind::Var(name));
+        }
+
+        // Kind variable: `(a :: k)`
+        if let Some(TokenKind::Ident(sym)) = self.current_kind() {
             let name = Ident::new(*sym);
             self.advance();
             return Ok(Kind::Var(name));

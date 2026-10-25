@@ -8,6 +8,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- An import of a module bhc cannot find (not on the search paths, in a
+  package database, or among the modules it provides) is reported as a
+  warning instead of being ignored silently, and lowering warnings now print
+  even when lowering fails, so the missing module shows up next to the
+  unbound-name errors it causes (#45).
 - `bhc run` no longer prints the program's output twice, and `getArgs` returns
   the arguments after the file name instead of bhc's own command line (#44).
 - `--target` accepts the documented short names (`wasi`, `cuda`, `rocm`,

@@ -163,6 +163,14 @@ pub enum LowerWarning {
         /// Source location of the pragma.
         span: Span,
     },
+    /// An imported module was not found on the search paths, in a package
+    /// database, or among the modules bhc provides.
+    ModuleNotFound {
+        /// The module name.
+        name: String,
+        /// Source location of the import.
+        span: Span,
+    },
 }
 
 impl std::fmt::Display for LowerWarning {
@@ -182,6 +190,13 @@ impl std::fmt::Display for LowerWarning {
             }
             LowerWarning::UnknownExtension { name, .. } => {
                 write!(f, "unknown extension `{name}`")
+            }
+            LowerWarning::ModuleNotFound { name, .. } => {
+                write!(
+                    f,
+                    "could not find module `{name}` (add its source directory with -i \
+                     or its package with --package-db)"
+                )
             }
         }
     }

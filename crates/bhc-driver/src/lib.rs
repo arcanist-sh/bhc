@@ -1296,17 +1296,26 @@ impl Compiler {
             search_paths,
         };
 
-        let hir = bhc_lower::lower_module(&mut ctx, ast, &config)?;
+        let hir = match bhc_lower::lower_module(&mut ctx, ast, &config) {
+            Ok(hir) => hir,
+            Err(e) => {
+                for warning in &ctx.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                return Err(e.into());
+            }
+        };
+
+        // Display lowering warnings first: a missing module explains the
+        // unbound-name errors that follow it.
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
+        }
 
         // Check for lowering errors
         if ctx.has_errors() {
             let errors = ctx.take_errors();
             return Err(bhc_lower::LowerError::Multiple(errors).into());
-        }
-
-        // Display lowering warnings
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
         }
 
         Ok((hir, ctx))
@@ -3488,16 +3497,25 @@ impl Compiler {
             search_paths,
         };
 
-        let hir = bhc_lower::lower_module_with_cache(&mut ctx, ast, &config, cache)?;
+        let hir = match bhc_lower::lower_module_with_cache(&mut ctx, ast, &config, cache) {
+            Ok(hir) => hir,
+            Err(e) => {
+                for warning in &ctx.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                return Err(e.into());
+            }
+        };
+
+        // Display lowering warnings first: a missing module explains the
+        // unbound-name errors that follow it.
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
+        }
 
         if ctx.has_errors() {
             let errors = ctx.take_errors();
             return Err(bhc_lower::LowerError::Multiple(errors).into());
-        }
-
-        // Display lowering warnings
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
         }
 
         Ok((hir, ctx))
@@ -7563,6 +7581,27 @@ exposed-modules: Data.Text Data.Text.Internal
             CompileError::NoMainFunction => {}
             other => panic!("Expected NoMainFunction, got: {other:?}"),
         }
+    }
+
+    /// An import bhc cannot find anywhere is reported (#45), while a module
+    /// it provides is not.
+    #[test]
+    fn test_unknown_import_warns() {
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let src =
+            "import qualified Foo.Bar.Baz\nimport qualified Data.Map as M\nmain = putStrLn \"x\"\n";
+        let unit = CompilationUnit::from_source("Main", src);
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let missing: Vec<&str> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::ModuleNotFound { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(missing, ["Foo.Bar.Baz"]);
     }
 
     /// `run_file_with_args` reports that IO output was produced (#44), so

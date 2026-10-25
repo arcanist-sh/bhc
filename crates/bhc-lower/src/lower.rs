@@ -346,7 +346,14 @@ fn process_imports(
                     module = %module_name,
                     "module not found in search paths, using standard library fallback"
                 );
-                register_standard_module_exports(ctx, &module_name, Some(import));
+                let known = register_standard_module_exports(ctx, &module_name, Some(import))
+                    || BUILTIN_ONLY_MODULES.contains(&module_name.as_str());
+                if !known {
+                    ctx.warnings.push(crate::LowerWarning::ModuleNotFound {
+                        name: module_name.clone(),
+                        span: import.span,
+                    });
+                }
             }
             Err(LoadError::CircularImport(ref cycle_module)) => {
                 // Log circular import but don't fail - allow compilation to continue
@@ -370,6 +377,10 @@ fn process_imports(
         }
     }
 }
+
+/// Modules whose exports are all builtins, so they have no export table in
+/// `register_standard_module_exports` but importing them is not an error.
+const BUILTIN_ONLY_MODULES: &[&str] = &["Data.Kind"];
 
 /// What `Prelude` exports, as far as bhc models it. An unqualified import
 /// never displaces one of these builtins (see `is_prelude_export`).
@@ -591,11 +602,13 @@ pub(crate) fn is_prelude_export(name: &str) -> bool {
 /// It registers common functions from well-known modules.
 /// When `import_decl` is provided, qualified names are also registered under the
 /// import alias (e.g., `T.pack` for `import qualified Data.Text as T`).
+///
+/// Returns whether bhc knows the module, i.e. it has an export table here.
 fn register_standard_module_exports(
     ctx: &mut LowerContext,
     module_name: &str,
     import_decl: Option<&ast::ImportDecl>,
-) {
+) -> bool {
     let exports: &[&str] = match module_name {
         "Prelude" => PRELUDE_EXPORTS,
         "Data.Map"
@@ -5990,6 +6003,7 @@ fn register_standard_module_exports(
 
         _ => &[],
     };
+    let known = !exports.is_empty();
 
     // Determine the qualifier to use for qualified access
     let qualifier = if let Some(import) = import_decl {
@@ -6529,6 +6543,7 @@ fn register_standard_module_exports(
             }
         }
     }
+    known
 }
 
 /// Lower a top-level declaration.

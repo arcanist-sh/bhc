@@ -222,6 +222,8 @@ impl Default for Options {
 pub struct IrDumpOptions {
     /// Dump AST after parsing.
     pub dump_ast: bool,
+    /// Dump HIR after lowering.
+    pub dump_hir: bool,
     /// Dump Core IR.
     pub dump_core: bool,
     /// Dump Core IR after specific passes.

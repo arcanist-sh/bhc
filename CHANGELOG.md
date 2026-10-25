@@ -8,6 +8,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `--dump-ir=ast|hir|core|llvm|all` prints that stage to stdout, and
+  `--emit llvm-ir` prints the optimized LLVM IR; both were parsed and ignored.
+  `--dump-ir=tensor|loop` and unknown `--emit` formats are errors, and
+  `--edition`/`-j` warn that they have no effect yet (#43).
+- `bhc repl` explains how to get `bhci` when it is not installed next to `bhc`,
+  instead of failing with an OS error (#50).
+- Piping bhc's output into `head` no longer panics with a broken pipe.
 - An import of a module bhc cannot find (not on the search paths, in a
   package database, or among the modules it provides) is reported as a
   warning instead of being ignored silently, and lowering warnings now print

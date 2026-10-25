@@ -31,9 +31,9 @@ struct Cli {
     #[arg(long, value_enum, default_value = "default")]
     profile: Profile,
 
-    /// Haskell edition
-    #[arg(long, default_value = "2026")]
-    edition: String,
+    /// Haskell edition (accepted for compatibility; not implemented yet)
+    #[arg(long)]
+    edition: Option<String>,
 
     /// Optimization level (0-3)
     // Default "2" == OptLevel::Default, matching the session default this flag
@@ -59,11 +59,11 @@ struct Cli {
     #[arg(long = "tensor-fusion", global = true)]
     tensor_fusion: bool,
 
-    /// Dump intermediate representations
+    /// Dump an intermediate representation to stdout
     #[arg(long)]
     dump_ir: Option<IrStage>,
 
-    /// Number of parallel jobs
+    /// Number of parallel jobs (accepted for compatibility; not implemented yet)
     #[arg(short, long)]
     jobs: Option<usize>,
 
@@ -71,7 +71,8 @@ struct Cli {
     #[arg(long)]
     target: Option<String>,
 
-    /// Emit format for output (e.g., ptx for GPU, llvm-ir for debugging)
+    /// Emit format for output: ptx (GPU), or llvm-ir (print the optimized
+    /// LLVM IR to stdout, like --dump-ir=llvm)
     #[arg(long)]
     emit: Option<String>,
 
@@ -159,7 +160,9 @@ enum IrStage {
     Tensor,
     /// Loop IR
     Loop,
-    /// All stages
+    /// LLVM IR (after optimization)
+    Llvm,
+    /// AST, HIR, Core and LLVM IR
     All,
 }
 
@@ -232,7 +235,29 @@ fn install_ice_hook() {
 /// tree deep enough to overflow the 8 MiB a main thread gets by default.
 const COMPILER_STACK_SIZE: usize = 1024 * 1024 * 1024;
 
+/// Restore the default SIGPIPE action so `bhc … | head` exits quietly.
+///
+/// Rust ignores SIGPIPE, which turns a closed pipe into a panic inside
+/// `println!`.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: installing the default disposition for SIGPIPE before any other
+    // thread starts; no handler code runs in this process.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 fn main() -> Result<()> {
+    reset_sigpipe();
     // Run on a thread with room for deep recursion; the main thread's stack
     // cannot be grown after the process starts.
     let child = std::thread::Builder::new()
@@ -252,6 +277,14 @@ fn real_main() -> Result<()> {
     let mut cli = Cli::parse();
     if let Some(target) = cli.target.take() {
         cli.target = Some(normalize_target(&target)?);
+    }
+    // Validate --dump-ir/--emit up front so a bad value fails before compiling.
+    dump_options(&cli)?;
+    if cli.edition.is_some() {
+        eprintln!("warning: --edition has no effect yet; all modules use bhc's defaults");
+    }
+    if cli.jobs.is_some() {
+        eprintln!("warning: -j/--jobs has no effect yet; modules compile sequentially");
     }
 
     // --numeric-version: print bare version and exit (used by hx-bhc for toolchain detection)
@@ -347,6 +380,35 @@ fn normalize_target(target: &str) -> Result<String> {
     Ok(normalized.to_string())
 }
 
+/// The IR dumps requested by `--dump-ir` and `--emit llvm-ir`.
+fn dump_options(cli: &Cli) -> Result<bhc_session::IrDumpOptions> {
+    let mut options = bhc_session::IrDumpOptions::default();
+    match cli.dump_ir {
+        None => {}
+        Some(IrStage::Ast) => options.dump_ast = true,
+        Some(IrStage::Hir) => options.dump_hir = true,
+        Some(IrStage::Core) => options.dump_core = true,
+        Some(IrStage::Llvm) => options.dump_llvm = true,
+        Some(IrStage::All) => {
+            options.dump_ast = true;
+            options.dump_hir = true;
+            options.dump_core = true;
+            options.dump_llvm = true;
+        }
+        Some(stage @ (IrStage::Tensor | IrStage::Loop)) => anyhow::bail!(
+            "--dump-ir={} is not implemented yet; native code is generated from Core \
+             (use --dump-ir=core or --kernel-report)",
+            format!("{stage:?}").to_lowercase()
+        ),
+    }
+    match cli.emit.as_deref() {
+        None | Some("ptx") => {}
+        Some("llvm-ir") => options.dump_llvm = true,
+        Some(other) => anyhow::bail!("unknown --emit format `{other}`; expected ptx or llvm-ir"),
+    }
+    Ok(options)
+}
+
 /// Generate shell completions
 fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
@@ -394,6 +456,7 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Build compiler with configuration
     let mut builder = CompilerBuilder::new()
         .profile(profile)
+        .dump_ir(dump_options(cli)?)
         .output_type(output_type)
         .opt_level(opt_level)
         .emit_kernel_report(cli.kernel_report)
@@ -520,7 +583,9 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     };
 
     // Build compiler with import paths and CPP defines
-    let mut builder = CompilerBuilder::new().profile(profile);
+    let mut builder = CompilerBuilder::new()
+        .profile(profile)
+        .dump_ir(dump_options(cli)?);
 
     for path in &cli.import_paths {
         builder = builder.import_path(
@@ -696,6 +761,7 @@ fn compile_modules_only(files: &[PathBuf], cli: &Cli) -> Result<()> {
 
     let mut builder = CompilerBuilder::new()
         .profile(profile)
+        .dump_ir(dump_options(cli)?)
         .compile_only(true)
         .output_type(bhc_session::OutputType::Object)
         .emit_kernel_report(cli.kernel_report)
@@ -780,6 +846,15 @@ fn start_repl(cli: &Cli) -> Result<()> {
 
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
+    if !bhci_exe.exists() {
+        // Release archives ship only `bhc` so far (#50).
+        anyhow::bail!(
+            "the REPL needs `bhci` next to `bhc` ({} is missing); release builds do not \
+             include it yet, so build it from source with `cargo build --release -p bhci` \
+             and copy target/release/bhci next to bhc",
+            bhci_exe.display()
+        );
+    }
 
     let mut args: Vec<String> = Vec::new();
     match cli.profile {
@@ -840,6 +915,20 @@ mod tests {
             normalize_target("x86_64-unknown-linux-gnu").unwrap(),
             "x86_64-unknown-linux-gnu"
         );
+    }
+
+    #[test]
+    fn dump_ir_and_emit_select_dumps() {
+        use clap::Parser;
+        let cli = super::Cli::parse_from(["bhc", "--dump-ir", "core", "M.hs"]);
+        let opts = super::dump_options(&cli).unwrap();
+        assert!(opts.dump_core && !opts.dump_llvm);
+        let cli = super::Cli::parse_from(["bhc", "--emit", "llvm-ir", "M.hs"]);
+        assert!(super::dump_options(&cli).unwrap().dump_llvm);
+        let cli = super::Cli::parse_from(["bhc", "--dump-ir", "tensor", "M.hs"]);
+        assert!(super::dump_options(&cli).is_err());
+        let cli = super::Cli::parse_from(["bhc", "--emit", "wat", "M.hs"]);
+        assert!(super::dump_options(&cli).is_err());
     }
 
     #[test]

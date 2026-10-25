@@ -1225,7 +1225,12 @@ impl Compiler {
         }
 
         match maybe_module {
-            Some(module) => Ok(module),
+            Some(module) => {
+                if self.session.options.dump_ir.dump_ast {
+                    Self::print_dump("AST", &unit.module_name, &format!("{module:#?}"));
+                }
+                Ok(module)
+            }
             None => {
                 // Surface each parse error's message and location — otherwise
                 // callers only see "parse error: N errors" with no clue what or
@@ -1244,6 +1249,37 @@ impl Compiler {
                 }
                 Err(CompileError::ParseError(diagnostics.len()))
             }
+        }
+    }
+
+    /// Print one IR dump (`--dump-ir`) to stdout under a banner.
+    ///
+    /// Each stage of a module is printed once, even when a compile path
+    /// parses or lowers it twice (dependency scan, then compilation). Write
+    /// errors are ignored, so piping a dump into `head` does not panic.
+    fn print_dump(stage: &str, module_name: &str, body: &str) {
+        use std::io::Write;
+        static PRINTED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+            std::sync::Mutex::new(None);
+        let key = format!("{stage}\0{module_name}");
+        let mut printed = PRINTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !printed.get_or_insert_with(Default::default).insert(key) {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "==================== {stage}: {module_name} ====================\n{}\n",
+            body.trim_end()
+        );
+    }
+
+    /// Dump the HIR of a module when `--dump-ir=hir` is set.
+    fn maybe_dump_hir(&self, hir: &HirModule) {
+        if self.session.options.dump_ir.dump_hir {
+            Self::print_dump("HIR", hir.name.as_str(), &format!("{hir:#?}"));
         }
     }
 
@@ -1318,6 +1354,7 @@ impl Compiler {
             return Err(bhc_lower::LowerError::Multiple(errors).into());
         }
 
+        self.maybe_dump_hir(&hir);
         Ok((hir, ctx))
     }
 
@@ -1705,6 +1742,9 @@ impl Compiler {
             }
         }
 
+        if self.session.options.dump_ir.dump_core {
+            Self::print_dump("Core", core.name.as_str(), &core.to_string());
+        }
         Ok(core)
     }
 
@@ -2061,6 +2101,10 @@ impl Compiler {
         module
             .optimize(&ctx, self.session.options.opt_level)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
+
+        if self.session.options.dump_ir.dump_llvm {
+            Self::print_dump("LLVM IR", module_name, &module.as_llvm_ir());
+        }
 
         // Write output
         match output_type {
@@ -3518,6 +3562,7 @@ impl Compiler {
             return Err(bhc_lower::LowerError::Multiple(errors).into());
         }
 
+        self.maybe_dump_hir(&hir);
         Ok((hir, ctx))
     }
 
@@ -4791,6 +4836,10 @@ impl Compiler {
         module
             .optimize(&ctx, self.session.options.opt_level)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
+
+        if self.session.options.dump_ir.dump_llvm {
+            Self::print_dump("LLVM IR", module_name, &module.as_llvm_ir());
+        }
 
         match output_type {
             CodegenOutputType::Object => {
@@ -6982,6 +7031,13 @@ impl CompilerBuilder {
     #[must_use]
     pub fn emit_kernel_report(mut self, enable: bool) -> Self {
         self.options.emit_kernel_report = enable;
+        self
+    }
+
+    /// Select which intermediate representations to print (`--dump-ir`).
+    #[must_use]
+    pub fn dump_ir(mut self, options: bhc_session::IrDumpOptions) -> Self {
+        self.options.dump_ir = options;
         self
     }
 

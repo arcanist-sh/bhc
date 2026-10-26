@@ -1641,12 +1641,65 @@ impl DerivingContext {
         for field in fields {
             // Append " "
             result = self.make_append(result, self.make_string(" ", span), span);
-            // Append show field
+            // Append the field shown at precedence 11
             let show_call = self.make_show_call(field, span);
-            result = self.make_append(result, show_call, span);
+            let shown = self.paren_if_compound(show_call, span);
+            result = self.make_append(result, shown, span);
         }
 
         result
+    }
+
+    /// `showsPrec 11` for a constructor field, from its plain `show`: wrap it
+    /// in parentheses when it is a constructor application or a negative
+    /// number (`Node Leaf 3 (Node Leaf 4 Leaf)`, `P (-1)`), i.e. when it has
+    /// a space or starts with `-`, unless it is already bracketed or quoted
+    /// (a tuple, list, string or char).
+    ///
+    /// `let s = shown in if (elem ' ' s || head s == '-') && not (elem (head s)
+    /// "([\"'") then "(" ++ s ++ ")" else s`
+    fn paren_if_compound(&mut self, shown: core::Expr, span: Span) -> core::Expr {
+        let s = self.fresh_var("shown", Ty::Error);
+        let builtin = |name: &str| {
+            core::Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                },
+                span,
+            )
+        };
+        let app2 = |f: core::Expr, a: core::Expr, b: core::Expr| {
+            core::Expr::App(
+                Box::new(core::Expr::App(Box::new(f), Box::new(a), span)),
+                Box::new(b),
+                span,
+            )
+        };
+        let app1 = |f: core::Expr, a: core::Expr| core::Expr::App(Box::new(f), Box::new(a), span);
+        let s_ref = || core::Expr::Var(s.clone(), span);
+        let chr = |c: char| core::Expr::Lit(core::Literal::Char(c), Ty::Error, span);
+        let head_s = || app1(builtin("head"), s_ref());
+        let has_space = app2(builtin("elem"), chr(' '), s_ref());
+        let negative = app2(builtin("=="), head_s(), chr('-'));
+        let bracketed = app2(builtin("elem"), head_s(), self.make_string("([\"'", span));
+        let needs = app2(
+            builtin("&&"),
+            app2(builtin("||"), has_space, negative),
+            app1(builtin("not"), bracketed),
+        );
+        let parened = self.make_append(
+            self.make_string("(", span),
+            self.make_append(s_ref(), self.make_string(")", span), span),
+            span,
+        );
+        let cond = self.make_if(needs, parened, s_ref(), span);
+        core::Expr::Let(
+            Box::new(Bind::NonRec(s, Box::new(shown))),
+            Box::new(cond),
+            span,
+        )
     }
 
     /// Make a call to show for a variable.
@@ -2178,7 +2231,7 @@ impl DerivingContext {
             &format!("$derived_fmap_{}", data_def.name.as_str()),
             Ty::Error,
         );
-        let fmap_body = self.generate_fmap_body(data_def, type_param, span);
+        let fmap_body = self.generate_fmap_body(data_def, type_param, &fmap_var, span);
 
         let mut methods = FxHashMap::default();
         methods.insert(
@@ -2197,7 +2250,8 @@ impl DerivingContext {
 
         Some(DerivedInstance {
             instance,
-            bindings: vec![Bind::NonRec(fmap_var, Box::new(fmap_body))],
+            // Recursive: a field of the type itself maps through `fmap_var`.
+            bindings: vec![Bind::Rec(vec![(fmap_var, Box::new(fmap_body))])],
         })
     }
 
@@ -2210,6 +2264,7 @@ impl DerivingContext {
         &mut self,
         data_def: &DataDef,
         type_param: &TyVar,
+        self_fmap: &Var,
         span: Span,
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
@@ -2226,22 +2281,37 @@ impl DerivingContext {
                     ConFields::Named(fields) => fields.iter().map(|f| f.ty.clone()).collect(),
                 };
 
-                // Create binders for each field
+                // Create binders for each field. A field that holds the
+                // parameter inside another functor (`[a]`, `Maybe a`) is
+                // typed, so the `fmap` over it dispatches on that container.
                 let binders: Vec<Var> = field_types
                     .iter()
                     .enumerate()
-                    .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
+                    .map(|(i, ty)| {
+                        let typed = !matches!(ty, Ty::Var(v) if v == type_param)
+                            && self.type_contains_param(ty, type_param);
+                        let ty = if typed { ty.clone() } else { Ty::Error };
+                        self.fresh_var(&format!("a{i}"), ty)
+                    })
                     .collect();
 
-                // Build the result: apply f to fields that contain the type param
+                // Build the result: `f` on a field of the parameter type, the
+                // derived `fmap` itself on a field of this type (`Tree a` in
+                // `Node (Tree a) a (Tree a)`), `fmap f` on any other field that
+                // contains the parameter. Applying `f` to the recursive fields
+                // handed it whole subtrees.
                 let mut result_args: Vec<core::Expr> = vec![];
                 for (i, field_ty) in field_types.iter().enumerate() {
                     let field_var = &binders[i];
+                    let field_ref = core::Expr::Var(field_var.clone(), span);
                     if self.type_contains_param(field_ty, type_param) {
-                        // Apply f to this field
-                        let mapped = core::Expr::App(
-                            Box::new(core::Expr::Var(f_var.clone(), span)),
-                            Box::new(core::Expr::Var(field_var.clone(), span)),
+                        let mapped = self.map_functor_field(
+                            field_ty,
+                            field_ref,
+                            type_param,
+                            data_def.name,
+                            &f_var,
+                            self_fmap,
                             span,
                         );
                         result_args.push(mapped);
@@ -2272,6 +2342,66 @@ impl DerivingContext {
         let case_expr = self.make_case(core::Expr::Var(x_var.clone(), span), alts, span);
         let inner = core::Expr::Lam(x_var, Box::new(case_expr), span);
         core::Expr::Lam(f_var, Box::new(inner), span)
+    }
+
+    /// Map `f` over one field of a derived `fmap`, by the field's type:
+    /// the parameter itself is `f x`, this type (`Tree a`) is the derived
+    /// `fmap` applied recursively, and a functor around either (`[Rose a]`,
+    /// `Maybe a`) is `fmap (\\y -> <map y>) x` with `y` typed at the element.
+    #[allow(clippy::too_many_arguments)]
+    fn map_functor_field(
+        &mut self,
+        field_ty: &Ty,
+        x: core::Expr,
+        type_param: &TyVar,
+        self_name: Symbol,
+        f_var: &Var,
+        self_fmap: &Var,
+        span: Span,
+    ) -> core::Expr {
+        let f_ref = core::Expr::Var(f_var.clone(), span);
+        if matches!(field_ty, Ty::Var(v) if v == type_param) {
+            return core::Expr::App(Box::new(f_ref), Box::new(x), span);
+        }
+        let mut head = field_ty;
+        while let Ty::App(h, _) = head {
+            head = h;
+        }
+        if matches!(head, Ty::Con(c) if c.name == self_name) {
+            return core::Expr::App(
+                Box::new(core::Expr::App(
+                    Box::new(core::Expr::Var(self_fmap.clone(), span)),
+                    Box::new(f_ref),
+                    span,
+                )),
+                Box::new(x),
+                span,
+            );
+        }
+        let inner = match field_ty {
+            Ty::List(elem) => Some(elem.as_ref().clone()),
+            Ty::App(_, last) => Some(last.as_ref().clone()),
+            _ => None,
+        };
+        match inner {
+            Some(inner) if self.type_contains_param(&inner, type_param) => {
+                let y = self.fresh_var("y", inner.clone());
+                let body = self.map_functor_field(
+                    &inner,
+                    core::Expr::Var(y.clone(), span),
+                    type_param,
+                    self_name,
+                    f_var,
+                    self_fmap,
+                    span,
+                );
+                let mapper = core::Expr::Lam(y, Box::new(body), span);
+                self.make_fmap(mapper, x, span)
+            }
+            // A shape this does not know (a function, a tuple): `fmap f`,
+            // as before.
+            _ => self.make_fmap(f_ref, x, span),
+        }
     }
 
     /// Derive Functor for a newtype.

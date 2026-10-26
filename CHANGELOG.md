@@ -8,6 +8,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Derived `Show` parenthesizes a field that is a constructor application or
+  a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
+  Leaf)`, `P (-1) 2`.
+- Derived `Functor` maps through recursive and nested fields: `fmap` on
+  `Node (Tree a) a (Tree a)` or `Rose a [Rose a]` applied `f` to whole
+  subtrees and crashed; it now recurses, and maps inside `[a]`/`Maybe a`.
+- `print` of a derived-`Show` value returned by a call
+  (`print (fmap (+1) (Pair 1 2))`) shows it; it printed an address (#32).
 - `fmap`/`<$>` at `Either` and `<*>` at `Maybe` and `Either` work
   (`(+) <$> Just 1 <*> Just 2`, `fmap (+1) (Right 1)`); they ran the IO
   path, crashing or returning `Just 0`/`Right 0` (#23).

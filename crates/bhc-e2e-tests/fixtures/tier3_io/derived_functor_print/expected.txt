@@ -1,0 +1,6 @@
+Pair 2 3
+Box 2
+5
+Node Leaf 6 (Node Leaf 8 Leaf)
+Rose 2 [Rose 3 [],Rose 4 []]
+Opt (Just 2) [3,4]

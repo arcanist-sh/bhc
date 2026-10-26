@@ -16435,7 +16435,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 || self.is_either_type(&a).is_some()
                 || self.is_tuple_type(&a).is_some()
                 || Self::tuple_n_types(&a).is_some();
-            if Self::is_ground_ty(&a) && (is_ordering || compound) {
+            // A user type with a derived Show (`print (fmap f (Pair 1 2))`:
+            // the expression's syntax does not name the type).
+            let derived_adt = {
+                let mut head = &a;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                matches!(head, Ty::Con(c) if self.derived_show_fns.contains_key(c.name.as_str()))
+            };
+            if Self::is_ground_ty(&a) && (is_ordering || compound || derived_adt) {
                 let val = self
                     .lower_expr(val_expr)?
                     .ok_or_else(|| CodegenError::Internal("print: no value".to_string()))?;

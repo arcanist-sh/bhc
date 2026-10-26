@@ -8,6 +8,9 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `fmap`/`<$>` at `Either` and `<*>` at `Maybe` and `Either` work
+  (`(+) <$> Just 1 <*> Just 2`, `fmap (+1) (Right 1)`); they ran the IO
+  path, crashing or returning `Just 0`/`Right 0` (#23).
 - `sum`, `product`, `foldl`/`foldr` and lambdas over `Integer` and `Double`
   lists compute in bignums and doubles (#18, #22). The type checker tied a
   fold's element type to nothing, so it defaulted to `Int`; `sum`/`product`

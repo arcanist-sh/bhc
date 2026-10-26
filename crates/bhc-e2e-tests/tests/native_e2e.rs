@@ -1459,6 +1459,11 @@ fn test_tier3_instance_builtin_alias() {
 }
 
 #[test]
+fn test_tier3_maybe_either_applicative() {
+    run_native_test("tier3_io/maybe_either_applicative", Profile::Default);
+}
+
+#[test]
 fn test_tier2_numeric_folds() {
     run_native_test("tier2_functions/numeric_folds", Profile::Default);
 }

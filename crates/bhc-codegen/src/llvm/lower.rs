@@ -17031,6 +17031,213 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .is_some()
     }
 
+    fn functor_result_is_either(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Fun(_, r) = t {
+            t = r;
+        }
+        self.is_either_type(t).is_some()
+    }
+
+    /// Whether `expr` is an `Either` value: by its type, or as a `Left`/
+    /// `Right` constructor application.
+    fn container_looks_like_either(&self, expr: &Expr) -> bool {
+        if self.is_either_type(&expr.ty()).is_some() {
+            return true;
+        }
+        let mut head = expr;
+        while let Expr::App(f, _, _) = head {
+            head = f.as_ref();
+        }
+        matches!(head, Expr::Var(v, _) if matches!(v.name.as_str(), "Left" | "Right"))
+    }
+
+    /// `fmap f x` at `Either e`: `case x of Left e -> Left e; Right v -> Right (f v)`.
+    fn lower_fmap_either(
+        &mut self,
+        func_expr: &Expr,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let span = bhc_span::Span::default();
+        let either_con = bhc_types::TyCon::new(
+            Symbol::intern("Either"),
+            bhc_types::Kind::Arrow(
+                Box::new(bhc_types::Kind::Star),
+                Box::new(bhc_types::Kind::Arrow(
+                    Box::new(bhc_types::Kind::Star),
+                    Box::new(bhc_types::Kind::Star),
+                )),
+            ),
+        );
+        let con = |name: &str, tag: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: either_con.clone(),
+            tag,
+            arity: 1,
+        };
+        let con_var = |name: &str, id: usize| {
+            Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(id),
+                    ty: Ty::Error,
+                },
+                span,
+            )
+        };
+        let left_payload = Var {
+            name: Symbol::intern("$either_left"),
+            id: VarId::new(usize::MAX - 40),
+            ty: Ty::Error,
+        };
+        let right_payload = Var {
+            name: Symbol::intern("$either_right"),
+            id: VarId::new(usize::MAX - 41),
+            ty: Ty::Error,
+        };
+        // The function as a closure VALUE, applied inside the case: applying
+        // the expression itself there would make `(+)` a one-argument
+        // builtin call, which is a stub.
+        let func_val = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("fmap: function has no value".to_string()))?;
+        let func_var = Var {
+            name: Symbol::intern("$either_fn"),
+            id: VarId::new(usize::MAX - 44),
+            ty: Ty::Error,
+        };
+        let saved_fn = self.env.insert(func_var.id, func_val);
+        let func_expr = &Expr::Var(func_var.clone(), span);
+        let case = Expr::Case(
+            Box::new(action_expr.clone()),
+            vec![
+                Alt {
+                    con: AltCon::DataCon(con("Left", 0)),
+                    binders: vec![left_payload.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_var("Left", usize::MAX - 42)),
+                        Box::new(Expr::Var(left_payload, span)),
+                        span,
+                    ),
+                },
+                Alt {
+                    con: AltCon::DataCon(con("Right", 1)),
+                    binders: vec![right_payload.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_var("Right", usize::MAX - 43)),
+                        Box::new(Expr::App(
+                            Box::new(func_expr.clone()),
+                            Box::new(Expr::Var(right_payload, span)),
+                            span,
+                        )),
+                        span,
+                    ),
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        let result = self.lower_expr(&case);
+        match saved_fn {
+            Some(v) => {
+                self.env.insert(func_var.id, v);
+            }
+            None => {
+                self.env.remove(&func_var.id);
+            }
+        }
+        result
+    }
+
+    /// `f <*> x` at `Maybe` (`either` false) or `Either e` (`either` true):
+    /// `case f of fail -> fail; ok g -> case x of fail -> fail; ok v -> ok (g v)`,
+    /// where a `Left` carries its payload through.
+    fn lower_ap_wrapped(
+        &mut self,
+        func_expr: &Expr,
+        val_expr: &Expr,
+        either: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let span = bhc_span::Span::default();
+        let (ty_name, fail_name, ok_name, fail_arity) = if either {
+            ("Either", "Left", "Right", 1)
+        } else {
+            ("Maybe", "Nothing", "Just", 0)
+        };
+        let ty_con = bhc_types::TyCon::new(Symbol::intern(ty_name), bhc_types::Kind::Star);
+        let data_con = |name: &str, tag: u32, arity: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: ty_con.clone(),
+            tag,
+            arity,
+        };
+        let var = |name: &str, id: usize| Var {
+            name: Symbol::intern(name),
+            id: VarId::new(id),
+            ty: Ty::Error,
+        };
+        let con_expr = |name: &str, id: usize| Expr::Var(var(name, id), span);
+        // The failing alternative rebuilds `Nothing` / `Left e`.
+        let fail_alt = |payload_id: usize, con_id: usize| {
+            if fail_arity == 0 {
+                Alt {
+                    con: AltCon::DataCon(data_con(fail_name, 0, 0)),
+                    binders: vec![],
+                    rhs: con_expr(fail_name, con_id),
+                }
+            } else {
+                let e = var("$ap_fail", payload_id);
+                Alt {
+                    con: AltCon::DataCon(data_con(fail_name, 0, 1)),
+                    binders: vec![e.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_expr(fail_name, con_id)),
+                        Box::new(Expr::Var(e, span)),
+                        span,
+                    ),
+                }
+            }
+        };
+        let g = var("$ap_fn", usize::MAX - 50);
+        let v = var("$ap_val", usize::MAX - 51);
+        let applied = Expr::App(
+            Box::new(con_expr(ok_name, usize::MAX - 52)),
+            Box::new(Expr::App(
+                Box::new(Expr::Var(g.clone(), span)),
+                Box::new(Expr::Var(v.clone(), span)),
+                span,
+            )),
+            span,
+        );
+        let inner = Expr::Case(
+            Box::new(val_expr.clone()),
+            vec![
+                fail_alt(usize::MAX - 53, usize::MAX - 54),
+                Alt {
+                    con: AltCon::DataCon(data_con(ok_name, 1, 1)),
+                    binders: vec![v],
+                    rhs: applied,
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        let outer = Expr::Case(
+            Box::new(func_expr.clone()),
+            vec![
+                fail_alt(usize::MAX - 55, usize::MAX - 56),
+                Alt {
+                    con: AltCon::DataCon(data_con(ok_name, 1, 1)),
+                    binders: vec![g],
+                    rhs: inner,
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        self.lower_expr(&outer)
+    }
+
     fn functor_result_is_list(&self) -> bool {
         fn result_of(t: &Ty) -> &Ty {
             match t {
@@ -29288,6 +29495,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             return self.lower_fmap_maybe(func_expr, action_expr);
         }
 
+        // `Either e`: map the `Right` payload, pass a `Left` through. With no
+        // case for it, `fmap f (Right x)` ran the IO path and crashed.
+        if self.functor_result_is_either() || self.container_looks_like_either(action_expr) {
+            return self.lower_fmap_either(func_expr, action_expr);
+        }
+
         // Check if action_expr looks like a List value.
         if self.functor_result_is_list()
             || self.expr_looks_like_list(action_expr)
@@ -29674,6 +29887,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // When neither operand carries a type at all — a GND instance method
         // `$instance_<*>_App = \f x -> f <*> x` over untyped lambda parameters
         // — the ambient layer is the instance's own, so it decides.
+        // `Maybe` / `Either e`: apply inside the success constructor, pass a
+        // `Nothing`/`Left` through. Without these `(+) <$> Just 1 <*> Just 2`
+        // called the `Just` as a closure.
+        if self.functor_result_is_maybe()
+            || self.container_looks_like_maybe(val_expr)
+            || self.container_looks_like_maybe(func_expr)
+        {
+            return self.lower_ap_wrapped(func_expr, val_expr, false);
+        }
+        if self.functor_result_is_either()
+            || self.container_looks_like_either(val_expr)
+            || self.container_looks_like_either(func_expr)
+        {
+            return self.lower_ap_wrapped(func_expr, val_expr, true);
+        }
         let untyped = matches!(val_expr.ty(), Ty::Error) && matches!(func_expr.ty(), Ty::Error);
         let layer = self
             .transformer_layer_of_ty(&val_expr.ty())

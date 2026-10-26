@@ -1116,6 +1116,12 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 v.ty = resolved;
             }
         }
+        // `readLn :: IO a` likewise parses at the type it is used at.
+        if v.name.as_str() == "readLn" && matches!(v.ty, Ty::Error) {
+            if let Some(resolved @ Ty::App(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                v.ty = resolved;
+            }
+        }
     }
     Ok(expr)
 }

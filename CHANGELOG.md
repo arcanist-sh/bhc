@@ -8,6 +8,15 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `readLn` works in native code (it had no implementation and returned an
+  address): it reads a line and parses it at the type it is used at, as an
+  `Int` when that type is left open.
+- `show`/`print` of tuples with 3 or more components, of tuples built inside
+  a lambda (`map (\x -> (x, True)) xs`), of `Char` results (`chr 66`,
+  `maximum "hello"`, `mapM_ print "hi"`) and of negative numbers under a
+  constructor (`Just (-3)`) match GHC; they printed numbers, addresses, or
+  crashed (#24). An `Ordering` returned by a class method no longer prints
+  as an empty line.
 - `show` passed as a function (`map show [True, False]`) shows each element at
   its type; it showed every element as an `Int`, printing addresses.
 - `show` on strings and characters escapes like Haskell, not Rust: `"it's"`

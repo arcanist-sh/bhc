@@ -2362,6 +2362,8 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///   10=List, 11=Maybe, 12=Tuple2, 13=Either
 ///   14=Adt (user type with derived Show): `child1` is repurposed to hold the
 ///      value's derived-show function pointer rather than a child descriptor.
+///   15=Tuple of 3+ components: `child1` points to an array of component
+///      descriptors and `child2` holds the component count (not a pointer).
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2448,6 +2450,18 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Either: recurse with child1=left, child2=right descriptors
                 show_either_recursive(ptr, &*desc.child1, &*desc.child2)
             }
+            15 => {
+                // N-tuple: fields at 8, 16, … after the tag word.
+                let count = desc.child2 as usize;
+                let descs = desc.child1 as *const *const ShowTypeDesc;
+                let parts: Vec<String> = (0..count)
+                    .map(|i| {
+                        let field = *(ptr.add(8 * (i + 1)) as *const *const u8);
+                        show_any(field, &**descs.add(i))
+                    })
+                    .collect();
+                format!("({})", parts.join(","))
+            }
             14 => {
                 // User-defined ADT: child1 is repurposed to hold the value's
                 // derived `Show` function pointer (not a child descriptor).
@@ -2472,6 +2486,11 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
         // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
         // precedence, a nullary one ("Red") does not — detect via a space.
         let adt_needs_parens = desc.tag == 14 && s.contains(' ') && !s.starts_with('(');
+        // A negative number is shown in parentheses above precedence 6, as
+        // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
+        if prec > 6 && matches!(desc.tag, 0..=2) && s.starts_with('-') {
+            return format!("({})", s);
+        }
         if prec > 10 && (is_constructor_app(ptr, desc) || adt_needs_parens) {
             format!("({})", s)
         } else {

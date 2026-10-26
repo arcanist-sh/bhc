@@ -6695,6 +6695,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "putChar" => self.lower_builtin_put_char(args[0]),
             "print" => self.lower_builtin_print(args[0]),
             "getLine" => self.lower_builtin_get_line(),
+            "readLn" => self.lower_builtin_read_ln(),
 
             // Monadic operations — dispatch based on transformer stack.
             // Detects the operation's native layer and inserts lifts if needed.
@@ -16363,10 +16364,59 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
         // An `Integer` argument per the type checker (recorded on this `print`
         // by hir-to-core): a field selector's result carries no type here.
+        // Likewise a `Char` or `Bool` argument: `chr 66` is typed `Int` in
+        // Core and printed `66`. Both are word-sized, so only the printing
+        // changes, never the value's representation.
         let expr_ty = match &self.current_builtin_ty {
-            Ty::Fun(a, _) if self.is_integer_type(a) => a.as_ref().clone(),
+            Ty::Fun(a, _)
+                if self.is_integer_type(a) || self.is_char_type(a) || self.is_bool_type(a) =>
+            {
+                a.as_ref().clone()
+            }
             _ => expr_ty,
         };
+
+        // An `Ordering` or compound argument per the type checker prints
+        // through the descriptor show, whose descriptor `print_via_show_desc`
+        // builds from that same type: a class method returning `Ordering`
+        // printed an empty line, its result untyped in Core.
+        if let Ty::Fun(a, _) = &self.current_builtin_ty {
+            let a = a.as_ref().clone();
+            let is_ordering = matches!(&a, Ty::Con(c) if c.name.as_str() == "Ordering");
+            let compound = self.is_list_type(&a) && !self.is_string_type(&a)
+                || self.is_maybe_type(&a).is_some()
+                || self.is_either_type(&a).is_some()
+                || self.is_tuple_type(&a).is_some()
+                || Self::tuple_n_types(&a).is_some();
+            if Self::is_ground_ty(&a) && (is_ordering || compound) {
+                let val = self
+                    .lower_expr(val_expr)?
+                    .ok_or_else(|| CodegenError::Internal("print: no value".to_string()))?;
+                let p = self.value_to_ptr(val)?;
+                self.print_via_show_desc(p, val_expr)?;
+                return Ok(Some(self.type_mapper().ptr_type().const_null().into()));
+            }
+        }
+
+        // A Char prints as its `show` (`'B'`), not as its code point:
+        // `putStrLn (show x)` with `show` typed at Char.
+        if self.is_char_type(&expr_ty) {
+            let span = bhc_span::Span::default();
+            let string_ty = Ty::List(Box::new(expr_ty.clone()));
+            let show_var = Var {
+                name: Symbol::intern("show"),
+                id: VarId::new(usize::MAX - 31),
+                ty: Ty::fun(expr_ty.clone(), string_ty),
+            };
+            let shown = Expr::App(
+                Box::new(Expr::Var(show_var, span)),
+                Box::new(val_expr.clone()),
+                span,
+            );
+            // Print in place, like the rest of `print` (under the closure IO
+            // model a lowered `putStrLn` call would only build the action).
+            return self.lower_builtin_put_str_ln(&shown);
+        }
 
         let val = self
             .lower_expr(val_expr)?
@@ -16634,7 +16684,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         p: inkwell::values::PointerValue<'ctx>,
         val_expr: &Expr,
     ) -> CodegenResult<()> {
-        let desc = self.build_show_descriptor(val_expr);
+        // The type checker's ground argument type, when hir-to-core stamped one
+        // on this `print`, describes values the expression's syntax cannot:
+        // `print (map (\x -> (x, True)) xs)` showed the Bools as addresses.
+        let stamped = match &self.current_builtin_ty {
+            Ty::Fun(a, _) if Self::is_ground_ty(a) => Some(a.as_ref().clone()),
+            _ => None,
+        };
+        let desc = match stamped.and_then(|t| self.descriptor_from_ty(&t)) {
+            Some(d) => d,
+            None => self.build_show_descriptor(val_expr),
+        };
         let show_fn = *self
             .functions
             .get(&VarId::new(1000099))
@@ -17591,6 +17651,72 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Whether a type is fully concrete (no type variables or unknowns).
+    fn is_ground_ty(t: &Ty) -> bool {
+        match t {
+            Ty::Var(_) | Ty::Error | Ty::Forall(..) => false,
+            Ty::Con(_) => true,
+            Ty::App(f, a) | Ty::Fun(f, a) => Self::is_ground_ty(f) && Self::is_ground_ty(a),
+            Ty::List(a) => Self::is_ground_ty(a),
+            Ty::Tuple(ts) => ts.iter().all(Self::is_ground_ty),
+            _ => false,
+        }
+    }
+
+    /// The component types of a tuple type of 3 or more components.
+    fn tuple_n_types(ty: &Ty) -> Option<Vec<Ty>> {
+        match ty {
+            Ty::Tuple(elems) if elems.len() >= 3 => Some(elems.clone()),
+            Ty::Forall(_, body) => Self::tuple_n_types(body),
+            Ty::App(..) => {
+                let mut args = Vec::new();
+                let mut head = ty;
+                while let Ty::App(f, a) = head {
+                    args.push(a.as_ref().clone());
+                    head = f.as_ref();
+                }
+                args.reverse();
+                match head {
+                    Ty::Con(c)
+                        if Self::tuple_con_arity(c.name.as_str()) == Some(args.len())
+                            && args.len() >= 3 =>
+                    {
+                        Some(args)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The arity of a tuple constructor name (`(,,)` is 3), if it is one.
+    fn tuple_con_arity(name: &str) -> Option<usize> {
+        let commas = name.strip_prefix('(')?.strip_suffix(')')?;
+        (!commas.is_empty() && commas.chars().all(|c| c == ',')).then(|| commas.len() + 1)
+    }
+
+    /// The components of a saturated tuple constructor application of 3 or
+    /// more components (`(,,) a b c`).
+    fn tuple_n_con_args(expr: &Expr) -> Option<Vec<Expr>> {
+        let mut args = Vec::new();
+        let mut head = expr;
+        while let Expr::App(f, a, _) = head {
+            args.push(a.as_ref().clone());
+            head = f.as_ref();
+        }
+        args.reverse();
+        match head {
+            Expr::Var(v, _)
+                if args.len() >= 3
+                    && Self::tuple_con_arity(v.name.as_str()) == Some(args.len()) =>
+            {
+                Some(args)
+            }
+            _ => None,
+        }
+    }
+
     /// Check if a type is unit ().
     fn is_unit_type(&self, ty: &Ty) -> bool {
         match ty {
@@ -18116,6 +18242,59 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // The RTS returns a C string; a Haskell String is a [Char] list.
         let char_list = self.cstring_to_char_list(result.into_pointer_value())?;
         Ok(Some(char_list.into()))
+    }
+
+    /// Lower `readLn`: read a line, then `read` it at the action's result
+    /// type (from `current_builtin_ty`, `IO a`), or as an `Int` when that is
+    /// unresolved. Native code had no `readLn` at all.
+    fn lower_builtin_read_ln(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result_ty = match &self.current_builtin_ty {
+            Ty::App(io, a)
+                if matches!(io.as_ref(), Ty::Con(c) if c.name.as_str() == "IO")
+                    && Self::is_ground_ty(a) =>
+            {
+                a.as_ref().clone()
+            }
+            _ => Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Int"),
+                bhc_types::Kind::Star,
+            )),
+        };
+        let line = self
+            .lower_builtin_get_line()?
+            .ok_or_else(|| CodegenError::Internal("readLn: no line".to_string()))?;
+        let span = bhc_span::Span::default();
+        let char_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Char"),
+            bhc_types::Kind::Star,
+        ));
+        let string_ty = Ty::List(Box::new(char_ty));
+        let line_var = Var {
+            name: Symbol::intern("$readln_line"),
+            id: VarId::new(usize::MAX - 33),
+            ty: string_ty.clone(),
+        };
+        let read_var = Var {
+            name: Symbol::intern("read"),
+            id: VarId::new(usize::MAX - 34),
+            ty: Ty::fun(string_ty, result_ty),
+        };
+        let call = Expr::App(
+            Box::new(Expr::Var(read_var, span)),
+            Box::new(Expr::Var(line_var.clone(), span)),
+            span,
+        );
+        let saved = self.env.insert(line_var.id, line);
+        let result = self.lower_expr(&call);
+        match saved {
+            Some(v) => {
+                self.env.insert(line_var.id, v);
+            }
+            None => {
+                self.env.remove(&line_var.id);
+            }
+        }
+        result
     }
 
     /// Lower `>>=` (bind) for monads.
@@ -28021,7 +28200,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::EitherOf,
                 );
             }
-            if self.is_tuple_type(&ty).is_some() {
+            if self.is_tuple_type(&ty).is_some() || Self::tuple_n_types(&ty).is_some() {
                 return self.lower_builtin_show_typed(
                     expr,
                     1000096,
@@ -28142,6 +28321,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Infer the show coercion from the expression structure when type info is unavailable.
     fn infer_show_from_expr(&self, expr: &Expr) -> Option<(ShowCoerce, usize, &'static str)> {
+        // A tuple of 3 or more components shows through the descriptor path
+        // that 2-tuples use (`build_show_descriptor` makes it an N-tuple).
+        if Self::tuple_n_con_args(expr).is_some() || Self::tuple_n_types(&expr.ty()).is_some() {
+            return Some((ShowCoerce::Tuple2Of, 1000096, "show_tuple2"));
+        }
         match expr {
             // String literal
             Expr::Lit(Literal::String(_), _, _) => {
@@ -28518,10 +28702,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::MaybeOf
                 } else if self.is_either_type(&ty).is_some() {
                     ShowCoerce::EitherOf
-                } else if self.is_tuple_type(&ty).is_some() {
+                } else if self.is_tuple_type(&ty).is_some() || Self::tuple_n_types(&ty).is_some() {
                     ShowCoerce::Tuple2Of
                 } else if self.is_unit_type(&ty) {
                     ShowCoerce::Unit
+                } else if matches!(&ty, Ty::Con(c) if c.name.as_str() == "Ordering") {
+                    ShowCoerce::Ordering
                 } else {
                     ShowCoerce::Int
                 }
@@ -28561,6 +28747,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.create_show_desc_global(11, Some(elem_desc), None)
             }
             ShowCoerce::Tuple2Of => {
+                if let Some(descs) = self.build_tuple_n_elem_descriptors(expr) {
+                    return self.create_tuple_n_show_desc(&descs);
+                }
                 let (fst_d, snd_d) = self.build_tuple_elem_descriptors(expr);
                 self.create_show_desc_global(12, Some(fst_d), Some(snd_d))
             }
@@ -28665,6 +28854,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Ty::Var(_) | Ty::Error => None,
             _ => Some(self.build_show_descriptor(&Self::ty_only_expr(ty.clone()))),
         }
+    }
+
+    /// Component descriptors of a tuple of 3 or more components, from its
+    /// constructor application or else its type.
+    fn build_tuple_n_elem_descriptors(&mut self, expr: &Expr) -> Option<Vec<PointerValue<'ctx>>> {
+        if let Some(args) = Self::tuple_n_con_args(expr) {
+            return Some(args.iter().map(|a| self.build_show_descriptor(a)).collect());
+        }
+        let tys = Self::tuple_n_types(&expr.ty())?;
+        Some(
+            tys.iter()
+                .map(|t| {
+                    self.descriptor_from_ty(t)
+                        .unwrap_or_else(|| self.get_primitive_show_desc(0))
+                })
+                .collect(),
+        )
+    }
+
+    /// A tuple descriptor (tag 15): `child1` points to an array of the
+    /// component descriptors and `child2` holds their count.
+    fn create_tuple_n_show_desc(&mut self, descs: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let array_type = ptr_type.array_type(descs.len() as u32);
+        let array_val = ptr_type.const_array(descs);
+        let name = format!("show_desc_tuple_{}", self.show_desc_counter);
+        self.show_desc_counter += 1;
+        let global = self
+            .module
+            .llvm_module()
+            .add_global(array_type, None, &name);
+        global.set_initializer(&array_val);
+        global.set_constant(true);
+        let count = self
+            .type_mapper()
+            .i64_type()
+            .const_int(descs.len() as u64, false)
+            .const_to_pointer(ptr_type);
+        self.create_show_desc_global(15, Some(global.as_pointer_value()), Some(count))
     }
 
     /// Build descriptors for the fst/snd types of a tuple expression.
@@ -49509,6 +49737,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         {
                             return Ok(Some(self.build_io_action(expr)?.into()));
                         }
+                        if name == "readLn" {
+                            // `readLn` parses at the type it is used at.
+                            let saved =
+                                std::mem::replace(&mut self.current_builtin_ty, var.ty.clone());
+                            let result = self.lower_builtin(name, &[]);
+                            self.current_builtin_ty = saved;
+                            return result;
+                        }
                         self.lower_builtin(name, &[])
                     } else if let Some(lam) = Self::typed_show_lambda(name, var) {
                         // `map show xs`: a generic wrapper closure has no
@@ -50104,11 +50340,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(stub_fn)
     }
 
-    /// `\x -> show x` for a bare `show` whose occurrence type is a ground
-    /// `a -> String`, with `x` typed `a`, so the applied `show` dispatches on
-    /// the element type instead of guessing from the value.
+    /// `\x -> show x` (or `print x`) for a bare `show`/`print` whose
+    /// occurrence type has a ground argument `a`, with `x` typed `a`, so the
+    /// applied builtin dispatches on that type instead of guessing from the
+    /// value.
     fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
-        if name != "show" {
+        // `print` as a value (`mapM_ print "hi"`) has the same problem.
+        if name != "show" && name != "print" {
             return None;
         }
         let Ty::Fun(arg_ty, _) = &var.ty else {
@@ -61076,6 +61314,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "putChar" => Some(1),
         "print" => Some(1),
         "getLine" => Some(0),
+        "readLn" => Some(0),
 
         // Monadic operations
         ">>=" => Some(2),

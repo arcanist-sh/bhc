@@ -1444,6 +1444,11 @@ fn test_tier2_prelude_pi() {
 }
 
 #[test]
+fn test_tier3_stdin_readln() {
+    run_native_test("tier3_io/stdin_readln", Profile::Default);
+}
+
+#[test]
 fn test_tier3_getline_env() {
     run_native_test("tier3_io/getline_env", Profile::Default);
 }
@@ -1451,6 +1456,11 @@ fn test_tier3_getline_env() {
 #[test]
 fn test_tier3_instance_builtin_alias() {
     run_native_test("tier3_io/instance_builtin_alias", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_tuples_chars() {
+    run_native_test("tier2_functions/show_tuples_chars", Profile::Default);
 }
 
 #[test]

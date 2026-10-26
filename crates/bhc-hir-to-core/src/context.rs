@@ -2968,6 +2968,13 @@ impl LowerContext {
         None
     }
 
+    /// Whether the class registry has an instance of `class_name` at `ty`.
+    pub fn has_registered_instance(&self, class_name: Symbol, ty: &Ty) -> bool {
+        self.class_registry
+            .resolve_instance(class_name, &self.expand_type_aliases(ty))
+            .is_some()
+    }
+
     /// Resolve a class method call at a concrete type.
     ///
     /// When a class method (like `(+)` from `Num`) is called at a concrete type
@@ -2976,13 +2983,6 @@ impl LowerContext {
     /// 2. Select the method from the dictionary
     ///
     /// Returns the method selection expression with any necessary let bindings.
-    /// Whether the class registry has an instance of `class_name` at `ty`.
-    pub fn has_registered_instance(&self, class_name: Symbol, ty: &Ty) -> bool {
-        self.class_registry
-            .resolve_instance(class_name, &self.expand_type_aliases(ty))
-            .is_some()
-    }
-
     pub fn resolve_method_at_concrete_type(
         &mut self,
         method_name: Symbol,
@@ -3857,10 +3857,55 @@ impl LowerContext {
         {
             return None;
         }
+        self.derive_instance_from_target(deriv_ctx, newtype_def, clause, *wrapped, init)
+    }
+
+    /// `deriving C via V` on a newtype (#35): `C`'s methods at the newtype are
+    /// `V`'s, since the newtype and `V` share a representation. Only for a
+    /// class over types of kind `*` (`Semigroup`, `Monoid`, `Num`, …): the
+    /// instance head is the newtype applied to all its parameters.
+    fn derive_newtype_via_type(
+        &mut self,
+        deriv_ctx: &mut DerivingContext,
+        newtype_def: &bhc_hir::NewtypeDef,
+        clause: &bhc_hir::DerivingClause,
+        via: &Ty,
+    ) -> Option<DerivedInstance> {
+        if matches!(
+            clause.class.as_str(),
+            "Functor"
+                | "Applicative"
+                | "Monad"
+                | "Foldable"
+                | "Traversable"
+                | "Alternative"
+                | "MonadPlus"
+        ) || has_type_variables(via)
+            || clause.args.iter().any(has_type_variables)
+        {
+            return None;
+        }
+        let via = self.expand_type_aliases(via);
+        self.derive_instance_from_target(deriv_ctx, newtype_def, clause, via, &newtype_def.params)
+    }
+
+    /// An instance of `clause`'s class at the newtype whose methods select
+    /// from the class's dictionary at `target` (the wrapped type for
+    /// `GeneralizedNewtypeDeriving`, the via type for `DerivingVia`).
+    /// `head_params` are the newtype parameters the instance head applies.
+    fn derive_instance_from_target(
+        &mut self,
+        deriv_ctx: &mut DerivingContext,
+        newtype_def: &bhc_hir::NewtypeDef,
+        clause: &bhc_hir::DerivingClause,
+        target: Ty,
+        head_params: &[TyVar],
+    ) -> Option<DerivedInstance> {
+        let init = head_params;
         let class_info = self.class_registry.lookup_class(clause.class)?.clone();
         let span = newtype_def.span;
         let mut wrapped_args = clause.args.clone();
-        wrapped_args.push(*wrapped);
+        wrapped_args.push(target);
         let dict = self.resolve_dictionary(
             &Constraint::new_multi(clause.class, wrapped_args, span),
             span,
@@ -5358,6 +5403,16 @@ impl LowerContext {
                                     clause,
                                 ) {
                                     return Some(derived);
+                                }
+                                if let bhc_hir::DerivingStrategy::Via(via) = &clause.strategy {
+                                    if let Some(derived) = self.derive_newtype_via_type(
+                                        &mut deriv_ctx,
+                                        newtype_def,
+                                        clause,
+                                        via,
+                                    ) {
+                                        return Some(derived);
+                                    }
                                 }
                                 match &clause.strategy {
                                     bhc_hir::DerivingStrategy::Stock => {

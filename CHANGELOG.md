@@ -11,6 +11,10 @@ All notable changes to BHC are recorded here. The format follows
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
   Leaf)`, `P (-1) 2`.
+- `deriving (Semigroup, Monoid) via V` on a newtype takes `V`'s instance
+  methods; it derived an empty instance whose methods were error stubs
+  (#35). The via type needs a real instance: `Data.Monoid`'s `Sum`,
+  `Product` and friends are not implemented yet.
 - `bhc run` (the interpreter): `fst`/`snd` force the component they return,
   floating literals are `Double` unless typed `Float`, and floating values
   show as Haskell does (`5.0`, `1.0e-3`). A Double computation through

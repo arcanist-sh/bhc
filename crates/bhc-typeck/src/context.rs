@@ -2712,38 +2712,41 @@ impl TyCtxt {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
                 }
-                // foldl :: (b -> a -> b) -> b -> c -> b
-                // Container arg is polymorphic so DeriveFoldable types work —
-                // codegen dispatches by expression structure (E.52).
-                "foldl" | "foldl'" => Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
-                    Ty::fun(
+                // foldl :: (b -> a -> b) -> b -> t a -> b
+                // Any `t a` container, so DeriveFoldable types work — codegen
+                // dispatches by expression structure (E.52). The element is
+                // the function's `a`: an unrelated container type left it to
+                // default to Int, and `foldl (+) 0` over `[Double]` or
+                // `[Integer]` added machine ints (#18, #22).
+                "foldl" | "foldl'" => {
+                    let t = TyVar::new(0xFFFF_00F3, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), t],
                         Ty::fun(
-                            Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::Var(b.clone()),
+                                Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            ),
+                            Ty::fun(Ty::Var(b.clone()), Ty::fun(ta, Ty::Var(b.clone()))),
                         ),
+                    )
+                }
+                // foldr :: (a -> b -> b) -> b -> t a -> b (see foldl)
+                "foldr" => {
+                    let t = TyVar::new(0xFFFF_00F3, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), t],
                         Ty::fun(
-                            Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                            ),
+                            Ty::fun(Ty::Var(b.clone()), Ty::fun(ta, Ty::Var(b.clone()))),
                         ),
-                    ),
-                ),
-                // foldr :: (a -> b -> b) -> b -> c -> b
-                // Container arg is polymorphic so DeriveFoldable types work —
-                // codegen dispatches by expression structure (E.52).
-                "foldr" => Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
-                    Ty::fun(
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                        ),
-                        Ty::fun(
-                            Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone())),
-                        ),
-                    ),
-                ),
+                    )
+                }
                 // zipWith :: (a -> b -> c) -> [a] -> [b] -> [c]
                 "zipWith" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

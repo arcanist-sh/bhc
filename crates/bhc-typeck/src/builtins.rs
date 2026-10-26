@@ -1890,9 +1890,12 @@ impl Builtins {
                 )
             }),
             ("foldr", {
-                // foldr :: (a -> b -> b) -> b -> c -> b
-                // Container arg is polymorphic — codegen dispatches by expression structure.
-                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                // foldr :: (a -> b -> b) -> b -> t a -> b
+                // Any `t a` container (codegen dispatches by expression
+                // structure). Its element is the function's `a`: with an
+                // unrelated container type the element defaulted to Int,
+                // and `foldl (+) 0` over `[Double]` added machine ints.
+                let c = TyVar::new(BUILTIN_TYVAR_B + 1, Kind::star_to_star());
                 Scheme::poly(
                     vec![a.clone(), b.clone(), c.clone()],
                     Ty::fun(
@@ -1900,14 +1903,23 @@ impl Builtins {
                             Ty::Var(a.clone()),
                             Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                         ),
-                        Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c), Ty::Var(b.clone()))),
+                        Ty::fun(
+                            Ty::Var(b.clone()),
+                            Ty::fun(
+                                Ty::App(Box::new(Ty::Var(c)), Box::new(Ty::Var(a.clone()))),
+                                Ty::Var(b.clone()),
+                            ),
+                        ),
                     ),
                 )
             }),
             ("foldl", {
-                // foldl :: (b -> a -> b) -> b -> c -> b
-                // Container arg is polymorphic — codegen dispatches by expression structure.
-                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                // foldl :: (b -> a -> b) -> b -> t a -> b
+                // Any `t a` container (codegen dispatches by expression
+                // structure). Its element is the function's `a`: with an
+                // unrelated container type the element defaulted to Int,
+                // and `foldl (+) 0` over `[Double]` added machine ints.
+                let c = TyVar::new(BUILTIN_TYVAR_B + 1, Kind::star_to_star());
                 Scheme::poly(
                     vec![a.clone(), b.clone(), c.clone()],
                     Ty::fun(
@@ -1915,14 +1927,23 @@ impl Builtins {
                             Ty::Var(b.clone()),
                             Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                         ),
-                        Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c), Ty::Var(b.clone()))),
+                        Ty::fun(
+                            Ty::Var(b.clone()),
+                            Ty::fun(
+                                Ty::App(Box::new(Ty::Var(c)), Box::new(Ty::Var(a.clone()))),
+                                Ty::Var(b.clone()),
+                            ),
+                        ),
                     ),
                 )
             }),
             ("foldl'", {
-                // foldl' :: (b -> a -> b) -> b -> c -> b
-                // Container arg is polymorphic — codegen dispatches by expression structure.
-                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                // foldl' :: (b -> a -> b) -> b -> t a -> b
+                // Any `t a` container (codegen dispatches by expression
+                // structure). Its element is the function's `a`: with an
+                // unrelated container type the element defaulted to Int,
+                // and `foldl (+) 0` over `[Double]` added machine ints.
+                let c = TyVar::new(BUILTIN_TYVAR_B + 1, Kind::star_to_star());
                 Scheme::poly(
                     vec![a.clone(), b.clone(), c.clone()],
                     Ty::fun(
@@ -1930,7 +1951,13 @@ impl Builtins {
                             Ty::Var(b.clone()),
                             Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                         ),
-                        Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c), Ty::Var(b.clone()))),
+                        Ty::fun(
+                            Ty::Var(b.clone()),
+                            Ty::fun(
+                                Ty::App(Box::new(Ty::Var(c)), Box::new(Ty::Var(a.clone()))),
+                                Ty::Var(b.clone()),
+                            ),
+                        ),
                     ),
                 )
             }),

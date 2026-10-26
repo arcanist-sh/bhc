@@ -1,0 +1,15 @@
+-- Folds, sum/product and ranges at Integer and Double (#18, #22).
+main :: IO ()
+main = do
+  print (sum [1, 2, 3 :: Integer])
+  print (product [100000000000, 100000000000, 7 :: Integer])
+  print (sum [1.0, 2.0, 3.0 :: Double])
+  print (product [1.5, 2.0 :: Double])
+  print (foldr (+) 0 [1.5, 2.5 :: Double])
+  print (foldl (\a b -> a * b) 1 [1, 2, 3, 4 :: Integer])
+  print (foldl (\acc x -> acc + x / 2) 0 [1, 2, 3 :: Double])
+  print ([1 .. 3] :: [Double])
+  print (map (* 2) [1.0 .. 2.4 :: Double])
+  print (sum [0.5 .. 2.5 :: Double])
+  print ([0.5, 1.5] :: [Double])
+  print (sum [1 .. 10 :: Int])

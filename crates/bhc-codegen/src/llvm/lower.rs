@@ -5173,6 +5173,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_read_double_list", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000545), read_double_list);
+        // bhc_enum_from_to_double(f64, f64) -> ptr (a list of Doubles)
+        let enum_double = self.module.llvm_module().add_function(
+            "bhc_enum_from_to_double",
+            i8_ptr_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000546), enum_double);
 
         // ---- Rational RTS functions (VarId 1000900-1000915) ----
         // bhc_rational_make(i64, i64) -> ptr
@@ -9622,6 +9629,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(to_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFromTo: to has no value".to_string()))?;
 
+        // `[1.0 .. 3.0]`: Double bounds count in Doubles (the RTS builds it),
+        // as does a range the type checker typed `[Double]` (stamped on this
+        // `enumFromTo`) whose bounds are integer literals.
+        let stamped_double = matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_double_type(a) || self.is_float_type(a));
+        if stamped_double || from_val.is_float_value() || to_val.is_float_value() {
+            let as_f64 = |this: &Self,
+                          v: BasicValueEnum<'ctx>|
+             -> CodegenResult<FloatValue<'ctx>> {
+                match v {
+                    BasicValueEnum::FloatValue(f) => Ok(f),
+                    other => {
+                        let i = this.to_int_value(other)?;
+                        this.builder()
+                            .build_signed_int_to_float(i, this.type_mapper().f64_type(), "enum_f64")
+                            .map_err(|e| CodegenError::Internal(format!("sitofp: {:?}", e)))
+                    }
+                }
+            };
+            let from_f = as_f64(self, from_val)?;
+            let to_f = as_f64(self, to_val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000546)).ok_or_else(|| {
+                CodegenError::Internal("bhc_enum_from_to_double not declared".to_string())
+            })?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[from_f.into(), to_f.into()], "enum_double")
+                .map_err(|e| CodegenError::Internal(format!("enumFromTo call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic());
+        }
+
         let from = self.to_int_value(from_val)?;
         let to = self.to_int_value(to_val)?;
 
@@ -10798,6 +10836,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(fold) = self.typed_numeric_fold("+", list_expr) {
+            return self.lower_expr(&fold);
+        }
         // Check for fusion opportunity: sum (map f xs)
         // This fuses into a single loop that applies f to each element and sums
         if let Some((map_fn, inner_list)) = Self::try_extract_map_app(list_expr) {
@@ -10911,6 +10952,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(fold) = self.typed_numeric_fold("*", list_expr) {
+            return self.lower_expr(&fold);
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("product: list has no value".to_string()))?;
@@ -16369,7 +16413,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // changes, never the value's representation.
         let expr_ty = match &self.current_builtin_ty {
             Ty::Fun(a, _)
-                if self.is_integer_type(a) || self.is_char_type(a) || self.is_bool_type(a) =>
+                if self.is_integer_type(a)
+                    || self.is_char_type(a)
+                    || self.is_bool_type(a)
+                    || self.is_double_type(a) =>
             {
                 a.as_ref().clone()
             }
@@ -16421,6 +16468,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("print: value has no result".to_string()))?;
+        // A Double that arrives boxed (a fold's result is a word holding the
+        // bits) prints as a Double, not as those bits.
+        let val = match val {
+            BasicValueEnum::IntValue(_) | BasicValueEnum::PointerValue(_)
+                if self.is_double_type(&expr_ty) =>
+            {
+                let bits = match val {
+                    BasicValueEnum::PointerValue(p) => self.ptr_to_int(p)?,
+                    other => other.into_int_value(),
+                };
+                self.builder()
+                    .build_bit_cast(bits, self.type_mapper().f64_type(), "print_double_bits")
+                    .map_err(|e| CodegenError::Internal(format!("bitcast failed: {:?}", e)))?
+            }
+            other => other,
+        };
 
         match val {
             BasicValueEnum::IntValue(i) => {
@@ -49691,7 +49754,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(Some(closure_ptr.into()))
                     }
                 } else if let Some((primop, arity)) = self.primitive_op_info(name) {
-                    // Primop used as a value - create a wrapper closure
+                    // Primop used as a value - create a wrapper closure, unless
+                    // it is arithmetic typed at Integer/Double/Float, which the
+                    // untyped wrapper would do in machine ints.
+                    if let Some(lam) = Self::typed_arith_lambda(name, var) {
+                        return self.lower_expr(&lam);
+                    }
                     self.create_primop_closure(primop, arity, name)
                 } else if self.builtin_info(name).is_some()
                     && !self.external_functions.contains_key(&var.name)
@@ -49746,7 +49814,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             return result;
                         }
                         self.lower_builtin(name, &[])
-                    } else if let Some(lam) = Self::typed_show_lambda(name, var) {
+                    } else if let Some(lam) = Self::typed_show_lambda(name, var)
+                        .or_else(|| Self::typed_arith_lambda(name, var))
+                    {
                         // `map show xs`: a generic wrapper closure has no
                         // argument type and showed every element as an Int.
                         self.lower_expr(&lam)
@@ -50344,6 +50414,101 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// occurrence type has a ground argument `a`, with `x` typed `a`, so the
     /// applied builtin dispatches on that type instead of guessing from the
     /// value.
+    /// The element type `Integer`, `Double` or `Float` named by `t`, if any.
+    fn wide_numeric_ty(t: &Ty) -> Option<&Ty> {
+        matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            .then_some(t)
+    }
+
+    /// `\\x y -> x op y` for a bare `+`/`-`/`*` typed at `Integer`, `Double`
+    /// or `Float` (`foldr (+) 0 xs`): a generic wrapper closure has no operand
+    /// types and did machine-int arithmetic on bignums and doubles.
+    fn typed_arith_lambda(name: &str, var: &Var) -> Option<Expr> {
+        if !matches!(name, "+" | "-" | "*") {
+            return None;
+        }
+        let Ty::Fun(a, _) = &var.ty else {
+            return None;
+        };
+        let elem = Self::wide_numeric_ty(a)?.clone();
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$arith_x"),
+            id: VarId::new(usize::MAX - 35),
+            ty: elem.clone(),
+        };
+        let y = Var {
+            name: Symbol::intern("$arith_y"),
+            id: VarId::new(usize::MAX - 36),
+            ty: elem,
+        };
+        let body = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::Var(var.clone(), span)),
+                Box::new(Expr::Var(x.clone(), span)),
+                span,
+            )),
+            Box::new(Expr::Var(y.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(
+            x,
+            Box::new(Expr::Lam(y, Box::new(body), span)),
+            span,
+        ))
+    }
+
+    /// `sum`/`product` over `[Integer]`, `[Double]` or `[Float]` (per the
+    /// builtin's stamped type) as `foldl (\\a b -> a op b) unit xs` with the
+    /// operator typed at the element: the builtin loops add machine ints.
+    fn typed_numeric_fold(&self, op: &str, list_expr: &Expr) -> Option<Expr> {
+        let Ty::Fun(list_ty, _) = &self.current_builtin_ty else {
+            return None;
+        };
+        let Ty::List(elem) = list_ty.as_ref() else {
+            return None;
+        };
+        let elem = Self::wide_numeric_ty(elem)?.clone();
+        let is_integer = matches!(&elem, Ty::Con(c) if c.name.as_str() == "Integer");
+        // An `Integer` range is built from machine ints (as everything that
+        // consumes one expects), not bignums; leave it to the Int loop.
+        if is_integer && self.app_head_var_name(list_expr) == Some("enumFromTo") {
+            return None;
+        }
+        let unit = if op == "*" { 1 } else { 0 };
+        let literal = if is_integer {
+            Literal::Integer(unit)
+        } else {
+            Literal::Double(unit as f64)
+        };
+        let span = bhc_span::Span::default();
+        let op_var = Var {
+            name: Symbol::intern(op),
+            id: VarId::new(usize::MAX - 37),
+            ty: Ty::fun(elem.clone(), Ty::fun(elem.clone(), elem.clone())),
+        };
+        let lam = Self::typed_arith_lambda(op, &op_var)?;
+        let foldl = Var {
+            name: Symbol::intern("foldl"),
+            id: VarId::new(usize::MAX - 38),
+            ty: Ty::Error,
+        };
+        let call = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Var(foldl, span)),
+                    Box::new(lam),
+                    span,
+                )),
+                Box::new(Expr::Lit(literal, elem, span)),
+                span,
+            )),
+            Box::new(list_expr.clone()),
+            span,
+        );
+        Some(call)
+    }
+
     fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
         // `print` as a value (`mapM_ print "hi"`) has the same problem.
         if name != "show" && name != "print" {

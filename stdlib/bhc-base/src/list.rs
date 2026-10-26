@@ -579,6 +579,21 @@ pub unsafe extern "C" fn bhc_list_map_accum_r(f: *mut u8, acc: *mut u8, list: *m
     alloc_tuple(current_acc, ys_list)
 }
 
+/// `enumFromTo :: Double -> Double -> [Double]`: `[from, from + 1 ..]` while
+/// the element is at most `to + 1/2`, as Haskell's `numericEnumFromTo`.
+/// Elements are boxed as their bit patterns, like every `Double` value.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_to_double(from: f64, to: f64) -> *mut u8 {
+    let limit = to + 0.5;
+    let mut elems: Vec<*mut u8> = Vec::new();
+    let mut x = from;
+    while x <= limit {
+        elems.push(x.to_bits() as usize as *mut u8);
+        x += 1.0;
+    }
+    unsafe { vec_to_list(&elems) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -980,7 +980,25 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
             let ground_list_eq = matches!(v.name.as_str(), "==" | "/=")
                 && matches!(&resolved, Ty::Fun(a, _)
                     if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
-            if integer || ground_list_eq {
+            // Arithmetic on Double/Float: passed as a function value
+            // (`foldr (+) 0 xs`) the operator has no operands to read it from.
+            let floating = matches!(v.name.as_str(), "+" | "-" | "*")
+                && matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")));
+            if integer || ground_list_eq || floating {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if matches!(v.name.as_str(), "sum" | "product") {
+        // The element type of a `sum`/`product` over `Integer` (boxed
+        // bignums) or `Double`/`Float`; codegen's loop adds machine ints.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::List(e)
+                if matches!(e.as_ref(), Ty::Con(c)
+                    if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))))
+            {
                 v.ty = resolved;
             }
         }
@@ -1114,6 +1132,20 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         if v.name.as_str() == "read" && generic {
             if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 v.ty = resolved;
+            }
+        }
+        // A range `[a .. b]` desugars to `enumFromTo a b` with the range's own
+        // span, so its recorded type is the result: at `[Double]`/`[Float]`
+        // the bounds count in floating point even when written as integer
+        // literals (`[1 .. 3] :: [Double]`).
+        if v.name.as_str() == "enumFromTo" && matches!(v.ty, Ty::Error) {
+            if let Some(Ty::List(elem)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                if matches!(elem.as_ref(), Ty::Con(c)
+                    if matches!(c.name.as_str(), "Double" | "Float"))
+                {
+                    let e = elem.as_ref().clone();
+                    v.ty = Ty::fun(e.clone(), Ty::fun(e.clone(), Ty::List(Box::new(e))));
+                }
             }
         }
         // `readLn :: IO a` likewise parses at the type it is used at.
@@ -7798,6 +7830,22 @@ fn lower_lambda(
         for pat in pats {
             let Ty::Fun(arg_ty, ret_ty) = ty else { break };
             crate::binding::retype_pattern_binders(ctx, pat, arg_ty.as_ref());
+            ty = ret_ty.as_ref().clone();
+        }
+    } else if let Some(own) = ctx.resolved_expr_ty_opt(span) {
+        // Otherwise the lambda's own inferred type, for the parameters whose
+        // type changes their representation: an `Integer` (a boxed bignum) or
+        // a `Double`/`Float`. Untyped, `foldl (\a b -> a + b) 0 xs` over
+        // `[Integer]` or `[Double]` added them as machine ints (#18, #22).
+        // Other parameters stay untyped, as codegen's width inference expects.
+        let mut ty = own;
+        for pat in pats {
+            let Ty::Fun(arg_ty, ret_ty) = ty else { break };
+            if matches!(arg_ty.as_ref(), Ty::Con(c)
+                if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            {
+                crate::binding::retype_pattern_binders(ctx, pat, arg_ty.as_ref());
+            }
             ty = ret_ty.as_ref().clone();
         }
     }

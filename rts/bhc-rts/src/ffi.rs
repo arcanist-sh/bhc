@@ -296,6 +296,23 @@ pub extern "C" fn bhc_print_double(d: f64) {
     print!("{}", format_double(d));
 }
 
+/// Format an `f32` like Haskell's `show` for a `Float`: the shortest digits
+/// that read back as the same `f32`, with `format_double`'s layout rules.
+fn format_float(n: f32) -> String {
+    let as_double = format_double(f64::from(n));
+    if !n.is_finite() || n == 0.0 || !(n.abs() >= 0.1 && n.abs() < 1e7) {
+        return as_double;
+    }
+    // Widening to f64 would print the f32's exact binary value
+    // (`1.100000023841858`); the f32's own shortest form is what GHC shows.
+    let s = format!("{n}");
+    if s.contains('.') {
+        s
+    } else {
+        s + ".0"
+    }
+}
+
 /// Format an `f64` the way Haskell's `show` does: whole numbers keep a trailing
 /// `.0` (`show 6.0 == "6.0"`), and non-finite values use `Infinity` /
 /// `-Infinity` / `NaN`. Shared by `print`/`show` of a `Double`.
@@ -2105,13 +2122,13 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 // Double: interpret as f64 bits
                 let bits = ptr as i64;
                 let val = f64::from_bits(bits as u64);
-                format!("{}", val)
+                format_double(val)
             }
             2 => {
                 // Float: interpret as f32 bits (lower 32 bits)
                 let bits = ptr as i32;
                 let val = f32::from_bits(bits as u32);
-                format!("{}", val)
+                format_float(val)
             }
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
@@ -2386,12 +2403,12 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             1 => {
                 // Double: interpret as f64 bits
                 let val = f64::from_bits(ptr as u64);
-                format!("{}", val)
+                format_double(val)
             }
             2 => {
                 // Float: interpret as f32 bits (lower 32 bits)
                 let val = f32::from_bits(ptr as u32);
-                format!("{}", val)
+                format_float(val)
             }
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself

@@ -1459,6 +1459,11 @@ fn test_tier3_instance_builtin_alias() {
 }
 
 #[test]
+fn test_tier2_numeric_folds() {
+    run_native_test("tier2_functions/numeric_folds", Profile::Default);
+}
+
+#[test]
 fn test_tier2_show_tuples_chars() {
     run_native_test("tier2_functions/show_tuples_chars", Profile::Default);
 }

@@ -8,6 +8,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `sum`, `product`, `foldl`/`foldr` and lambdas over `Integer` and `Double`
+  lists compute in bignums and doubles (#18, #22). The type checker tied a
+  fold's element type to nothing, so it defaulted to `Int`; `sum`/`product`
+  and operators passed as values (`foldr (+)`) did machine-int arithmetic;
+  `sum [1, 2, 3 :: Integer]` crashed. `[1 .. 3] :: [Double]` is a list of
+  Doubles, and a `Double` inside a list shows as `1.0`, not `1`. Ranges at
+  `Integer` are still built from machine ints.
 - `readLn` works in native code (it had no implementation and returned an
   address): it reads a line and parses it at the type it is used at, as an
   `Int` when that type is left open.

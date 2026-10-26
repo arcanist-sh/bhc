@@ -1252,6 +1252,45 @@ impl Compiler {
         }
     }
 
+    /// Whether anything could provide a module bhc does not know: import
+    /// paths, package databases, an interface directory, a stdlib path or
+    /// Hackage packages. Without any, an unknown import cannot resolve.
+    fn module_sources_configured(&self) -> bool {
+        let o = &self.session.options;
+        !o.import_paths.is_empty()
+            || !o.package_dbs.is_empty()
+            || o.output_interface_dir.is_some()
+            || o.stdlib_path.is_some()
+            || !o.hackage_packages.is_empty()
+            || std::env::var_os("BHC_STDLIB_PATH").is_some()
+    }
+
+    /// An import of a module nothing can provide is an error, as in GHC
+    /// (#45). With import paths or package databases configured it stays a
+    /// warning: a package build relies on unknown modules falling back to
+    /// stubs.
+    fn check_missing_modules(&self, ctx: &LowerContext) -> CompileResult<()> {
+        if self.module_sources_configured() {
+            return Ok(());
+        }
+        let missing: Vec<String> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::ModuleNotFound { name, .. } => Some(format!("`{name}`")),
+                _ => None,
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(CompileError::Other(format!(
+            "could not find module {} (add its source directory with -I or its package with \
+             --package-db)",
+            missing.join(", ")
+        )))
+    }
+
     /// Print one IR dump (`--dump-ir`) to stdout under a banner.
     ///
     /// Each stage of a module is printed once, even when a compile path
@@ -1355,6 +1394,7 @@ impl Compiler {
         }
 
         self.maybe_dump_hir(&hir);
+        self.check_missing_modules(&ctx)?;
         Ok((hir, ctx))
     }
 
@@ -3563,6 +3603,7 @@ impl Compiler {
         }
 
         self.maybe_dump_hir(&hir);
+        self.check_missing_modules(&ctx)?;
         Ok((hir, ctx))
     }
 
@@ -7639,14 +7680,30 @@ exposed-modules: Data.Text Data.Text.Internal
         }
     }
 
-    /// An import bhc cannot find anywhere is reported (#45), while a module
-    /// it provides is not.
+    /// An import bhc cannot find anywhere is an error when nothing could
+    /// provide it, and a warning when import paths are configured (#45); a
+    /// module bhc provides is neither.
     #[test]
-    fn test_unknown_import_warns() {
-        let compiler = CompilerBuilder::new().build().unwrap();
+    fn test_unknown_import() {
         let src =
             "import qualified Foo.Bar.Baz\nimport qualified Data.Map as M\nmain = putStrLn \"x\"\n";
         let unit = CompilationUnit::from_source("Main", src);
+
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        match compiler.lower(&ast) {
+            Err(CompileError::Other(msg)) => assert!(msg.contains("`Foo.Bar.Baz`"), "{msg}"),
+            other => panic!(
+                "expected a missing-module error, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let compiler = CompilerBuilder::new()
+            .import_path(Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap())
+            .build()
+            .unwrap();
         let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
         let (_hir, ctx) = compiler.lower(&ast).unwrap();
         let missing: Vec<&str> = ctx

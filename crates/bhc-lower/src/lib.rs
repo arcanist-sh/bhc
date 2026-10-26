@@ -194,7 +194,7 @@ impl std::fmt::Display for LowerWarning {
             LowerWarning::ModuleNotFound { name, .. } => {
                 write!(
                     f,
-                    "could not find module `{name}` (add its source directory with -i \
+                    "could not find module `{name}` (add its source directory with -I \
                      or its package with --package-db)"
                 )
             }

@@ -72,6 +72,9 @@ All notable changes to BHC are recorded here. The format follows
 - `bhc repl` explains how to get `bhci` when it is not installed next to `bhc`,
   instead of failing with an OS error (#50).
 - Piping bhc's output into `head` no longer panics with a broken pipe.
+- An import of a module nothing can provide is an error, as in GHC, when no
+  import path, package database, interface directory or stdlib path is
+  configured; with any of them it stays a warning (#45).
 - An import of a module bhc cannot find (not on the search paths, in a
   package database, or among the modules it provides) is reported as a
   warning instead of being ignored silently, and lowering warnings now print

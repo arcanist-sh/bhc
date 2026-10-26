@@ -1459,6 +1459,11 @@ fn test_tier3_instance_builtin_alias() {
 }
 
 #[test]
+fn test_tier2_derived_show_record() {
+    run_native_test("tier2_functions/derived_show_record", Profile::Default);
+}
+
+#[test]
 fn test_tier2_derived_show_parens() {
     run_native_test("tier2_functions/derived_show_parens", Profile::Default);
 }

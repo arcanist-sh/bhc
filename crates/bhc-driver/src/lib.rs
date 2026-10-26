@@ -7660,6 +7660,18 @@ exposed-modules: Data.Text Data.Text.Internal
         assert_eq!(missing, ["Foo.Bar.Baz"]);
     }
 
+    /// The interpreter forces `fst`/`snd` components and evaluates floating
+    /// literals as Double (#17): this printed `expected Num, got <thunk>`,
+    /// then `1.3333334`.
+    #[test]
+    fn test_run_fst_snd_double() {
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let src = "main :: IO ()\n\
+                   main = let p = (4.0 / 3.0, 2.0 :: Double) in print (fst p * snd p / 2.0)\n";
+        let (_value, display) = compiler.run_source("Main", src).unwrap();
+        assert_eq!(display, "1.3333333333333333\n");
+    }
+
     /// `run_file_with_args` reports that IO output was produced (#44), so
     /// `bhc run` does not print it a second time.
     #[test]

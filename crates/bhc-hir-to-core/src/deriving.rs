@@ -1611,6 +1611,10 @@ impl DerivingContext {
             let show_expr = if field_count == 0 {
                 // Just the constructor name
                 self.make_string(con.name.as_str(), span)
+            } else if let ConFields::Named(named) = &con.fields {
+                // Record syntax, as GHC derives it (#49)
+                let names: Vec<Symbol> = named.iter().map(|f| f.name).collect();
+                self.generate_show_record(con.name, &names, &fields, span)
             } else {
                 // Constructor name followed by shown fields
                 self.generate_show_with_fields(con.name, &fields, span)
@@ -1648,6 +1652,26 @@ impl DerivingContext {
         }
 
         result
+    }
+
+    /// `Con {f0 = <show a0>, f1 = <show a1>}`: a record shows its fields at
+    /// precedence 0 (`P {x = -1}`), so they are never parenthesized.
+    fn generate_show_record(
+        &mut self,
+        con_name: Symbol,
+        field_names: &[Symbol],
+        fields: &[Var],
+        span: Span,
+    ) -> core::Expr {
+        let mut result = self.make_string(&format!("{} {{", con_name.as_str()), span);
+        for (i, (name, field)) in field_names.iter().zip(fields).enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let label = self.make_string(&format!("{sep}{} = ", name.as_str()), span);
+            result = self.make_append(result, label, span);
+            let shown = self.make_show_call(field, span);
+            result = self.make_append(result, shown, span);
+        }
+        self.make_append(result, self.make_string("}", span), span)
     }
 
     /// `showsPrec 11` for a constructor field, from its plain `show`: wrap it

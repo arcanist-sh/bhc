@@ -11,6 +11,12 @@ All notable changes to BHC are recorded here. The format follows
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
   Leaf)`, `P (-1) 2`.
+- `bhc run` (the interpreter): `fst`/`snd` force the component they return,
+  floating literals are `Double` unless typed `Float`, and floating values
+  show as Haskell does (`5.0`, `1.0e-3`). A Double computation through
+  `fst` failed with `expected Num, got <thunk>` (#17).
+- Derived `Show` uses record syntax for record constructors:
+  `P {name = "Ada", age = 36}`, not `P "Ada" 36` (#49).
 - Derived `Functor` maps through recursive and nested fields: `fmap` on
   `Node (Tree a) a (Tree a)` or `Rose a [Rose a]` applied `f` to whole
   subtrees and crashed; it now recurses, and maps inside `[a]`/`Maybe a`.

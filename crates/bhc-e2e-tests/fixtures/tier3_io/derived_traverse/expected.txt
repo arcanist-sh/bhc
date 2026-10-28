@@ -1,0 +1,8 @@
+Just (Pair 1 2)
+Just (Pair 2 3)
+Nothing
+Just (Box 4)
+Just (Tagged 7 5)
+Just Untagged
+Right (Pair 1 2)
+Left "bad -2"

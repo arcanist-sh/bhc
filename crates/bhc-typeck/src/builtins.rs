@@ -7826,15 +7826,26 @@ impl Builtins {
             let io_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
             let io_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
             let io_unit = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::unit()));
-            // traverse :: Applicative f => (a -> f b) -> c -> f d
+            // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)
+            // The container's element and the result's shape are tied to the
+            // function: with an unrelated `c -> f d` the result's element type
+            // was unknown, so `print (traverse f (Pair 1 2))` could not show
+            // the `Pair` inside the `Maybe` (#32).
+            let t = TyVar::new(
+                BUILTIN_TYVAR_B + 7,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+            let t_b = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(b.clone())));
+            let f_t_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(t_b));
             env.register_value(
                 DefId::new(12000),
                 Symbol::intern("traverse"),
                 Scheme::poly(
-                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), t.clone(), a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), io_b.clone()),
-                        Ty::fun(Ty::Var(c.clone()), io_d.clone()),
+                        Ty::fun(t_a.clone(), f_t_b.clone()),
                     ),
                 ),
             );
@@ -7850,15 +7861,15 @@ impl Builtins {
                     ),
                 ),
             );
-            // for :: c -> (a -> IO b) -> IO d
+            // for :: Applicative f => t a -> (a -> f b) -> f (t b)
             env.register_value(
                 DefId::new(12002),
                 Symbol::intern("for"),
                 Scheme::poly(
-                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), t.clone(), a.clone(), b.clone()],
                     Ty::fun(
-                        Ty::Var(c.clone()),
-                        Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b.clone()), io_d),
+                        t_a,
+                        Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b.clone()), f_t_b),
                     ),
                 ),
             );

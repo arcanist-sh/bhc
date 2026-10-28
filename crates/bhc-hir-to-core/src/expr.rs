@@ -1148,6 +1148,24 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 }
             }
         }
+        // `traverse` at `Maybe`/`Either`: codegen specializes a derived
+        // Traversable's traversal to that applicative (#32), which the
+        // generic derived body cannot choose by itself.
+        if v.name.as_str() == "traverse" && matches!(v.ty, Ty::Error) {
+            if let Some(resolved) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                let mut result = &resolved;
+                while let Ty::Fun(_, r) = result {
+                    result = r;
+                }
+                let mut head = result;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                if matches!(head, Ty::Con(c) if matches!(c.name.as_str(), "Maybe" | "Either")) {
+                    v.ty = resolved;
+                }
+            }
+        }
         // `readLn :: IO a` likewise parses at the type it is used at.
         if v.name.as_str() == "readLn" && matches!(v.ty, Ty::Error) {
             if let Some(resolved @ Ty::App(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {

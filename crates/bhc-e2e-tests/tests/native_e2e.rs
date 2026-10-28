@@ -1459,6 +1459,11 @@ fn test_tier3_instance_builtin_alias() {
 }
 
 #[test]
+fn test_tier3_derived_traverse() {
+    run_native_test("tier3_io/derived_traverse", Profile::Default);
+}
+
+#[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);
 }

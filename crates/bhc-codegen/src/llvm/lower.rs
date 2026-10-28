@@ -99,6 +99,18 @@ enum FfiType {
     Void,
 }
 
+/// Whether a type mentions a type variable anywhere.
+fn has_type_vars(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::App(f, a) | Ty::Fun(f, a) => has_type_vars(f) || has_type_vars(a),
+        Ty::List(e) => has_type_vars(e),
+        Ty::Tuple(ts) => ts.iter().any(has_type_vars),
+        Ty::Forall(..) => true,
+        _ => false,
+    }
+}
+
 /// Metadata about a data constructor, used for code generation.
 #[derive(Clone, Debug)]
 pub struct ConstructorMeta {
@@ -29043,7 +29055,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// derived Show, carrying its derived-show function pointer in `child1`.
     /// Returns `None` if `expr` isn't such an ADT.
     fn try_build_adt_show_desc(&mut self, expr: &Expr) -> Option<PointerValue<'ctx>> {
-        let type_name = self.infer_adt_type_from_expr(expr)?;
+        // From the expression, or else from its type's head (`Pair Int`, a
+        // type-only stand-in for an element of `Maybe (Pair Int)`).
+        let type_name = self.infer_adt_type_from_expr(expr).or_else(|| {
+            let ty = expr.ty();
+            let mut head = &ty;
+            while let Ty::App(f, _) = head {
+                head = f;
+            }
+            match head {
+                Ty::Con(c) if self.derived_show_fns.contains_key(c.name.as_str()) => {
+                    Some(c.name.as_str().to_string())
+                }
+                _ => None,
+            }
+        })?;
         let show_var_id = *self.derived_show_fns.get(&type_name)?;
         let show_fn = *self.functions.get(&show_var_id)?;
         let fn_ptr = show_fn.as_global_value().as_pointer_value();
@@ -30231,11 +30257,227 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check if container is a user ADT with derived Traversable
         if let Some(type_name) = self.infer_adt_type_from_expr(container_expr) {
             if self.derived_traversable_fns.contains_key(&type_name) {
+                if let Some(spec) = self.specialized_traverse(func_expr, container_expr, &type_name)
+                {
+                    return self.lower_expr(&spec);
+                }
                 return self.lower_traverse_derived(func_expr, container_expr, &type_name);
             }
         }
         // Fall back to list traverse (= mapM = map for BHC's eager IO)
         self.lower_builtin_mapm(func_expr, container_expr)
+    }
+
+    /// `traverse f x` for a derived Traversable at `Maybe` or `Either` (per the
+    /// stamped `traverse` type), as Core:
+    /// `case x of Con a0 a1 -> (\\r0 r1 -> Con r0 r1) <$> f a0 <*> f a1`
+    /// with `<$>`/`<*>` typed at that applicative, and `Just`/`Right (Con …)`
+    /// for a constructor without parameter fields. The derived traversal is
+    /// generic and has no applicative to dispatch on (#32).
+    ///
+    /// `None` (keep the derived function) for any other applicative, or when
+    /// a field holds the parameter inside another type (a recursive or nested
+    /// field), which this does not traverse.
+    fn specialized_traverse(
+        &mut self,
+        func_expr: &Expr,
+        container_expr: &Expr,
+        type_name: &str,
+    ) -> Option<Expr> {
+        let mut result = &self.current_builtin_ty;
+        while let Ty::Fun(_, r) = result {
+            result = r;
+        }
+        let either = if self.is_maybe_type(result).is_some() {
+            false
+        } else if self.is_either_type(result).is_some() {
+            true
+        } else {
+            return None;
+        };
+        let mut cons: Vec<(String, ConstructorMeta)> = self
+            .constructor_metadata
+            .iter()
+            .filter(|(name, meta)| {
+                meta.type_name.as_deref() == Some(type_name) && !name.contains('#')
+            })
+            .map(|(n, m)| (n.clone(), m.clone()))
+            .collect();
+        // The metadata can carry aliases under another constructor's tag
+        // (`True`/`False` filed under a two-constructor type), so for each
+        // tag keep the type's own constructor: one with recorded field
+        // types, else one that is not a builtin constructor's name.
+        let builtin = |n: &str| {
+            matches!(
+                n,
+                "True" | "False" | "Nothing" | "Just" | "Left" | "Right" | "[]" | ":"
+            )
+        };
+        // A builtin constructor is never one of a user type's own: an
+        // alternative named `True` made the case dispatch as a Bool.
+        cons.retain(|(n, _)| !builtin(n.as_str()));
+        cons.sort_by_key(|(n, m)| {
+            (
+                m.tag,
+                !self.con_field_types.contains_key(n.as_str()),
+                builtin(n.as_str()),
+            )
+        });
+        cons.dedup_by_key(|(_, m)| m.tag);
+        if cons.is_empty() {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let applicative_ty = if either {
+            Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Either"),
+                        bhc_types::Kind::Star,
+                    ))),
+                    Box::new(Ty::Error),
+                )),
+                Box::new(Ty::Error),
+            )
+        } else {
+            Ty::App(
+                Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Maybe"),
+                    bhc_types::Kind::Star,
+                ))),
+                Box::new(Ty::Error),
+            )
+        };
+        let op = |name: &str, id: usize| {
+            Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(id),
+                    ty: Ty::fun(Ty::Error, Ty::fun(Ty::Error, applicative_ty.clone())),
+                },
+                span,
+            )
+        };
+        let mut next_id = usize::MAX - 3000;
+        let mut fresh = |name: &str| {
+            next_id -= 1;
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(next_id),
+                ty: Ty::Error,
+            }
+        };
+        let ty_con = bhc_types::TyCon::new(Symbol::intern(type_name), bhc_types::Kind::Star);
+        let mut alts = Vec::new();
+        for (con_name, meta) in &cons {
+            let field_tys = self
+                .con_field_types
+                .get(con_name)
+                .cloned()
+                .unwrap_or_default();
+            if field_tys.len() != meta.arity as usize {
+                return None;
+            }
+            let binders: Vec<Var> = (0..meta.arity).map(|i| fresh(&format!("$tf{i}"))).collect();
+            let mut results: Vec<Var> = Vec::new();
+            let mut con_args: Vec<Expr> = Vec::new();
+            for (b, ty) in binders.iter().zip(&field_tys) {
+                match ty {
+                    Ty::Var(_) => {
+                        let r = fresh("$tr");
+                        con_args.push(Expr::Var(r.clone(), span));
+                        results.push(r);
+                    }
+                    t if has_type_vars(t) => return None,
+                    _ => con_args.push(Expr::Var(b.clone(), span)),
+                }
+            }
+            // Fresh ids, unbound anywhere, so codegen resolves these
+            // constructors by name.
+            let con_var = Expr::Var(
+                Var {
+                    name: Symbol::intern(con_name),
+                    id: fresh("$tcon").id,
+                    ty: Ty::Error,
+                },
+                span,
+            );
+            let built = con_args.into_iter().fold(con_var, |acc, a| {
+                Expr::App(Box::new(acc), Box::new(a), span)
+            });
+            let rhs = if results.is_empty() {
+                let wrap = Expr::Var(
+                    Var {
+                        name: Symbol::intern(if either { "Right" } else { "Just" }),
+                        id: fresh("$twrap").id,
+                        ty: Ty::Error,
+                    },
+                    span,
+                );
+                Expr::App(Box::new(wrap), Box::new(built), span)
+            } else {
+                let lam = results
+                    .iter()
+                    .rev()
+                    .fold(built, |acc, r| Expr::Lam(r.clone(), Box::new(acc), span));
+                let field_of = |r: &Var| -> Expr {
+                    // the binder whose position `r` fills
+                    let idx = results.iter().position(|x| x.id == r.id).unwrap_or(0);
+                    let mut seen = 0;
+                    let mut pos = 0;
+                    for (i, ty) in field_tys.iter().enumerate() {
+                        if matches!(ty, Ty::Var(_)) {
+                            if seen == idx {
+                                pos = i;
+                                break;
+                            }
+                            seen += 1;
+                        }
+                    }
+                    Expr::App(
+                        Box::new(func_expr.clone()),
+                        Box::new(Expr::Var(binders[pos].clone(), span)),
+                        span,
+                    )
+                };
+                let first = Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(op("<$>", usize::MAX - 2990)),
+                        Box::new(lam),
+                        span,
+                    )),
+                    Box::new(field_of(&results[0])),
+                    span,
+                );
+                results[1..].iter().fold(first, |acc, r| {
+                    Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(op("<*>", usize::MAX - 2991)),
+                            Box::new(acc),
+                            span,
+                        )),
+                        Box::new(field_of(r)),
+                        span,
+                    )
+                })
+            };
+            alts.push(Alt {
+                con: AltCon::DataCon(DataCon {
+                    name: Symbol::intern(con_name),
+                    ty_con: ty_con.clone(),
+                    tag: meta.tag,
+                    arity: meta.arity,
+                }),
+                binders,
+                rhs,
+            });
+        }
+        Some(Expr::Case(
+            Box::new(container_expr.clone()),
+            alts,
+            Ty::Error,
+            span,
+        ))
     }
 
     /// Lower traverse for a user-defined ADT with derived Traversable.

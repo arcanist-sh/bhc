@@ -11,6 +11,11 @@ All notable changes to BHC are recorded here. The format follows
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
   Leaf)`, `P (-1) 2`.
+- `traverse` over a derived `Traversable` type at `Maybe` or `Either` works
+  (`traverse Just (Pair 1 2)` is `Just (Pair 1 2)`; it was `Nothing` or
+  `Just 0`), and `traverse`/`for` are typed `(a -> f b) -> t a -> f (t b)`
+  so the result's element type is known (#32). Recursive and nested fields
+  still use the generic traversal.
 - `deriving (Semigroup, Monoid) via V` on a newtype takes `V`'s instance
   methods; it derived an empty instance whose methods were error stubs
   (#35). The via type needs a real instance: `Data.Monoid`'s `Sum`,

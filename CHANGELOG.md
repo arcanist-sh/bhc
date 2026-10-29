@@ -11,6 +11,21 @@ All notable changes to BHC are recorded here. The format follows
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
   Leaf)`, `P (-1) 2`.
+- A parse error is a compile error (#4, #36). The parser recovered by
+  dropping what it could not parse, so `this is not haskell {{{` passed
+  `bhc check` and a module could compile with declarations missing;
+  `BHC_LENIENT_PARSE=1` restores that behaviour. To get there, constructs the
+  parser silently dropped in 19 pandoc modules are now parsed: pattern
+  synonym signatures and explicitly bidirectional synonyms, pragmas at the end
+  of a module, before `module` and after a doc comment, tuple sections after
+  an infix expression (`(p </> fp,)`), infix definitions with a wildcard or
+  literal left operand, operator variables as parameters (`(><)`), `let … in`
+  as a `do` statement, `then`/`else`/case guards at the column of a `do`
+  block's statements, Haddock comments inside type signatures, qualified
+  class names in instance contexts, the tuple type constructor `(,)`,
+  decimal/octal/control/named character escapes (`'\026'`, `'\DEL'`), and
+  string gaps (`\&` left a NUL character in the string).
+  `BHC_DUMP_TOKENS=1` prints the token stream, layout tokens included.
 - `traverse` over a derived `Traversable` type at `Maybe` or `Either` works
   (`traverse Just (Pair 1 2)` is `Just (Pair 1 2)`; it was `Nothing` or
   `Just 0`), and `traverse`/`for` are typed `(a -> f b) -> t a -> f (t b)`

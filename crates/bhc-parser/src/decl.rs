@@ -18,6 +18,12 @@ impl<'src> Parser<'src> {
         // Collect doc comments that may appear before the module declaration (Haddock)
         let doc = self.collect_doc_comments();
 
+        // More file-header pragmas may follow the header comment block:
+        // parsec's `Text.Parsec.Token` has `{-# OPTIONS_GHC … #-}` after it,
+        // before `module` (#36).
+        let mut pragmas = pragmas;
+        pragmas.extend(self.parse_pragmas());
+
         // Skip virtual tokens (VirtualSemi) that the layout rule may insert
         // between a doc comment and the `module` keyword. The doc comment is
         // the first real token, so the layout rule's `first_token` guard is
@@ -70,9 +76,14 @@ impl<'src> Parser<'src> {
             // Note: We do NOT skip doc comments here, since parse_top_decl collects them
             self.skip_virtual_tokens();
             self.skip_standalone_pragmas();
+            // A pragma can be the module's last item (blaze-html's
+            // `{-# INLINE wbr #-}`); the layout tokens after it close the
+            // module, they do not start a declaration.
+            self.skip_virtual_tokens();
             while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
                 self.skip_virtual_tokens();
                 self.skip_standalone_pragmas();
+                self.skip_virtual_tokens();
             }
             if self.at_eof() {
                 break;
@@ -759,6 +770,13 @@ impl<'src> Parser<'src> {
         // is at the same indentation level. Skip it.
         self.eat(&TokenKind::VirtualSemi);
 
+        // A pragma between the doc comment and its declaration (pandoc's
+        // `-- | … {-# DEPRECATED writeJATS "…" #-}` before `writeJATS ::`).
+        while matches!(self.current_kind(), Some(TokenKind::Pragma(_))) {
+            self.advance();
+            self.eat(&TokenKind::VirtualSemi);
+        }
+
         let tok = self.current().ok_or(ParseError::UnexpectedEof {
             expected: "declaration".to_string(),
         })?;
@@ -781,6 +799,12 @@ impl<'src> Parser<'src> {
                 // Operator type signature or binding: (<+>) :: ... or (<+>) = ...
                 self.parse_value_decl_with_doc(doc)
             }
+            // An infix definition whose left operand is a wildcard or a
+            // literal: `` _ `closes` "body" = False `` (#36)
+            TokenKind::Underscore
+            | TokenKind::IntLit(_)
+            | TokenKind::CharLit(_)
+            | TokenKind::StringLit(_) => self.parse_value_decl_with_doc(doc),
             // Top-level Template Haskell declaration splice: `$(deriver ... ''T)`.
             TokenKind::Operator(sym) if sym.as_str() == "$" => self.parse_decl_splice(),
             _ => Err(ParseError::Unexpected {
@@ -936,6 +960,27 @@ impl<'src> Parser<'src> {
                 }
             }
         }
+        // An infix definition whose left operand is a wildcard or a literal:
+        // `_ == _ = False` (pandoc's Docx.Combine), `` _ `closes` "body" =
+        // False `` (Readers.HTML.Parsing). Recovery dropped these (#36).
+        if matches!(
+            self.current_kind(),
+            Some(
+                TokenKind::Underscore
+                    | TokenKind::IntLit(_)
+                    | TokenKind::CharLit(_)
+                    | TokenKind::StringLit(_)
+            )
+        ) {
+            let saved = self.pos;
+            if let Ok(left_pat) = self.parse_pattern() {
+                if self.is_infix_var_op_start() {
+                    return self.finish_infix_op_def(start, doc.clone(), left_pat);
+                }
+            }
+            self.pos = saved;
+        }
+
         // Also handle bang patterns and lazy patterns at top level: !pat = ... or ~pat = ...
         if self.check(&TokenKind::Bang) || self.check(&TokenKind::Tilde) {
             return self.parse_pattern_binding(start);
@@ -2188,6 +2233,22 @@ impl<'src> Parser<'src> {
         // Parse the pattern synonym name (uppercase constructor-like)
         let name = self.parse_conid()?;
 
+        // A pattern synonym SIGNATURE, `pattern P :: T` or `pattern P, Q ::
+        // T`: its type comes from inference, so it is parsed and dropped.
+        // Recovery used to skip it with an error (#36).
+        if self.check(&TokenKind::Comma) || self.check(&TokenKind::DoubleColon) {
+            while self.eat(&TokenKind::Comma) {
+                self.parse_conid()?;
+            }
+            self.expect(&TokenKind::DoubleColon)?;
+            self.parse_type()?;
+            let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+            return Ok(Decl::PragmaDecl(Pragma {
+                kind: PragmaKind::Other("pattern synonym signature".to_string()),
+                span,
+            }));
+        }
+
         // Parse zero or more variable arguments
         let mut args = Vec::new();
         while let Some(&TokenKind::Ident(sym)) = self.current_kind() {
@@ -2212,6 +2273,15 @@ impl<'src> Parser<'src> {
 
         // Parse the RHS pattern
         let pattern = self.parse_pattern()?;
+
+        // An explicitly bidirectional synonym's builder: `pattern P x <- pat
+        // where P x = expr` (pandoc-types' `SimpleFigure`). It is parsed and
+        // dropped, so the synonym stays match-only, as it was when recovery
+        // skipped the clause (#36).
+        // TODO: lower the builder so `P` can also construct.
+        if self.eat(&TokenKind::Where) {
+            self.parse_local_decls()?;
+        }
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
 
@@ -2635,8 +2705,8 @@ impl<'src> Parser<'src> {
                 return Ok(vec![]);
             }
             constraints
-        } else if let Some(TokenKind::ConId(_)) = self.current_kind() {
-            // Could be single constraint `Eq a =>`
+        } else if let Some(TokenKind::ConId(_) | TokenKind::QualConId(_, _)) = self.current_kind() {
+            // Could be single constraint `Eq a =>` (or `Semigroup.Semigroup a =>`)
             let class = self.parse_conid()?;
             // Parse type arguments until we see `=>` or run out
             let mut args = Vec::new();
@@ -2670,8 +2740,9 @@ impl<'src> Parser<'src> {
     /// Parse a single constraint item within a context.
     /// Handles normal constraints (C a) and type equality (a ~ b).
     fn parse_constraint_item(&mut self, start_span: Span) -> ParseResult<Option<Constraint>> {
-        // Try to parse as a normal constraint first: ConId Type...
-        if let Some(TokenKind::ConId(_)) = self.current_kind() {
+        // Try to parse as a normal constraint first: ConId Type... (the class
+        // may be qualified: `Semigroup.Semigroup (ParsecT s u m a)`, #36)
+        if let Some(TokenKind::ConId(_) | TokenKind::QualConId(_, _)) = self.current_kind() {
             let class = self.parse_conid()?;
             // Parse type arguments
             let mut args = Vec::new();

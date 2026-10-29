@@ -104,6 +104,12 @@ pub struct Parser<'src> {
     /// collected in a token pre-scan so declarations work regardless of where
     /// they appear relative to the operator's uses.
     pub(crate) declared_fixities: std::collections::HashMap<String, (u8, crate::expr::Assoc)>,
+    /// Implicit blocks the parser closed before the lexer did (the layout
+    /// rule's parse-error(t) case: a `then`/`else`/`in`/`|` that cannot
+    /// start a statement ends a `do` block). The lexer still emits each one's
+    /// VirtualRBrace later, at the dedent; those are consumed as leftovers
+    /// rather than read as the end of an enclosing block.
+    pub(crate) phantom_rbraces: usize,
 }
 
 /// Maximum nesting depth for expressions, types, and patterns.
@@ -127,6 +133,7 @@ impl<'src> Parser<'src> {
             src,
             depth: 0,
             declared_fixities,
+            phantom_rbraces: 0,
         }
     }
 
@@ -329,6 +336,16 @@ impl<'src> Parser<'src> {
 
     /// Skip any virtual tokens (VirtualLBrace, VirtualRBrace, VirtualSemi).
     /// These are inserted by the layout rule and need to be skipped in some contexts.
+    /// Consume leftover VirtualRBraces of blocks closed early (see
+    /// `phantom_rbraces`). Being nested inside the current block, their
+    /// closers arrive before its own.
+    pub(crate) fn skip_phantom_rbraces(&mut self) {
+        while self.phantom_rbraces > 0 && self.check(&TokenKind::VirtualRBrace) {
+            self.advance();
+            self.phantom_rbraces -= 1;
+        }
+    }
+
     fn skip_virtual_tokens(&mut self) {
         while let Some(kind) = self.current_kind() {
             if kind.is_virtual() {
@@ -508,6 +525,17 @@ impl<'src> Parser<'src> {
 /// Parse a module from source code.
 pub fn parse_module(src: &str, file_id: FileId) -> (Option<Module>, Vec<Diagnostic>) {
     let mut parser = Parser::new(src, file_id);
+    // `BHC_DUMP_TOKENS=1`: print the token stream, layout tokens included,
+    // with line:column, for debugging layout.
+    if std::env::var_os("BHC_DUMP_TOKENS").is_some() {
+        for tok in &parser.tokens {
+            let off = tok.span.lo.0 as usize;
+            let before = &src[..off.min(src.len())];
+            let line = before.matches('\n').count() + 1;
+            let col = off - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+            eprintln!("{line}:{col} {:?}", tok.node.kind);
+        }
+    }
     let module = parser.parse_module();
     let diagnostics = parser.take_diagnostics();
 
@@ -880,6 +908,42 @@ mod tests {
     fn test_data_declaration() {
         let module = parse_module_ok("data Foo = Bar | Baz Int");
         assert!(!module.decls.is_empty());
+    }
+
+    /// Constructs pandoc and its dependencies use that the parser used to
+    /// drop through error recovery (#4, #36); each must parse with no
+    /// diagnostics now that a recovered error is fatal.
+    #[test]
+    fn test_recovered_constructs_parse_cleanly() {
+        let srcs = [
+            // pattern synonym signature and explicitly bidirectional synonym
+            "pattern P :: Int -> Maybe Int\npattern P x <- Just x where\n  P x = Just x\n",
+            // trailing pragma; pragma between a doc comment and its declaration
+            "-- | doc\n{-# DEPRECATED f \"no\" #-}\nf :: Int\nf = 1\n{-# INLINE f #-}\n",
+            // tuple section after an infix expression
+            "g x = (x + 1,)\n",
+            // infix definitions with a wildcard or literal left operand
+            "_ `closes` \"body\" = False\n\"p\" `closes` _ = True\n",
+            // operator variable as a parameter
+            "h (><) a b = a >< b\n",
+            // `let … in` as a do statement
+            "k = do\n  let a = 1\n      b = 2\n   in pure (a + b)\n",
+            // `else` at the column of the `then do` block's statements
+            "m c = do\n  if c\n     then do\n       pure 1\n       else pure 2\n",
+            // a case guard at the column of the previous guard's do statements
+            "n v = case v of\n  x\n    | x > 5 -> do\n    pure 1\n    | otherwise -> pure 2\n",
+            // Haddock comment inside a type signature
+            "q ::\n  -- | the argument\n  Int ->\n  -- | the result\n  Int\nq = id\n",
+            // qualified class names in an instance context and head
+            "instance S.Semigroup a => S.Semigroup (W a) where\n  W a <> W b = W a\n",
+            // the tuple type constructor
+            "instance C ((,) a) where\n  c = id\n",
+            // decimal, octal, control and named character escapes
+            "e = ['\\026', '\\o101', '\\^A', '\\DEL', '\\SOH']\n",
+        ];
+        for src in srcs {
+            parse_module_ok(src);
+        }
     }
 
     /// Kind-annotated binders keep their variables (#31).

@@ -16,6 +16,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_type_guarded(&mut self) -> ParseResult<Type> {
+        // Haddock argument documentation can precede a type: `f ::\n  -- |
+        // doc\n  Arg -> …` (pandoc's Powerpoint writer, #36).
+        self.skip_doc_comments();
         let start = self.current_span();
 
         // Check for forall
@@ -151,6 +154,8 @@ impl<'src> Parser<'src> {
         self.skip_doc_comments();
 
         if self.eat(&TokenKind::Arrow) {
+            // …and after the arrow, before the next argument.
+            self.skip_doc_comments();
             let rhs = self.parse_fun_type()?;
             let span = lhs.span().to(rhs.span());
             Ok(Type::Fun(Box::new(lhs), Box::new(rhs), span))
@@ -326,6 +331,19 @@ impl<'src> Parser<'src> {
             // Unit type: ()
             let span = start.to(self.tokens[self.pos - 1].span);
             return Ok(Type::Tuple(vec![], span));
+        }
+
+        // The tuple type constructor: `(,)`, `(,,)`, … (pandoc's ODT reader
+        // has `instance ChoiceVector ((,) a)`, #36).
+        if self.check(&TokenKind::Comma) {
+            let mut commas = 0;
+            while self.eat(&TokenKind::Comma) {
+                commas += 1;
+            }
+            let end = self.expect(&TokenKind::RParen)?;
+            let span = start.to(end.span);
+            let name = format!("({})", ",".repeat(commas));
+            return Ok(Type::Con(Ident::from_str(&name), span));
         }
 
         // Check for function type in parens: (->)

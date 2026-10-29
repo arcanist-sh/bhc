@@ -871,6 +871,21 @@ impl<'src> Lexer<'src> {
                 }
                 Some('\\') => {
                     self.advance();
+                    // String gaps contribute nothing: `\&` (which separates a
+                    // numeric escape from a following digit) and
+                    // backslash-whitespace-backslash. They used to come back
+                    // as a NUL character that ended up in the string.
+                    if self.peek() == Some('&') {
+                        self.advance();
+                        continue;
+                    }
+                    if self.peek().is_some_and(char::is_whitespace) {
+                        self.advance_while(char::is_whitespace);
+                        if self.peek() == Some('\\') {
+                            self.advance();
+                        }
+                        continue;
+                    }
                     if let Ok(c) = self.lex_escape_char() {
                         content.push(c);
                     }
@@ -917,10 +932,24 @@ impl<'src> Lexer<'src> {
                 self.advance();
                 Ok('\'')
             }
-            Some('0') => {
+            // `\0` is the decimal escape for NUL; handled with the other
+            // decimal escapes below, so `\026` reads as 26, not `\0` then `26`.
+            Some('o') => {
                 self.advance();
-                Ok('\0')
+                self.lex_octal_escape()
             }
+            Some('^') => {
+                // Control character: `\^A` is 1, `\^@` is 0, `\^_` is 31.
+                self.advance();
+                match self.peek() {
+                    Some(c) if ('@'..='_').contains(&c) => {
+                        self.advance();
+                        Ok(char::from(c as u8 - b'@'))
+                    }
+                    _ => Err(LexError::InvalidEscape('^')),
+                }
+            }
+            Some(c) if c.is_ascii_uppercase() => self.lex_ascii_name_escape(),
             Some('a') => {
                 self.advance();
                 Ok('\x07')
@@ -1009,6 +1038,79 @@ impl<'src> Lexer<'src> {
                 .ok_or(LexError::InvalidUnicodeEscape)
         } else {
             self.lex_hex_escape(4)
+        }
+    }
+
+    /// Lex an octal escape sequence (after `\o`).
+    fn lex_octal_escape(&mut self) -> Result<char, LexError> {
+        let start = self.pos;
+        self.advance_while(|c| ('0'..='7').contains(&c));
+        let oct = &self.src[start..self.pos];
+        if oct.is_empty() {
+            return Err(LexError::InvalidEscape('o'));
+        }
+        u32::from_str_radix(oct, 8)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or(LexError::InvalidNumber(oct.to_string()))
+    }
+
+    /// Lex an ASCII control-character name escape: `\NUL`, `\SOH`, …,
+    /// `\DEL`. The longest name wins (`\SOH` over `\SO`).
+    fn lex_ascii_name_escape(&mut self) -> Result<char, LexError> {
+        const NAMES: [(&str, u8); 34] = [
+            ("NUL", 0),
+            ("SOH", 1),
+            ("STX", 2),
+            ("ETX", 3),
+            ("EOT", 4),
+            ("ENQ", 5),
+            ("ACK", 6),
+            ("BEL", 7),
+            ("BS", 8),
+            ("HT", 9),
+            ("LF", 10),
+            ("VT", 11),
+            ("FF", 12),
+            ("CR", 13),
+            ("SO", 14),
+            ("SI", 15),
+            ("DLE", 16),
+            ("DC1", 17),
+            ("DC2", 18),
+            ("DC3", 19),
+            ("DC4", 20),
+            ("NAK", 21),
+            ("SYN", 22),
+            ("ETB", 23),
+            ("CAN", 24),
+            ("EM", 25),
+            ("SUB", 26),
+            ("ESC", 27),
+            ("FS", 28),
+            ("GS", 29),
+            ("RS", 30),
+            ("US", 31),
+            ("SP", 32),
+            ("DEL", 127),
+        ];
+        let rest = &self.src[self.pos..];
+        let best = NAMES
+            .iter()
+            .filter(|(name, _)| rest.starts_with(name))
+            .max_by_key(|(name, _)| name.len());
+        match best {
+            Some((name, code)) => {
+                for _ in 0..name.len() {
+                    self.advance();
+                }
+                Ok(char::from(*code))
+            }
+            None => {
+                let c = self.peek().unwrap_or(' ');
+                self.advance();
+                Err(LexError::InvalidEscape(c))
+            }
         }
     }
 

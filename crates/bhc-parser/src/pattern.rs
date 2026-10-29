@@ -303,6 +303,27 @@ impl<'src> Parser<'src> {
             return Ok(Pat::Con(Ident::from_str("()"), vec![], span));
         }
 
+        // An operator variable: `chooseMaxWith (><) (Right a) (Right b) =
+        // Right $ a >< b` binds the parameter `><` (pandoc's
+        // ODT.Generic.Fallible, #36).
+        let op_name = match self.current_kind() {
+            Some(TokenKind::Operator(sym)) => Some(*sym),
+            Some(TokenKind::Star) => Some(Symbol::intern("*")),
+            Some(TokenKind::Percent) => Some(Symbol::intern("%")),
+            Some(TokenKind::Dot) => Some(Symbol::intern(".")),
+            _ => None,
+        };
+        if let Some(sym) = op_name {
+            if matches!(
+                self.peek_nth(1).map(|t| &t.node.kind),
+                Some(TokenKind::RParen)
+            ) {
+                self.advance();
+                let end = self.expect(&TokenKind::RParen)?;
+                return Ok(Pat::Var(Ident::new(sym), start.to(end.span)));
+            }
+        }
+
         // Parse the first element, allowing a view pattern (`expr -> pat`).
         // Inside parens the surrounding delimiter disambiguates the `->`, so
         // view patterns are legal both standalone `(e -> p)` and as tuple

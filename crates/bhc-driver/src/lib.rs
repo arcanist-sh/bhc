@@ -1224,6 +1224,15 @@ impl Compiler {
             debug!("parse diagnostic: {:?}", diag);
         }
 
+        // The parser recovers from an error by dropping what it could not
+        // parse, so a module could come back with declarations missing and
+        // compile "successfully" without them (#4, #36). A recovered error is
+        // a parse error. `BHC_LENIENT_PARSE=1` restores the old behaviour
+        // (keep the partial module) for code with constructs the parser does
+        // not support yet.
+        let strict = std::env::var_os("BHC_LENIENT_PARSE").is_none()
+            && diagnostics.iter().any(|d| d.is_error());
+        let maybe_module = if strict { None } else { maybe_module };
         match maybe_module {
             Some(module) => {
                 if self.session.options.dump_ir.dump_ast {

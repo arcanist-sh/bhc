@@ -6886,6 +6886,11 @@ fn lazify_self_recursive_monadic_args(bindings: &mut [Bind]) {
             _ => false,
         }
     }
+    fn is_saturated_cons(e: &core::Expr) -> bool {
+        matches!(e, core::Expr::App(f, _, _)
+            if matches!(f.as_ref(), core::Expr::App(c, _, _)
+                if matches!(c.as_ref(), core::Expr::Var(v, _) if v.name.as_str() == ":")))
+    }
     // Keyed by VarId, never by name: pandoc's Markdown reader defines its own
     // `str` and also calls the imported `B.str`, and a name key wrapped
     // `B.str result` as a "self-call" — the Future then held an unforced
@@ -6927,6 +6932,15 @@ fn lazify_self_recursive_monadic_args(bindings: &mut [Bind]) {
                     }
                     is_monadic_method(h)
                 };
+                // `n : go (n + 1)`: a self-call in a cons tail is a
+                // corecursive producer; evaluating it eagerly never returns.
+                // List traversals force tails (`extract_list_tail`), so a
+                // thunk there is safe.
+                if is_saturated_cons(e) {
+                    if let core::Expr::App(_, tail, _) = e {
+                        wrap_if_self_call(tail, selfs);
+                    }
+                }
                 rw_spine(e, monadic, selfs);
             }
             core::Expr::Lam(_, b, _) | core::Expr::TyLam(_, b, _) => rw(b, selfs),

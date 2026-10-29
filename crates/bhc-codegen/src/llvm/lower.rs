@@ -6464,6 +6464,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Read the tail of a cons cell and force it to WHNF.
+    ///
+    /// A cons tail may be a thunk (a corecursive producer such as
+    /// `nats n = n : nats (n + 1)`), so every list traversal must go through
+    /// here rather than `extract_adt_field(cell, 2, 1)`. Unlike an arbitrary
+    /// constructor field, a tail is always a heap pointer (a list), so
+    /// `bhc_force` is safe on it and a cheap passthrough when it is already
+    /// evaluated.
+    fn extract_list_tail(&self, cell_ptr: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        let tail = self.extract_adt_field(cell_ptr, 2, 1)?;
+        Ok(self.build_force(tail.into())?.into_pointer_value())
+    }
+
     /// Extract a field from an ADT value.
     fn extract_adt_field(
         &self,
@@ -6551,9 +6564,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // parsec's `try` (backtracking) must not be intercepted by the
             // exception `try`, pandoc's `count`/`many` likewise. A name bound
             // to a compiled definition (local or interface-imported) takes the
-            // ordinary call path.
+            // ordinary call path. So does a local binding (`where repeat n =
+            // …`, a lambda parameter): its value is in the environment.
             if self.functions.contains_key(&var.id)
                 || self.external_functions.contains_key(&var.name)
+                || self.env.contains_key(&var.id)
             {
                 return None;
             }
@@ -7331,9 +7346,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "minimum" => self.lower_builtin_minimum(args[0]),
             "elem" => self.lower_builtin_elem(args[0], args[1]),
             "notElem" => self.lower_builtin_not_elem(args[0], args[1]),
-            "iterate" => self.lower_builtin_iterate(args[0], args[1]),
-            "repeat" => self.lower_builtin_repeat(args[0]),
-            "cycle" => self.lower_builtin_cycle(args[0]),
+            "iterate" | "repeat" | "cycle" => self.lower_lazy_list_producer(name, &args),
             "takeWhile" => self.lower_builtin_take_while(args[0], args[1]),
             "dropWhile" => self.lower_builtin_drop_while(args[0], args[1]),
             "span" => self.lower_builtin_span(args[0], args[1]),
@@ -8534,7 +8547,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Cons case: extract tail (field 1)
         self.builder().position_at_end(cons_block);
-        let tail_ptr = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_ptr)?;
         Ok(Some(tail_ptr.into()))
     }
 
@@ -8684,7 +8697,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ---- Cons-cell path: iterative loop ----
         self.builder().position_at_end(is_cons_block);
         let init_count = tm.i64_type().const_int(1, false); // already know first cell is cons
-        let first_tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let first_tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -8726,7 +8739,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "new_count",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to add: {:?}", e)))?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -8872,7 +8885,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Collect loop body: cons head onto accumulator (in reverse), advance
         self.builder().position_at_end(collect_body);
         let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         let new_acc = self.build_cons(head_ptr.into(), acc_phi.as_basic_value())?;
         let new_count = self
             .builder()
@@ -8924,7 +8937,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let new_rev_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -9229,7 +9242,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head and tail (actual_src is guaranteed non-empty since original list is non-empty)
         let cyc_head = self.extract_adt_field(actual_src, 2, 0)?;
-        let cyc_tail = self.extract_adt_field(actual_src, 2, 1)?;
+        let cyc_tail = self.extract_list_tail(actual_src)?;
 
         let cyc_cons = self.build_cons(cyc_head.into(), c_result.as_basic_value())?;
         let cyc_new_count = self
@@ -9352,7 +9365,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "new_count",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to sub: {:?}", e)))?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -9440,7 +9453,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: cons head onto accumulator, advance to tail
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         let new_acc = self.build_cons(head_ptr.into(), acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -9558,7 +9571,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let rev_new_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -9602,7 +9615,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Fold loop body: cons head of reversed list onto accumulator
         self.builder().position_at_end(fold_body);
         let fold_head = self.extract_adt_field(fold_current, 2, 0)?;
-        let fold_tail = self.extract_adt_field(fold_current, 2, 1)?;
+        let fold_tail = self.extract_list_tail(fold_current)?;
         let fold_new_acc = self.build_cons(fold_head.into(), fold_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(fold_header)
@@ -10468,7 +10481,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "l2c_inc",
             )
             .map_err(|e| CodegenError::Internal(format!("l2c add: {:?}", e)))?;
-        let tail = self.extract_adt_field(len_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(len_node.as_basic_value().into_pointer_value())?;
         len_node.add_incoming(&[(&tail, len_body)]);
         len_count.add_incoming(&[(&next_count, len_body)]);
         self.builder()
@@ -10569,8 +10582,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "l2c_fnext",
             )
             .map_err(|e| CodegenError::Internal(format!("l2c add: {:?}", e)))?;
-        let ftail =
-            self.extract_adt_field(fill_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let ftail = self.extract_list_tail(fill_node.as_basic_value().into_pointer_value())?;
         fill_node.add_incoming(&[(&ftail, fill_body)]);
         fill_idx.add_incoming(&[(&next_fidx, fill_body)]);
         self.builder()
@@ -10656,7 +10668,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 0)?;
         let char_list = self.cstring_to_char_list(cstr_head)?;
         let new_acc = self.build_cons(char_list.into(), w_acc.as_basic_value())?;
-        let w_tail = self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let w_tail = self.extract_list_tail(w_node.as_basic_value().into_pointer_value())?;
 
         let walk_body_end = self.builder().get_insert_block().unwrap();
         w_node.add_incoming(&[(&w_tail, walk_body_end)]);
@@ -10728,7 +10740,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(rev_body);
         let head = self.extract_adt_field(r_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(r_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(r_node.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head.into(), r_acc.as_basic_value())?;
         let rev_body_end = self.builder().get_insert_block().unwrap();
         r_node.add_incoming(&[(&tail, rev_body_end)]);
@@ -10801,7 +10813,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 0)?;
         let cstr = self.char_list_to_cstring(char_list_head)?;
         let new_acc = self.build_cons(cstr.into(), w_acc.as_basic_value())?;
-        let w_tail = self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let w_tail = self.extract_list_tail(w_node.as_basic_value().into_pointer_value())?;
         let walk_body_end = self.builder().get_insert_block().unwrap();
         w_node.add_incoming(&[(&w_tail, walk_body_end)]);
         w_acc.add_incoming(&[(&new_acc, walk_body_end)]);
@@ -10921,8 +10933,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
             .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
             .builder()
@@ -11035,8 +11046,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
             .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
             .builder()
@@ -11157,8 +11167,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call the function closure: fn_ptr(fn_ptr, head)
         let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
@@ -11231,8 +11240,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11339,8 +11347,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate: pred_ptr(pred_ptr, head)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -11443,8 +11450,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11554,8 +11560,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f acc head - function takes (closure_ptr, acc, head) and returns new acc
         // The closure stores the function pointer which expects all args at once
@@ -11698,8 +11703,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11755,8 +11759,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(fold_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f head acc - function takes (closure_ptr, elem, acc) and returns new acc
         // Note: for foldr, the function signature is (a -> b -> b), so elem comes first, then acc
@@ -11923,12 +11926,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1_ptr = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2_ptr = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Call the function: f x y
         // For binary functions (most common case with zipWith), we call with both args at once.
@@ -12002,8 +12003,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -12119,12 +12119,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1_ptr = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2_ptr = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Build tuple (x, y) - represented as ADT with tag 0 and 2 fields
         let pair_ptr = self.build_pair(head1_ptr.into(), head2_ptr.into())?;
@@ -12183,8 +12181,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -12356,8 +12353,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head and tail
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if tail is empty (this element is the last)
         let tail_tag = self.extract_adt_tag(tail_ptr)?;
@@ -12473,8 +12469,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head and tail
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if tail is empty (this element is the last - don't include it)
         let tail_tag = self.extract_adt_tag(tail_ptr)?;
@@ -12545,8 +12540,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -12681,8 +12675,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: decrement index, continue with tail
         self.builder().position_at_end(loop_body);
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_idx = self
             .builder()
             .build_int_sub(
@@ -12812,7 +12805,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let inner_list_ptr =
             self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let outer_tail_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(outer_list_phi.as_basic_value().into_pointer_value())?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -12851,7 +12844,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let head_ptr =
             self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr =
-            self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(inner_list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head_ptr.into(), inner_result_phi.as_basic_value())?;
 
         self.builder()
@@ -12920,8 +12913,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -13047,7 +13039,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let head_ptr =
             self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let outer_tail_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(outer_list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f on head
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -13104,7 +13096,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let inner_head_ptr =
             self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let inner_tail_ptr =
-            self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(inner_list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(inner_head_ptr.into(), inner_result_phi.as_basic_value())?;
 
         self.builder()
@@ -13174,8 +13166,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -14473,7 +14464,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a Maybe) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if head is Just (tag==1) or Nothing (tag==0)
         let maybe_tag = self.extract_adt_tag(head)?;
@@ -14615,7 +14606,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (an Either) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if head matches target tag
         let either_tag = self.extract_adt_tag(head)?;
@@ -14745,7 +14736,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head and tail, call f(head)
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f(head) → Maybe result
         let fn_ptr = self.extract_closure_fn_ptr(f_ptr)?;
@@ -14887,7 +14878,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (Either) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let either_tag = self.extract_adt_tag(head)?;
         let is_left = self
@@ -15023,8 +15014,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -16342,7 +16332,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to call print_char: {:?}", e)))?;
 
         // Extract tail at field 1
-        let tail_ptr = self.extract_adt_field(node_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(node_ptr)?;
         current_node.add_incoming(&[(&tail_ptr, loop_body)]);
 
         self.builder()
@@ -18858,7 +18848,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let rev_new_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -18906,7 +18896,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Fold loop body
         self.builder().position_at_end(fold_body);
         let fold_head = self.extract_adt_field(fold_current, 2, 0)?;
-        let fold_tail = self.extract_adt_field(fold_current, 2, 1)?;
+        let fold_tail = self.extract_list_tail(fold_current)?;
         let fold_new_acc = self.build_cons(fold_head.into(), fold_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(fold_header)
@@ -30684,8 +30674,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate: pred_ptr(pred_ptr, head) -> IO Bool (in strict codegen = Bool)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -30843,8 +30832,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, acc, head) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -31213,12 +31201,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1 =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1 =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2 =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2 =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2 = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, head1, head2) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -31364,12 +31350,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1 =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1 =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2 =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2 =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2 = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, head1, head2) -> result (discarded)
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -32467,7 +32451,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head as initial accumulator, tail as list to fold
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
 
         // Now do standard foldl loop on tail with head as init
         let entry_block = self.builder().get_insert_block().unwrap();
@@ -32508,8 +32492,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f acc head - flat 3-arg call: fn_ptr(closure_ptr, acc, head)
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -32584,7 +32567,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head of reversed list as init, tail as list to fold
         let head = self.extract_adt_field(reversed_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(reversed_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(reversed_ptr)?;
 
         // foldl on reversed list with flipped function args
         let entry_block = self.builder().get_insert_block().unwrap();
@@ -32620,8 +32603,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // For foldr1: f elem acc (not f acc elem like foldl)
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -33040,8 +33022,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_call(*print_char_fn, &[char_i32.into()], "")
             .map_err(|e| CodegenError::Internal(format!("iprint: call: {:?}", e)))?;
-        let next =
-            self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let next = self.extract_list_tail(current_node.as_basic_value().into_pointer_value())?;
         current_node.add_incoming(&[(&next, loop_body)]);
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -33347,7 +33328,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, call predicate, check result
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call pred(head)
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -33490,7 +33471,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, call predicate, check result
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call pred(head)
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -33629,7 +33610,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head Bool, check its tag
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         // head is a Bool ADT - extract its tag (0=False, 1=True)
         let head_tag = self.extract_adt_tag(head)?;
         let is_false = self
@@ -33732,7 +33713,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head Bool, check its tag
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         // head is a Bool ADT - extract its tag (0=False, 1=True)
         let head_tag = self.extract_adt_tag(head)?;
         let is_true = self
@@ -33845,7 +33826,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check non-empty: extract head as initial best, tail as rest
         self.builder().position_at_end(check_nonempty);
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("{}: branch: {:?}", label, e)))?;
@@ -33879,8 +33860,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let cur_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let cur_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -34003,7 +33983,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: compare head with val
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let head_int = self
             .builder()
             .build_ptr_to_int(head, i64_type, "head_int")
@@ -34137,7 +34117,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: call predicate on head
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -34310,12 +34290,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(compare_block);
         let p_head =
             self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let p_tail =
-            self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let p_tail = self.extract_list_tail(prefix_phi.as_basic_value().into_pointer_value())?;
         let l_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let l_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let p_int = self
             .builder()
@@ -34473,12 +34451,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(compare_block);
         let p_head =
             self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let p_tail =
-            self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let p_tail = self.extract_list_tail(prefix_phi.as_basic_value().into_pointer_value())?;
         let l_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let l_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let p_int = self
             .builder()
@@ -34677,9 +34653,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Inner compare: compare heads
         self.builder().position_at_end(inner_compare);
         let n_head = self.extract_adt_field(n_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let n_tail = self.extract_adt_field(n_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let n_tail = self.extract_list_tail(n_phi.as_basic_value().into_pointer_value())?;
         let h_head = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let h_tail = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let h_tail = self.extract_list_tail(h_phi.as_basic_value().into_pointer_value())?;
 
         let n_int = self
             .builder()
@@ -34705,8 +34681,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Next outer: advance haystack by one
         self.builder().position_at_end(next_outer);
-        let hay_tail =
-            self.extract_adt_field(hay_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let hay_tail = self.extract_list_tail(hay_phi.as_basic_value().into_pointer_value())?;
         self.builder()
             .build_unconditional_branch(outer_header)
             .map_err(|e| CodegenError::Internal(format!("isInfixOf: branch: {:?}", e)))?;
@@ -34810,7 +34785,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: cons current list pointer onto acc, advance to tail
         self.builder().position_at_end(loop_body);
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(
             list_phi.as_basic_value().into_pointer_value().into(),
             acc_phi.as_basic_value(),
@@ -34907,7 +34882,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: add current head to reversed elements, reverse to get prefix, cons prefix onto acc
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // cons head onto reversed-elements (building reversed prefix)
         let new_elems = self.build_cons(head.into(), elems_phi.as_basic_value())?;
@@ -35015,7 +34990,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(check_block);
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("{}: branch: {:?}", label, e)))?;
@@ -35049,8 +35024,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let cur_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let cur_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call cmp(cur_head, best) - cmp is a flat 2-arg closure: (env, arg1, arg2) -> Ordering
         let cmp_fn_ptr = self.extract_closure_fn_ptr(cmp_ptr)?;
@@ -35185,8 +35159,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Comparing the ADDRESSES is only right for a scalar element. `elem
         // "output" names` on a list of strings was always False; walk the
@@ -35451,8 +35424,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -35494,38 +35466,146 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result_phi.as_basic_value()))
     }
 
-    /// Lower `iterate` (stub: single-element list).
-    fn lower_builtin_iterate(
+    /// Lower `iterate f x`, `repeat x` and `cycle xs` as lazy producers (#28):
+    /// the Core of their Prelude definitions, with a thunked cons tail.
+    ///
+    /// ```text
+    /// iterate f x = letrec go = \f x -> x : lazy (go f (f x)) in go f x
+    /// repeat x    = letrec go = \x -> x : lazy (go x) in go x
+    /// cycle xs    = case xs of
+    ///                 []    -> error "Prelude.cycle: empty list"
+    ///                 _ : _ -> letrec go = \ys -> case ys of
+    ///                                             []    -> go xs
+    ///                                             y : t -> y : lazy (go t)
+    ///                          in go xs
+    /// ```
+    ///
+    /// List traversals force a tail before reading it (`extract_list_tail`),
+    /// so these are consumed like any other list. The `take n (…)` shapes
+    /// keep their direct loops (`lower_take_iterate` and friends).
+    fn lower_lazy_list_producer(
         &mut self,
-        _func_expr: &Expr,
-        seed_expr: &Expr,
+        name: &str,
+        args: &[&Expr],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(_func_expr)?;
-        let seed_val = self
-            .lower_expr(seed_expr)?
-            .ok_or_else(|| CodegenError::Internal("iterate: no seed".to_string()))?;
-        let seed_ptr = self.value_to_ptr(seed_val)?;
-        let nil = self.alloc_adt(0, 0)?;
-        let cons = self.alloc_adt(1, 2)?;
-        self.store_adt_field(cons, 2, 0, seed_ptr.into())?;
-        self.store_adt_field(cons, 2, 1, nil.into())?;
-        Ok(Some(cons.into()))
-    }
-
-    /// Lower `repeat` (stub).
-    fn lower_builtin_repeat(
-        &mut self,
-        val_expr: &Expr,
-    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_iterate(val_expr, val_expr)
-    }
-
-    /// Lower `cycle` (stub).
-    fn lower_builtin_cycle(
-        &mut self,
-        list_expr: &Expr,
-    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_expr(list_expr)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Below the range `specialized_traverse` uses; each producer gets its
+        // own ids because a local `letrec` function is lifted by its VarId.
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 1_000_000);
+        let span = bhc_span::Span::default();
+        let fresh = |base: &str| Var {
+            name: Symbol::intern(base),
+            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+            ty: Ty::Error,
+        };
+        let var = |v: &Var| Expr::Var(v.clone(), span);
+        let app = |f: Expr, a: Expr| Expr::App(Box::new(f), Box::new(a), span);
+        let lam = |v: &Var, b: Expr| Expr::Lam(v.clone(), Box::new(b), span);
+        let cons = |h: Expr, t: Expr| {
+            let cons_var = Var {
+                name: Symbol::intern(":"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            app(
+                app(Expr::Var(cons_var, span), h),
+                Expr::Lazy(Box::new(t), span),
+            )
+        };
+        let letrec = |go: &Var, rhs: Expr, body: Expr| {
+            Expr::Let(
+                Box::new(Bind::Rec(vec![(go.clone(), Box::new(rhs))])),
+                Box::new(body),
+                span,
+            )
+        };
+        let list_alt = |tag: u32, binders: Vec<Var>, rhs: Expr| Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern(if tag == 0 { "[]" } else { ":" }),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("List"), bhc_types::Kind::Star),
+                tag,
+                arity: binders.len() as u32,
+            }),
+            binders,
+            rhs,
+        };
+        let core = match (name, args) {
+            ("iterate", [f_arg, x_arg]) => {
+                let (go, f, x) = (
+                    fresh("$iterate_go"),
+                    fresh("$iterate_f"),
+                    fresh("$iterate_x"),
+                );
+                let body = cons(var(&x), app(app(var(&go), var(&f)), app(var(&f), var(&x))));
+                let call = app(app(var(&go), (*f_arg).clone()), (*x_arg).clone());
+                letrec(&go, lam(&f, lam(&x, body)), call)
+            }
+            ("repeat", [x_arg]) => {
+                let (go, x) = (fresh("$repeat_go"), fresh("$repeat_x"));
+                let body = cons(var(&x), app(var(&go), var(&x)));
+                letrec(&go, lam(&x, body), app(var(&go), (*x_arg).clone()))
+            }
+            ("cycle", [xs_arg]) => {
+                let (xs, go, ys) = (fresh("$cycle_xs"), fresh("$cycle_go"), fresh("$cycle_ys"));
+                let (y, t, h, r) = (
+                    fresh("$cycle_y"),
+                    fresh("$cycle_t"),
+                    fresh("$cycle_h"),
+                    fresh("$cycle_r"),
+                );
+                let step = Expr::Case(
+                    Box::new(var(&ys)),
+                    vec![
+                        list_alt(0, vec![], app(var(&go), var(&xs))),
+                        list_alt(
+                            1,
+                            vec![y.clone(), t.clone()],
+                            cons(var(&y), app(var(&go), var(&t))),
+                        ),
+                    ],
+                    Ty::Error,
+                    span,
+                );
+                let error_var = Var {
+                    name: Symbol::intern("error"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                let empty = app(
+                    Expr::Var(error_var, span),
+                    Expr::Lit(
+                        Literal::String(Symbol::intern("Prelude.cycle: empty list")),
+                        Ty::Error,
+                        span,
+                    ),
+                );
+                let body = Expr::Case(
+                    Box::new(var(&xs)),
+                    vec![
+                        list_alt(0, vec![], empty),
+                        list_alt(
+                            1,
+                            vec![h, r],
+                            letrec(&go, lam(&ys, step), app(var(&go), var(&xs))),
+                        ),
+                    ],
+                    Ty::Error,
+                    span,
+                );
+                Expr::Let(
+                    Box::new(Bind::NonRec(xs, Box::new((*xs_arg).clone()))),
+                    Box::new(body),
+                    span,
+                )
+            }
+            _ => {
+                return Err(CodegenError::Internal(format!(
+                    "lazy list producer: unexpected {name}/{}",
+                    args.len()
+                )))
+            }
+        };
+        self.lower_expr(&core)
     }
 
     /// Lower `takeWhile` — take longest prefix where predicate holds.
@@ -35606,8 +35686,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -35701,8 +35780,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -35790,8 +35868,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -35929,8 +36006,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -36047,8 +36123,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -36149,8 +36224,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -36257,8 +36331,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -36375,8 +36448,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head_ptr.into(), prefix_phi.as_basic_value())?;
         let next_counter = self
             .builder()
@@ -36438,8 +36510,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -36540,8 +36611,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate: pred(pred_ptr, head)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -36692,8 +36762,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // head_ptr is a pair (tag=0, arity=2): extract field 0 (key) and field 1 (value)
         let pair_key = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -36835,8 +36904,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -36944,8 +37012,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev1_body);
         let rev1_head =
             self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev1_tail =
-            self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev1_tail = self.extract_list_tail(rev1_list.as_basic_value().into_pointer_value())?;
         let rev1_new_cons = self.build_cons(rev1_head.into(), rev1_acc.as_basic_value())?;
 
         self.builder()
@@ -36999,8 +37066,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev2_body);
         let rev2_head =
             self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev2_tail =
-            self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev2_tail = self.extract_list_tail(rev2_list.as_basic_value().into_pointer_value())?;
         let rev2_new_cons = self.build_cons(rev2_head.into(), rev2_acc.as_basic_value())?;
 
         self.builder()
@@ -37089,7 +37155,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // First element: extract head, start reversed result with just head
         self.builder().position_at_end(first_block);
         let first_head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let first_tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let first_tail = self.extract_list_tail(list_ptr)?;
 
         let nil = self.build_nil()?;
         let first_cons = self.build_cons(first_head.into(), nil.into())?;
@@ -37128,8 +37194,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Built reversed, so the separator goes on before the element: the
         // accumulator `x1 : …` becomes `x2 : sep : x1 : …`, which reverses to
@@ -37187,8 +37252,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -37768,8 +37832,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -37857,8 +37920,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let r_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let r_cons = self.build_cons(r_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -38035,7 +38097,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Outer body: get head of xs
         self.builder().position_at_end(outer_body);
         let x_head = self.extract_adt_field(xs_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let x_tail = self.extract_adt_field(xs_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let x_tail = self.extract_list_tail(xs_phi.as_basic_value().into_pointer_value())?;
 
         // Convert x_head to int for comparison (works for Int values)
         let x_int = self
@@ -38071,7 +38133,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Inner body: compare x_head with y_head
         self.builder().position_at_end(inner_body);
         let y_head = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let y_tail = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let y_tail = self.extract_list_tail(ys_phi.as_basic_value().into_pointer_value())?;
         let y_int = self
             .builder()
             .build_ptr_to_int(y_head, tm.i64_type(), "y_int")
@@ -38216,8 +38278,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f(func_ptr, acc, head) - 2-arg closure call
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -38295,8 +38356,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -38410,8 +38470,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // scanr applies f(elem, acc) — note the arg order
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -38511,7 +38570,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Non-empty case: extract head as init, scanl on tail
         self.builder().position_at_end(nonempty_block);
         let head_ptr = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_ptr)?;
 
         // Build reversed result starting with head (the init value)
         let nil2 = self.build_nil()?;
@@ -38558,7 +38617,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: new_acc = f(acc, head); cons new_acc onto result
         self.builder().position_at_end(loop_body);
         let lh = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let lt = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let lt = self.extract_list_tail(l_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
@@ -38679,7 +38738,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let reversed_ptr = reversed.into_pointer_value();
 
         let rev_head = self.extract_adt_field(reversed_ptr, 2, 0)?;
-        let rev_tail = self.extract_adt_field(reversed_ptr, 2, 1)?;
+        let rev_tail = self.extract_list_tail(reversed_ptr)?;
 
         // Build initial result: cons init_val onto nil
         let nil2 = self.build_nil()?;
@@ -38726,7 +38785,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: new_acc = f(head, acc), cons onto result
         self.builder().position_at_end(loop_body);
         let lh = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let lt = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let lt = self.extract_list_tail(l_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
@@ -39264,7 +39323,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // next_char: advance to tail
                 self.builder().position_at_end(next_char);
-                let tail = self.extract_adt_field(current_list, 2, 1)?;
+                let tail = self.extract_list_tail(current_list)?;
                 current_list = tail;
             }
 
@@ -39482,11 +39541,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract heads, build triple, cons
         self.builder().position_at_end(loop_body);
         let h1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t1 = self.extract_list_tail(l1_phi.as_basic_value().into_pointer_value())?;
         let h2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t2 = self.extract_list_tail(l2_phi.as_basic_value().into_pointer_value())?;
         let h3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t3 = self.extract_list_tail(l3_phi.as_basic_value().into_pointer_value())?;
 
         let triple = self.build_triple(h1.into(), h2.into(), h3.into())?;
         let new_cons = self.build_cons(triple.into(), result_phi.as_basic_value())?;
@@ -39646,11 +39705,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract heads, call f(h1, h2, h3), cons result
         self.builder().position_at_end(loop_body);
         let h1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t1 = self.extract_list_tail(l1_phi.as_basic_value().into_pointer_value())?;
         let h2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t2 = self.extract_list_tail(l2_phi.as_basic_value().into_pointer_value())?;
         let h3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t3 = self.extract_list_tail(l3_phi.as_basic_value().into_pointer_value())?;
 
         // Call f as 4-arg closure: fn(closure_ptr, h1, h2, h3) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -39763,8 +39822,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // head is a pair ADT (tag=0, arity=2)
         let fst_val = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -39819,8 +39877,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev1_body);
         let r1_head =
             self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r1_tail =
-            self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r1_tail = self.extract_list_tail(rev1_list.as_basic_value().into_pointer_value())?;
         let r1_cons = self.build_cons(r1_head.into(), rev1_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev1_header)
@@ -39868,8 +39925,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev2_body);
         let r2_head =
             self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r2_tail =
-            self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r2_tail = self.extract_list_tail(rev2_list.as_basic_value().into_pointer_value())?;
         let r2_cons = self.build_cons(r2_head.into(), rev2_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev2_header)
@@ -43893,7 +43949,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract (key, value) pair from head
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         // Pair is an ADT with (key, value)
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -44099,7 +44155,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a map) and tail, union with accumulator
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let map_ptr_val = map_phi.as_basic_value().into_pointer_value();
         let new_map = self
@@ -44336,7 +44392,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a set) and tail, union with accumulator
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let set_ptr_val = set_phi.as_basic_value().into_pointer_value();
         let new_set = self
@@ -45139,7 +45195,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // head = field 0 of cons cell (a pair)
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
         // tail = field 1 of cons cell
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         // pair is an ADT with (key, value) — extract key (field 0) and value (field 1)
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -45891,7 +45947,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head element, insert into set
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let elem_int = self.coerce_to_int(head_ptr.into())?;
         let elem_int = self.canonical_container_key(elem_int, kind)?;
@@ -56149,8 +56205,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Heads equal - continue with tails
         self.builder().position_at_end(heads_equal_block);
-        let tail1 = self.extract_adt_field(list1_ptr, 2, 1)?; // arity=2 (Cons), field=1 (tail)
-        let tail2 = self.extract_adt_field(list2_ptr, 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_ptr)?; // arity=2 (Cons), field=1 (tail)
+        let tail2 = self.extract_list_tail(list2_ptr)?;
 
         // Update phis and loop back
         list1_phi.add_incoming(&[(&tail1, heads_equal_block)]);
@@ -59969,6 +60025,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // Determine if we need to unbox the field
                         let field_val = self.ptr_to_value(field_ptr, &field_ty)?;
                         self.env.insert(binder.id, field_val);
+                        // A cons tail may be an unevaluated corecursive
+                        // producer: force it where the binder is used, not
+                        // here (`(y:_) -> y` must not run the producer).
+                        if field_idx == 1 && con.name.as_str() == ":" && arity == 2 {
+                            self.thunked_vars.insert(binder.id);
+                        }
                     }
                 }
             } else {
@@ -61170,7 +61232,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, snoc onto seq, advance tail
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
         let seq_acc = seq_phi.as_basic_value().into_pointer_value();
 
         let new_seq = self

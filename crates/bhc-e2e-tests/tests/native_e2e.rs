@@ -125,6 +125,12 @@ fn test_tier2_lazy_infinite_native() {
     run_native_test("tier2_functions/lazy_infinite", Profile::Default);
 }
 
+// Corecursive producers (`n : go (n + 1)`) and lazy iterate/repeat/cycle (#28).
+#[test]
+fn test_tier2_corecursive_lists_native() {
+    run_native_test("tier2_functions/corecursive_lists", Profile::Default);
+}
+
 // A function with a lazy parameter that is ALSO used as a first-class value.
 // Both sides of a call must agree that a parameter is a thunk, and an indirect
 // call cannot agree — so escape analysis has to exclude this function and keep

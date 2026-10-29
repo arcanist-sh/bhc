@@ -11,6 +11,10 @@ All notable changes to BHC are recorded here. The format follows
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
   Leaf)`, `P (-1) 2`.
+- `UnboxedTuples`: `(# a, b #)` types, expressions and patterns are accepted
+  and treated as ordinary tuples, `(# x #)` as `x` and `(# #)` as `()` (#36).
+  `(#` and `#)` are only unboxed-tuple brackets next to whitespace, so an
+  operator section like `(#)` still lexes as before.
 - A parse error is a compile error (#4, #36). The parser recovered by
   dropping what it could not parse, so `this is not haskell {{{` passed
   `bhc check` and a module could compile with declarations missing;

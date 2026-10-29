@@ -249,6 +249,26 @@ impl<'src> Parser<'src> {
 
             TokenKind::LParen => self.parse_paren_type(),
 
+            // An unboxed tuple type `(# a, b #)`, read as a boxed tuple: bhc
+            // has no unboxed representation, and the meaning is the same (#36).
+            TokenKind::LParenHash => {
+                let start = tok.span;
+                self.advance();
+                let mut tys = Vec::new();
+                if !self.check(&TokenKind::HashRParen) {
+                    tys.push(self.parse_type()?);
+                    while self.eat(&TokenKind::Comma) {
+                        tys.push(self.parse_type()?);
+                    }
+                }
+                let end = self.expect(&TokenKind::HashRParen)?;
+                let span = start.to(end.span);
+                if tys.len() == 1 {
+                    return Ok(tys.pop().expect("one element"));
+                }
+                Ok(Type::Tuple(tys, span))
+            }
+
             TokenKind::LBracket => self.parse_list_type(),
 
             // M9: Type-level natural literal

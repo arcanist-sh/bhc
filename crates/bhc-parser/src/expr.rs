@@ -431,6 +431,25 @@ impl<'src> Parser<'src> {
             }
 
             TokenKind::LParen => self.parse_paren_expr(),
+            // An unboxed tuple `(# a, b #)`, built as a boxed tuple (#36).
+            TokenKind::LParenHash => {
+                let start = self.current_span();
+                self.advance();
+                let mut exprs = Vec::new();
+                if !self.check(&TokenKind::HashRParen) {
+                    exprs.push(self.parse_expr()?);
+                    while self.eat(&TokenKind::Comma) {
+                        exprs.push(self.parse_expr()?);
+                    }
+                }
+                let end = self.expect(&TokenKind::HashRParen)?;
+                let span = start.to(end.span);
+                match exprs.len() {
+                    0 => Ok(Expr::Con(Ident::from_str("()"), span)),
+                    1 => Ok(Expr::Paren(Box::new(exprs.pop().expect("one")), span)),
+                    _ => Ok(Expr::Tuple(exprs, span)),
+                }
+            }
 
             TokenKind::LBracket => self.parse_list_expr(),
 

@@ -265,6 +265,26 @@ impl<'src> Parser<'src> {
             }
 
             TokenKind::LParen => self.parse_paren_pattern(),
+            // An unboxed tuple pattern `(# a, b #)`, matched as a boxed tuple
+            // (#36).
+            TokenKind::LParenHash => {
+                let start = self.current_span();
+                self.advance();
+                let mut pats = Vec::new();
+                if !self.check(&TokenKind::HashRParen) {
+                    pats.push(self.parse_pattern()?);
+                    while self.eat(&TokenKind::Comma) {
+                        pats.push(self.parse_pattern()?);
+                    }
+                }
+                let end = self.expect(&TokenKind::HashRParen)?;
+                let span = start.to(end.span);
+                match pats.len() {
+                    0 => Ok(Pat::Con(Ident::from_str("()"), vec![], span)),
+                    1 => Ok(pats.pop().expect("one")),
+                    _ => Ok(Pat::Tuple(pats, span)),
+                }
+            }
 
             TokenKind::LBracket => self.parse_list_pattern(),
 

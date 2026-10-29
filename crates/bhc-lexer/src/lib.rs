@@ -1241,7 +1241,14 @@ impl<'src> Lexer<'src> {
                 self.advance();
                 return Token::new(TokenKind::LParenHash);
             }
-            ('#', Some(')')) => {
+            // `#)` closes an unboxed tuple when a space precedes it
+            // (`(# a, b #)`); in `(#)` it is the operator `#` then `)`.
+            ('#', Some(')'))
+                if self.src[..self.pos]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace) =>
+            {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::HashRParen);
@@ -1630,7 +1637,17 @@ impl<'src> Lexer<'src> {
             '\'' => self.lex_char(start),
 
             // Single-character tokens
-            '(' if self.peek2() != Some('#') => {
+            // `(#` opens an unboxed tuple when a space or `#)` follows
+            // (`(# a, b #)`, `(# #)`); otherwise `(` starts an operator
+            // section such as `(#)` or `(#.)`.
+            '(' if self.peek2() == Some('#')
+                && self.peek3().is_some_and(|c| c.is_whitespace() || c == ')') =>
+            {
+                self.advance();
+                self.advance();
+                Token::new(TokenKind::LParenHash)
+            }
+            '(' => {
                 self.advance();
                 Token::new(TokenKind::LParen)
             }

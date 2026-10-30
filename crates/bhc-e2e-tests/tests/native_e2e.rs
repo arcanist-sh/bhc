@@ -1534,6 +1534,12 @@ fn test_tier2_newtype_show_multimodule() {
     run_native_test("tier2_functions/newtype_show_multimodule", Profile::Default);
 }
 
+// DerivingVia through the monoid newtypes and through a user Show (#35).
+#[test]
+fn test_tier2_deriving_via_monoid() {
+    run_native_test("tier2_functions/deriving_via_monoid", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

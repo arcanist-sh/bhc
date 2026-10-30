@@ -1753,6 +1753,50 @@ impl DerivingContext {
     }
 
     /// Derive Show for a newtype.
+    /// `deriving Show via T` on a newtype: show the value as a `T`.
+    ///
+    /// `Show` is a builtin class with no dictionary to select from, so the
+    /// generic via path produced an empty instance and printing crashed. A
+    /// newtype keeps its box (tag 0, one field), the same layout as the via
+    /// newtype's, so the value can be handed to `T`'s `show` as it is:
+    /// `show` dispatches on the binder's type, which is `T`.
+    pub fn derive_show_via(
+        &mut self,
+        newtype_def: &NewtypeDef,
+        via: &Ty,
+    ) -> Option<DerivedInstance> {
+        let span = newtype_def.span;
+        let instance_type = self.build_instance_type(newtype_def.name, &newtype_def.params);
+        let show_method_var = self.fresh_var(
+            &format!("$derived_show_{}", newtype_def.name.as_str()),
+            Ty::Error,
+        );
+        let x_var = self.fresh_var("x", via.clone());
+        let body = core::Expr::Lam(
+            x_var.clone(),
+            Box::new(self.make_show_call(&x_var, span)),
+            span,
+        );
+
+        let mut methods = FxHashMap::default();
+        methods.insert(
+            Symbol::intern("show"),
+            bhc_hir::DefId::new(show_method_var.id.index()),
+        );
+        let instance = InstanceInfo {
+            class: Symbol::intern("Show"),
+            instance_types: vec![instance_type],
+            methods,
+            superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
+            instance_constraints: vec![],
+        };
+        Some(DerivedInstance {
+            instance,
+            bindings: vec![Bind::NonRec(show_method_var, Box::new(body))],
+        })
+    }
+
     /// Derive Show for a newtype exactly as for the one-constructor `data`
     /// type it is shaped like, so it gets record syntax (`Sum {getSum = 3}`),
     /// field types for `show` dispatch, and precedence parentheses.

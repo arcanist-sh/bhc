@@ -5405,6 +5405,10 @@ impl LowerContext {
                                     return Some(derived);
                                 }
                                 if let bhc_hir::DerivingStrategy::Via(via) = &clause.strategy {
+                                    if class_name.as_str() == "Show" && !has_type_variables(via) {
+                                        let via = self.expand_type_aliases(via);
+                                        return deriv_ctx.derive_show_via(newtype_def, &via);
+                                    }
                                     if let Some(derived) = self.derive_newtype_via_type(
                                         &mut deriv_ctx,
                                         newtype_def,

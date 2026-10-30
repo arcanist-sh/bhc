@@ -5242,6 +5242,44 @@ fn integer_enum_bounded(from: &BigInt, step: BigInt, to: &BigInt) -> *mut u8 {
     list
 }
 
+/// A thunk for the rest of an unbounded `Int` range: `[tag -1, eval_fn,
+/// env_size 2, next, step]`, forced into `next : <thunk for next + step>`.
+/// Elements are machine ints carried in pointer bits, as codegen boxes them.
+fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
+    extern "C" fn resume(env: *mut u8) -> *mut u8 {
+        unsafe {
+            let cur = *(env as *const i64);
+            let step = *(env.add(8) as *const i64);
+            alloc_cons(
+                cur as usize as *mut u8,
+                int_enum_thunk(cur.wrapping_add(step), step),
+            )
+        }
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
+        let obj = std::alloc::alloc(layout);
+        *(obj as *mut i64) = BHC_TAG_THUNK;
+        *(obj.add(8) as *mut *const u8) = resume as *const u8;
+        *(obj.add(16) as *mut i64) = 2;
+        *(obj.add(24) as *mut i64) = next;
+        *(obj.add(32) as *mut i64) = step;
+        obj
+    }
+}
+
+/// `enumFrom`/`enumFromThen` at `Int` (and the other types codegen carries
+/// as machine ints): `[from, from + step ..]`, produced lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_step_int(from: i64, step: i64) -> *mut u8 {
+    unsafe {
+        alloc_cons(
+            from as usize as *mut u8,
+            int_enum_thunk(from.wrapping_add(step), step),
+        )
+    }
+}
+
 /// `enumFrom` at `Integer`: `[from ..]`, lazily.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_integer(from: *const u8) -> *mut u8 {

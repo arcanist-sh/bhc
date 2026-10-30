@@ -3566,6 +3566,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000510), int_list_extreme);
+        // bhc_enum_from_step_int(from, step) -> lazy list (#58)
+        let enum_from_step_int = self.module.llvm_module().add_function(
+            "bhc_enum_from_step_int",
+            ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions
+            .insert(VarId::new(1000511), enum_from_step_int);
 
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
@@ -32620,76 +32628,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(1000505, &[from_expr], "enum_from_integer");
         }
-        // Build a finite list of 10000 elements as fallback
-        // Real programs use `take n (enumFrom x)` which the optimizer can handle
         let from_val = self
             .lower_expr(from_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFrom: from has no value".to_string()))?;
         let from = self.to_int_value(from_val)?;
-
-        let tm = self.type_mapper();
-        let i64_type = tm.i64_type();
-        let current_fn = self
-            .builder()
-            .get_insert_block()
-            .and_then(|b| b.get_parent())
-            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-
-        // to = from + 9999
-        let limit = self
-            .builder()
-            .build_int_add(from, i64_type.const_int(9999, false), "enum_limit")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: add: {:?}", e)))?;
-
-        // Build list backwards from limit down to from (same pattern as enumFromTo)
-        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "enumf_header");
-        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "enumf_body");
-        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "enumf_exit");
-
-        let nil = self.build_nil()?;
-        let entry_block = self.builder().get_insert_block().unwrap();
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_header);
-        let acc_phi = self
-            .builder()
-            .build_phi(tm.ptr_type(), "acc")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: phi: {:?}", e)))?;
-        let current_phi = self
-            .builder()
-            .build_phi(i64_type, "current")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: phi: {:?}", e)))?;
-
-        let current = current_phi.as_basic_value().into_int_value();
-        let done = self
-            .builder()
-            .build_int_compare(inkwell::IntPredicate::SLT, current, from, "done")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: cmp: {:?}", e)))?;
-        self.builder()
-            .build_conditional_branch(done, loop_exit, loop_body)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_body);
-        let boxed = self.box_int(current)?;
-        let new_acc = self.build_cons(boxed.into(), acc_phi.as_basic_value())?;
-        let prev = self
-            .builder()
-            .build_int_sub(current, i64_type.const_int(1, false), "prev")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: sub: {:?}", e)))?;
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
-        current_phi.add_incoming(&[(&limit, entry_block), (&prev, loop_body)]);
-
-        self.builder().position_at_end(loop_exit);
-        Ok(Some(acc_phi.as_basic_value()))
+        let one = self.type_mapper().i64_type().const_int(1, false);
+        self.call_enum_from_step_int(from, one)
     }
 
-    /// Lower `enumFromThen` - [n, m..] (infinite list with step, capped at 10000).
+    /// `[from, from + step ..]` at `Int`: a lazy list from the RTS (#58).
+    fn call_enum_from_step_int(
+        &mut self,
+        from: IntValue<'ctx>,
+        step: IntValue<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let rts_fn = *self.functions.get(&VarId::new(1000511)).ok_or_else(|| {
+            CodegenError::Internal("bhc_enum_from_step_int not declared".to_string())
+        })?;
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &[from.into(), step.into()], "enum_from_step")
+            .map_err(|e| CodegenError::Internal(format!("enum_from_step call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
+    }
+
+    /// Lower `enumFromThen` - [n, m..], a lazy infinite list.
     fn lower_builtin_enum_from_then(
         &mut self,
         from_expr: &Expr,
@@ -32711,88 +32675,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let from = self.to_int_value(from_val)?;
         let then_v = self.to_int_value(then_val)?;
 
-        let tm = self.type_mapper();
-        let i64_type = tm.i64_type();
-        let current_fn = self
-            .builder()
-            .get_insert_block()
-            .and_then(|b| b.get_parent())
-            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-
-        // step = then - from
         let step = self
             .builder()
             .build_int_sub(then_v, from, "step")
             .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-
-        // Build 10000 elements: last_val = from + step * 9999
-        // Build backwards from element 9999 down to 0
-        let loop_header = self
-            .llvm_ctx
-            .append_basic_block(current_fn, "enumft_header");
-        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "enumft_body");
-        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "enumft_exit");
-
-        let nil = self.build_nil()?;
-        let count_limit = i64_type.const_int(10000, false);
-        let entry_block = self.builder().get_insert_block().unwrap();
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_header);
-        let acc_phi = self
-            .builder()
-            .build_phi(tm.ptr_type(), "acc")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: phi: {:?}", e)))?;
-        let idx_phi = self
-            .builder()
-            .build_phi(i64_type, "idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: phi: {:?}", e)))?;
-
-        let idx = idx_phi.as_basic_value().into_int_value();
-        let done = self
-            .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                idx,
-                i64_type.const_zero(),
-                "done",
-            )
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: cmp: {:?}", e)))?;
-        self.builder()
-            .build_conditional_branch(done, loop_exit, loop_body)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_body);
-        // current_val = from + step * idx
-        let step_times_idx = self
-            .builder()
-            .build_int_mul(step, idx, "step_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: mul: {:?}", e)))?;
-        let current_val = self
-            .builder()
-            .build_int_add(from, step_times_idx, "cur_val")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: add: {:?}", e)))?;
-        let boxed = self.box_int(current_val)?;
-        let new_acc = self.build_cons(boxed.into(), acc_phi.as_basic_value())?;
-        let prev_idx = self
-            .builder()
-            .build_int_sub(idx, i64_type.const_int(1, false), "prev_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        let start_idx = self
-            .builder()
-            .build_int_sub(count_limit, i64_type.const_int(1, false), "start_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
-        idx_phi.add_incoming(&[(&start_idx, entry_block), (&prev_idx, loop_body)]);
-
-        self.builder().position_at_end(loop_exit);
-        Ok(Some(acc_phi.as_basic_value()))
+        self.call_enum_from_step_int(from, step)
     }
 
     /// Lower `enumFromThenTo` - [n, m..p] (finite list with step).

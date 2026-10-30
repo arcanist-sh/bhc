@@ -2774,6 +2774,38 @@ impl TyCtxt {
                         Ty::fun(list_a, Ty::fun(list_b, list_pair)),
                     )
                 }
+                // zip3 :: [a] -> [b] -> [c] -> [(a, b, c)]
+                // zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+                // unzip3 :: [(a, b, c)] -> ([a], [b], [c])
+                // (their name-keyed schemes drift onto the wrong DefIds)
+                "zip3" | "zipWith3" | "unzip3" => {
+                    let d = TyVar::new_star(0xFFFF_0003);
+                    let list = |t: &TyVar| Ty::List(Box::new(Ty::Var(t.clone())));
+                    let triple = Ty::Tuple(vec![
+                        Ty::Var(a.clone()),
+                        Ty::Var(b.clone()),
+                        Ty::Var(c.clone()),
+                    ]);
+                    let lists = |r: Ty| Ty::fun(list(&a), Ty::fun(list(&b), Ty::fun(list(&c), r)));
+                    let (vars, ty) = match name {
+                        "zip3" => (vec![a.clone(), b.clone(), c.clone()], lists(Ty::List(Box::new(triple)))),
+                        "zipWith3" => {
+                            let f = Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c.clone()), Ty::Var(d.clone()))),
+                            );
+                            (vec![a.clone(), b.clone(), c.clone(), d.clone()], Ty::fun(f, lists(list(&d))))
+                        }
+                        _ => (
+                            vec![a.clone(), b.clone(), c.clone()],
+                            Ty::fun(
+                                Ty::List(Box::new(triple)),
+                                Ty::Tuple(vec![list(&a), list(&b), list(&c)]),
+                            ),
+                        ),
+                    };
+                    Scheme::poly(vars, ty)
+                }
                 // maximum, minimum :: [a] -> a
                 "maximum" | "minimum" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

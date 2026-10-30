@@ -1,0 +1,10 @@
+[(1,'a',True),(2,'b',False)]
+2
+1
+'a'
+True
+2
+'b'
+False
+[111,222]
+[('x',Just 1,2.5),('y',Nothing,3.5)]

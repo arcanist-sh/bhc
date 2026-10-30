@@ -1,0 +1,5 @@
+(1,9)
+('a','b')
+3
+(Max {getMax = 4},First {getFirst = 5})
+8

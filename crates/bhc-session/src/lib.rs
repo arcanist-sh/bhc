@@ -173,6 +173,11 @@ pub struct Options {
     pub hackage_packages: Vec<String>,
     /// Compile-only mode: produce .o files without linking.
     pub compile_only: bool,
+    /// Compile the library modules bundled with the compiler (`Data.Monoid`,
+    /// `Data.Semigroup`) from source alongside the program, instead of
+    /// treating them as builtins. Only for whole-program builds: a `-c` or
+    /// `check` run would see the source without compiling it.
+    pub bundled_library: bool,
     /// Output directory for object files (used with compile_only).
     pub output_object_dir: Option<Utf8PathBuf>,
     /// Output directory for interface files (used with compile_only).
@@ -207,6 +212,7 @@ impl Default for Options {
             stdlib_path: None,
             hackage_packages: Vec::new(),
             compile_only: false,
+            bundled_library: false,
             output_object_dir: None,
             output_interface_dir: None,
             package_dbs: Vec::new(),

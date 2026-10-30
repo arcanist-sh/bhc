@@ -1516,6 +1516,24 @@ fn test_tier2_zip3_types() {
     run_native_test("tier2_functions/zip3_types", Profile::Default);
 }
 
+// Data.Monoid newtypes from the bundled library (#52).
+#[test]
+fn test_tier2_data_monoid() {
+    run_native_test("tier2_functions/data_monoid", Profile::Default);
+}
+
+// Data.Semigroup newtypes from the bundled library (#52).
+#[test]
+fn test_tier2_data_semigroup() {
+    run_native_test("tier2_functions/data_semigroup", Profile::Default);
+}
+
+// Derived Show of newtypes, and of types imported from another module (#52).
+#[test]
+fn test_tier2_newtype_show_multimodule() {
+    run_native_test("tier2_functions/newtype_show_multimodule", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

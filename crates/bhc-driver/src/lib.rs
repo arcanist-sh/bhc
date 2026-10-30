@@ -1373,6 +1373,7 @@ impl Compiler {
         let package_paths = self.resolve_hackage_packages()?;
         search_paths.extend(package_paths);
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         let config = bhc_lower::LowerConfig {
             include_builtins: true,
@@ -3408,6 +3409,7 @@ impl Compiler {
         // registry path resolves the same imports the single-module path does.
         search_paths.extend(self.resolve_hackage_packages()?);
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         // Pre-seed module cache with already-compiled modules.
         // IMPORTANT: We must remap DefIds from the exporting module to fresh IDs
@@ -5934,6 +5936,7 @@ impl Compiler {
         }
 
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         // Discover all modules recursively
         let all_paths = self.discover_modules(&entry_path, &search_paths)?;
@@ -5973,7 +5976,7 @@ impl Compiler {
 
         let file_id = FileId::new(0);
 
-        let builtin_modules = Self::builtin_module_set();
+        let builtin_modules = self.effective_builtin_modules();
 
         while let Some(path) = queue.pop_front() {
             let unit = CompilationUnit::from_path(path.clone())?;
@@ -6075,6 +6078,39 @@ impl Compiler {
         }
 
         Ok((result, cyclic_indices))
+    }
+
+    /// [`Self::builtin_module_set`] without the modules the bundled library
+    /// provides as source, when it is on.
+    fn effective_builtin_modules(&self) -> rustc_hash::FxHashSet<&'static str> {
+        let mut set = Self::builtin_module_set();
+        if self.bundled_library_active() {
+            for (module, _, _) in BUNDLED_LIBRARY {
+                set.remove(module);
+            }
+        }
+        set
+    }
+
+    /// Whether this compilation compiles the bundled library from source.
+    fn bundled_library_active(&self) -> bool {
+        self.session.options.bundled_library && !self.session.options.compile_only
+    }
+
+    /// Append the bundled library's directory to `search_paths` (after the
+    /// user's, so a user module of the same name still wins), writing the
+    /// embedded sources out on first use.
+    fn push_bundled_library(&self, search_paths: &mut Vec<Utf8PathBuf>) -> CompileResult<()> {
+        if !self.bundled_library_active() {
+            return Ok(());
+        }
+        let dir = bundled_library_dir().map_err(|e| {
+            CompileError::Other(format!("cannot write the bundled library sources: {e}"))
+        })?;
+        if !search_paths.contains(&dir) {
+            search_paths.push(dir);
+        }
+        Ok(())
     }
 
     /// Set of module names treated as builtins (stdlib / Prelude).
@@ -6573,7 +6609,7 @@ impl Compiler {
         }
 
         // Phase 2: Build name set for filtering and topological sort
-        let builtins = Self::builtin_module_set();
+        let builtins = self.effective_builtin_modules();
         let local_names: rustc_hash::FxHashSet<&str> = module_info
             .iter()
             .map(|(_, name, _)| name.as_str())
@@ -7098,6 +7134,14 @@ impl CompilerBuilder {
         self
     }
 
+    /// Compile the bundled library modules (`Data.Monoid`, `Data.Semigroup`)
+    /// with the program. Whole-program builds only.
+    #[must_use]
+    pub fn bundled_library(mut self, enable: bool) -> Self {
+        self.options.bundled_library = enable;
+        self
+    }
+
     /// Enable compile-only mode (produce .o files without linking).
     #[must_use]
     pub fn compile_only(mut self, enable: bool) -> Self {
@@ -7316,6 +7360,59 @@ const TRANSFORMER_LIBRARY_MODULES: &[&str] = &[
     "Control.Monad.RWS",
     "Control.Monad.RWS.Strict",
 ];
+
+/// Library modules bundled into the compiler as Haskell source:
+/// `(module, relative path, source)`. Compiled with the program in
+/// whole-program builds instead of being builtins (#52).
+const BUNDLED_LIBRARY: &[(&str, &str, &str)] = &[
+    (
+        "Data.Semigroup.Internal",
+        "Data/Semigroup/Internal.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Semigroup/Internal.hs"),
+    ),
+    (
+        "Data.Monoid",
+        "Data/Monoid.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Monoid.hs"),
+    ),
+    (
+        "Data.Semigroup",
+        "Data/Semigroup.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Semigroup.hs"),
+    ),
+];
+
+/// A directory holding the bundled library sources, written on first use.
+///
+/// Named after a hash of the sources, so a compiler with different sources
+/// never reads stale files, and installed compilers need no source tree.
+fn bundled_library_dir() -> std::io::Result<Utf8PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in BUNDLED_LIBRARY {
+        entry.hash(&mut hasher);
+    }
+    let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .map_err(|p| std::io::Error::other(format!("non-UTF-8 temp dir {}", p.display())))?;
+    let dir = temp.join(format!("bhc-lib-{:016x}", hasher.finish()));
+    for (_, rel, source) in BUNDLED_LIBRARY {
+        let path = dir.join(rel);
+        if std::fs::read_to_string(&path).is_ok_and(|s| s == *source) {
+            continue;
+        }
+        let parent = path.parent().unwrap_or(&dir);
+        std::fs::create_dir_all(parent)?;
+        // Write then rename, so a concurrent compile never reads a half file.
+        let tmp = parent.join(format!(
+            ".{}.{}",
+            std::process::id(),
+            path.file_name().unwrap_or("m")
+        ));
+        std::fs::write(&tmp, source)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(dir)
+}
 
 /// The directory holding the transformers library sources, when the closure
 /// IO model is on.

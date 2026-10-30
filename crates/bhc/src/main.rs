@@ -484,7 +484,10 @@ fn try_compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .output_type(output_type)
         .opt_level(opt_level)
         .emit_kernel_report(cli.kernel_report)
-        .tensor_fusion(cli.tensor_fusion);
+        .tensor_fusion(cli.tensor_fusion)
+        // Whole-program builds compile Data.Monoid/Data.Semigroup from the
+        // bundled sources; `-c` keeps them builtin (#52).
+        .bundled_library(!cli.compile_only);
 
     // Set target if specified
     if let Some(ref target) = cli.target {

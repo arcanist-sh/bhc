@@ -131,6 +131,12 @@ fn test_tier2_corecursive_lists_native() {
     run_native_test("tier2_functions/corecursive_lists", Profile::Default);
 }
 
+// List transformers over infinite lists resume lazily (#54).
+#[test]
+fn test_tier2_lazy_list_transformers_native() {
+    run_native_test("tier2_functions/lazy_list_transformers", Profile::Default);
+}
+
 // A function with a lazy parameter that is ALSO used as a first-class value.
 // Both sides of a call must agree that a parameter is a thunk, and an indirect
 // call cannot agree — so escape analysis has to exclude this function and keep

@@ -2227,7 +2227,7 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
             if let Some(ch) = char::from_u32(char_val) {
                 result.push(ch);
             }
-            list_ptr = *(list_ptr.add(16) as *const *const u8);
+            list_ptr = bhc_force(*(list_ptr.add(16) as *const *mut u8));
         }
         result
     }
@@ -2305,7 +2305,7 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
             }
             let head = *(cur.add(8) as *const *const u8);
             elems.push(show_elem(head, elem_type_tag));
-            cur = *(cur.add(16) as *const *const u8);
+            cur = bhc_force(*(cur.add(16) as *const *mut u8));
         }
     }
     let shown = format!("[{}]", elems.join(","));
@@ -2551,7 +2551,7 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
             }
             let head = *(cur.add(8) as *const *const u8);
             elems.push(show_any(head, elem_desc));
-            cur = *(cur.add(16) as *const *const u8);
+            cur = bhc_force(*(cur.add(16) as *const *mut u8));
         }
         format!("[{}]", elems.join(","))
     }
@@ -4356,7 +4356,7 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
             let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
             parts.push(s.to_string());
         }
-        cur = unsafe { *(cur.add(16) as *const *const u8) };
+        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
     }
     parts
 }

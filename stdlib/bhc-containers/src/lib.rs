@@ -67,7 +67,7 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
             let mut buf = [0u8; 4];
             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         }
-        p = unsafe { *(p.add(16) as *const *const u8) };
+        p = unsafe { bhc_prelude::force_heap_object(*(p.add(16) as *const *mut u8)) };
         guard += 1;
         if guard > (1 << 24) {
             break;

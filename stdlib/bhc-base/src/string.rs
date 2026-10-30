@@ -41,7 +41,7 @@ unsafe fn list_to_vec(mut list: *mut u8) -> Vec<*mut u8> {
             break;
         }
         vec.push(get_field(list, 0));
-        list = get_field(list, 1);
+        list = bhc_prelude::force_heap_object(get_field(list, 1));
     }
     vec
 }

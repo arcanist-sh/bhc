@@ -6477,6 +6477,182 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(self.build_force(tail.into())?.into_pointer_value())
     }
 
+    /// In a list transformer's loop, read the tails of the current cells and
+    /// split on laziness (#54).
+    ///
+    /// When any tail is an unevaluated thunk the input may be infinite, and
+    /// the eager loop must not walk on. The returned `lazy_block` allocates a
+    /// thunk that resumes `builtin` on the rest — `fn_args` (closures and other
+    /// non-list arguments, passed as is) followed by the raw tails — and
+    /// branches to `exit_block`; the caller ends its result with that thunk.
+    /// Otherwise the builder is left in `cont_block` with the forced tails.
+    /// A `gate` that is false keeps the loop eager: a builtin that may drop
+    /// elements (`filter`) passes "a result element exists", because its
+    /// value must be a cons or `[]`, never the bare resume thunk.
+    /// Fully evaluated input never takes the lazy path, so the loop stays an
+    /// eager loop there.
+    fn split_lazy_tails(
+        &mut self,
+        builtin: &str,
+        fn_args: &[PointerValue<'ctx>],
+        cells: &[PointerValue<'ctx>],
+        gate: Option<IntValue<'ctx>>,
+        exit_block: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> CodegenResult<LazyTails<'ctx>> {
+        let i64_type = self.type_mapper().i64_type();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let mut raw_tails = Vec::with_capacity(cells.len());
+        let mut any_thunk = None;
+        for cell in cells {
+            let raw = self.extract_adt_field(*cell, 2, 1)?;
+            let tag = self
+                .builder()
+                .build_load(i64_type, raw, "tail_tag")
+                .map_err(|e| CodegenError::Internal(format!("load tail tag: {:?}", e)))?
+                .into_int_value();
+            let is_thunk = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    i64_type.const_int(-1i64 as u64, true),
+                    "tail_is_thunk",
+                )
+                .map_err(|e| CodegenError::Internal(format!("compare tail tag: {:?}", e)))?;
+            any_thunk = Some(match any_thunk {
+                None => is_thunk,
+                Some(prev) => self
+                    .builder()
+                    .build_or(prev, is_thunk, "any_tail_thunk")
+                    .map_err(|e| CodegenError::Internal(format!("or: {:?}", e)))?,
+            });
+            raw_tails.push(raw);
+        }
+        let mut any_thunk =
+            any_thunk.ok_or_else(|| CodegenError::Internal("no list cells".to_string()))?;
+        if let Some(gate) = gate {
+            any_thunk = self
+                .builder()
+                .build_and(any_thunk, gate, "lazy_exit_gated")
+                .map_err(|e| CodegenError::Internal(format!("and: {:?}", e)))?;
+        }
+        let lazy_block = self.llvm_ctx.append_basic_block(current_fn, "lazy_rest");
+        let cont_block = self.llvm_ctx.append_basic_block(current_fn, "eager_rest");
+        self.builder()
+            .build_conditional_branch(any_thunk, lazy_block, cont_block)
+            .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+        let resume = self.get_or_create_lazy_resume_fn(builtin, fn_args.len(), cells.len())?;
+        self.builder().position_at_end(lazy_block);
+        let captured: Vec<(VarId, BasicValueEnum<'ctx>)> = fn_args
+            .iter()
+            .chain(raw_tails.iter())
+            .map(|p| (VarId::new(0), (*p).into()))
+            .collect();
+        let thunk = self.alloc_thunk(resume.as_global_value().as_pointer_value(), &captured)?;
+        self.builder()
+            .build_unconditional_branch(exit_block)
+            .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+        self.builder().position_at_end(cont_block);
+        let mut tails = Vec::with_capacity(raw_tails.len());
+        for raw in raw_tails {
+            tails.push(self.build_force(raw.into())?.into_pointer_value());
+        }
+        Ok(LazyTails {
+            tails,
+            cont_block,
+            lazy_block,
+            thunk,
+        })
+    }
+
+    /// The thunk evaluation function that resumes list builtin `builtin` on
+    /// the rest of its input (see `split_lazy_tails`): its environment holds
+    /// `n_fn_args` arguments passed as is, then `n_lists` list tails, which it
+    /// forces. One per builtin and module; the body is the builtin itself, so
+    /// it stops again at the next unevaluated tail.
+    fn get_or_create_lazy_resume_fn(
+        &mut self,
+        builtin: &str,
+        n_fn_args: usize,
+        n_lists: usize,
+    ) -> CodegenResult<FunctionValue<'ctx>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 2_000_000);
+
+        let fn_name = format!(
+            "bhc_lazy_resume_{}",
+            builtin.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        if let Some(existing) = self.module.llvm_module().get_function(&fn_name) {
+            return Ok(existing);
+        }
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let n = n_fn_args + n_lists;
+        let env_array_type = ptr_type.array_type(n as u32);
+        let func = self
+            .module
+            .add_internal_function(&fn_name, ptr_type.fn_type(&[ptr_type.into()], false));
+
+        let saved_block = self.builder().get_insert_block();
+        let old_env = std::mem::take(&mut self.env);
+        let entry = self.llvm_ctx.append_basic_block(func, "entry");
+        self.builder().position_at_end(entry);
+        let env_ptr = func
+            .get_first_param()
+            .ok_or_else(|| CodegenError::Internal("missing env param".to_string()))?
+            .into_pointer_value();
+        let span = bhc_span::Span::default();
+        let mut args = Vec::with_capacity(n);
+        for i in 0..n {
+            let slot = unsafe {
+                self.builder()
+                    .build_in_bounds_gep(
+                        env_array_type,
+                        env_ptr,
+                        &[i64_type.const_zero(), i64_type.const_int(i as u64, false)],
+                        "resume_env_slot",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("env gep: {:?}", e)))?
+            };
+            let mut val = self
+                .builder()
+                .build_load(ptr_type, slot, "resume_env_val")
+                .map_err(|e| CodegenError::Internal(format!("env load: {:?}", e)))?;
+            if i >= n_fn_args {
+                val = self.build_force(val)?;
+            }
+            let var = Var {
+                name: Symbol::intern("$lazy_resume_arg"),
+                id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                ty: Ty::Error,
+            };
+            self.env.insert(var.id, val);
+            args.push(Expr::Var(var, span));
+        }
+        let arg_refs: Vec<&Expr> = args.iter().collect();
+        let result = self.lower_builtin(builtin, &arg_refs)?;
+        let ret = match result {
+            Some(v) => self.value_to_ptr(v)?,
+            None => ptr_type.const_null(),
+        };
+        self.builder()
+            .build_return(Some(&ret))
+            .map_err(|e| CodegenError::Internal(format!("return: {:?}", e)))?;
+
+        self.env = old_env;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        Ok(func)
+    }
+
     /// Extract a field from an ADT value.
     fn extract_adt_field(
         &self,
@@ -11154,7 +11330,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11165,9 +11341,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: apply function to head, cons result onto accumulator
         self.builder().position_at_end(loop_body);
-        let head_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
 
         // Call the function closure: fn_ptr(fn_ptr, head)
         let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
@@ -11187,26 +11362,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Build new cons cell
         let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails("map", &[fn_ptr], &[cell], None, loop_exit)?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values (nil was built in entry block before branching)
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Exit: reverse the result (we built it in reverse order)
+        // Exit: reverse the result (we built it in reverse order) onto the
+        // end of the list: `[]`, or the thunk mapping the unevaluated rest.
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "map_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "map_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Call builtin reverse - but we need to do it inline to avoid recursion issues
         // For simplicity, we'll use an iterative reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        // Build nil2 before branching
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11228,7 +11415,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11248,9 +11435,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // nil2 was built in loop_exit before branching
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -11334,7 +11524,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11345,9 +11535,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: check predicate
         self.builder().position_at_end(loop_body);
-        let head_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
 
         // Call predicate: pred_ptr(pred_ptr, head)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -11373,7 +11562,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::NE,
                 pred_bool,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_true",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
@@ -11383,14 +11572,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Keep: cons head onto result
+        let loop_advance = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "filter_advance");
         self.builder().position_at_end(loop_keep);
         let new_cons = self.build_cons(head_ptr.into(), result_phi.as_basic_value())?;
         self.builder()
-            .build_unconditional_branch(loop_header)
+            .build_unconditional_branch(loop_advance)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Skip: just continue
         self.builder().position_at_end(loop_skip);
+        self.builder()
+            .build_unconditional_branch(loop_advance)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Advance to the tail, or stop at an unevaluated one once the result
+        // has an element.
+        self.builder().position_at_end(loop_advance);
+        let acc_next = self
+            .builder()
+            .build_phi(ptr_type, "filter_acc_next")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        acc_next.add_incoming(&[
+            (&new_cons, loop_keep),
+            (&result_phi.as_basic_value(), loop_skip),
+        ]);
+        let has_elem = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                acc_next.as_basic_value().into_pointer_value(),
+                nil,
+                "filter_has_elem",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        let lazy =
+            self.split_lazy_tails("filter", &[pred_ptr], &[cell], Some(has_elem), loop_exit)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -11398,25 +11616,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Add phi incoming values (nil was built in entry block)
         result_phi.add_incoming(&[
             (&nil, entry_block),
-            (&new_cons, loop_keep),
-            (&result_phi.as_basic_value(), loop_skip),
+            (&acc_next.as_basic_value(), lazy.cont_block),
         ]);
-        list_phi.add_incoming(&[
-            (&list_ptr, entry_block),
-            (&tail_ptr, loop_keep),
-            (&tail_ptr, loop_skip),
-        ]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Exit: reverse the result
+        // Exit: reverse the result onto `[]`, or onto the thunk filtering the
+        // unevaluated rest.
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "filter_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "filter_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&acc_next.as_basic_value(), lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        // Build nil2 before branching
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11438,7 +11662,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11458,9 +11682,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // nil2 was built in loop_exit before branching
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -11900,7 +12127,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag1,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty1",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11909,7 +12136,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag2,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty2",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11926,10 +12153,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Call the function: f x y
         // For binary functions (most common case with zipWith), we call with both args at once.
@@ -11951,25 +12176,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Build cons cell
         let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails(
+            "zipWith",
+            &[func_ptr],
+            &[
+                list1_phi.as_basic_value().into_pointer_value(),
+                list2_phi.as_basic_value().into_pointer_value(),
+            ],
+            None,
+            loop_exit,
+        )?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&tail1_ptr, loop_body)]);
-        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&tail2_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
+        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&lazy.tails[1], lazy.cont_block)]);
 
         // Exit: reverse the result
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "zipwith_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "zipwith_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11991,7 +12237,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12010,9 +12256,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -12093,7 +12342,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag1,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty1",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12102,7 +12351,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag2,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty2",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12119,35 +12368,54 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Build tuple (x, y) - represented as ADT with tag 0 and 2 fields
         let pair_ptr = self.build_pair(head1_ptr.into(), head2_ptr.into())?;
 
         // Build cons cell
         let new_cons = self.build_cons(pair_ptr.into(), result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails(
+            "zip",
+            &[],
+            &[
+                list1_phi.as_basic_value().into_pointer_value(),
+                list2_phi.as_basic_value().into_pointer_value(),
+            ],
+            None,
+            loop_exit,
+        )?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&tail1_ptr, loop_body)]);
-        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&tail2_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
+        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&lazy.tails[1], lazy.cont_block)]);
 
         // Exit: reverse the result
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "zip_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "zip_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -12169,7 +12437,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12188,9 +12456,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -13025,7 +13296,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 outer_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "outer_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -13036,10 +13307,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Outer loop body: apply f to head, process result
         self.builder().position_at_end(outer_body);
-        let head_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let outer_tail_ptr =
-            self.extract_list_tail(outer_list_phi.as_basic_value().into_pointer_value())?;
+        let outer_cell = outer_list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(outer_cell, 2, 0)?;
 
         // Call f on head
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -13082,7 +13351,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 inner_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "inner_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -13111,8 +13380,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         inner_list_phi
             .add_incoming(&[(&inner_list_ptr, outer_body), (&inner_tail_ptr, inner_body)]);
 
-        // Inner loop exit: continue with outer loop
+        // Inner loop exit: continue with the outer tail, or stop at an
+        // unevaluated one once the result has an element (`f` may return
+        // `[]`, as a comprehension's guard does).
         self.builder().position_at_end(inner_exit);
+        let has_elem = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                inner_result_phi.as_basic_value().into_pointer_value(),
+                nil,
+                "concatmap_has_elem",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        let lazy = self.split_lazy_tails(
+            "concatMap",
+            &[func_ptr],
+            &[outer_cell],
+            Some(has_elem),
+            outer_exit,
+        )?;
         self.builder()
             .build_unconditional_branch(outer_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -13120,19 +13407,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Outer phi incoming values
         result_phi.add_incoming(&[
             (&nil, entry_block),
-            (&inner_result_phi.as_basic_value(), inner_exit),
+            (&inner_result_phi.as_basic_value(), lazy.cont_block),
         ]);
-        outer_list_phi.add_incoming(&[(&list_ptr, entry_block), (&outer_tail_ptr, inner_exit)]);
+        outer_list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Outer exit: reverse the result
+        // Outer exit: reverse the result onto `[]`, or onto the thunk that
+        // continues over the unevaluated rest.
         self.builder().position_at_end(outer_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "concatmap_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, outer_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "concatmap_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), outer_header),
+            (&inner_result_phi.as_basic_value(), lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -13154,7 +13453,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -13173,9 +13472,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, outer_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), outer_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), outer_exit),
+            (&rev_from.as_basic_value(), outer_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -61906,6 +62208,18 @@ fn identity_based_monad_layer(name: &str) -> Option<TransformerLayer> {
         "Except" => Some(TransformerLayer::ExceptT),
         _ => None,
     }
+}
+
+/// The result of `Lowering::split_lazy_tails`.
+struct LazyTails<'ctx> {
+    /// The forced tails, valid in `cont_block`.
+    tails: Vec<PointerValue<'ctx>>,
+    /// Where the eager loop continues.
+    cont_block: inkwell::basic_block::BasicBlock<'ctx>,
+    /// The block that allocated `thunk` and branched to the exit block.
+    lazy_block: inkwell::basic_block::BasicBlock<'ctx>,
+    /// The thunk resuming the builtin on the rest of the input.
+    thunk: PointerValue<'ctx>,
 }
 
 /// The physical arity of a codegen builtin by name, or `None` if `name`

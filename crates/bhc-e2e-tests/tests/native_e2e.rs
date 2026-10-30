@@ -1480,6 +1480,12 @@ fn test_tier3_derived_traverse() {
     run_native_test("tier3_io/derived_traverse", Profile::Default);
 }
 
+// Content-ordered boxed Map keys, a stored 0, `fmap` as a value (#25).
+#[test]
+fn test_tier3_map_key_order_and_values() {
+    run_native_test("tier3_io/map_key_order_and_values", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

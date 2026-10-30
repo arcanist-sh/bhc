@@ -1151,7 +1151,10 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // `traverse` at `Maybe`/`Either`: codegen specializes a derived
         // Traversable's traversal to that applicative (#32), which the
         // generic derived body cannot choose by itself.
-        if v.name.as_str() == "traverse" && matches!(v.ty, Ty::Error) {
+        // `fmap`/`<$>` at `Maybe`/`Either` likewise, so that `fmap f` passed
+        // as a function value (`Map.alter (fmap (+ 1))`) still maps the
+        // payload; the functor is otherwise unknown where the closure runs.
+        if matches!(v.name.as_str(), "traverse" | "fmap" | "<$>") && matches!(v.ty, Ty::Error) {
             if let Some(resolved) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 let mut result = &resolved;
                 while let Ty::Fun(_, r) = result {

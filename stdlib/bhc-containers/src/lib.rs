@@ -9,19 +9,77 @@
 #![warn(missing_docs)]
 #![allow(unsafe_code)]
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 
 // ========================================================================
 // Opaque container types
 // ========================================================================
 
-/// Opaque Map type: BTreeMap<i64, *mut u8> behind a Box.
-type RtsMap = BTreeMap<i64, *mut u8>;
+/// Opaque Map type: BTreeMap<Key, *mut u8> behind a Box.
+type RtsMap = BTreeMap<Key, *mut u8>;
 
-/// Opaque Set type: BTreeSet<i64> behind a Box.
-type RtsSet = BTreeSet<i64>;
+/// Opaque Set type: BTreeSet<Key> behind a Box.
+type RtsSet = BTreeSet<Key>;
+
+/// A Map key or Set element: the machine word codegen passes, plus the
+/// content of an interned boxed key (see [`bhc_container_key`]).
+///
+/// Keys with content order by it — `[Char]` and `Text` by their UTF-8
+/// bytes, which is code-point order like Haskell's `Ord`, and enumeration
+/// constructors by tag — so `toList` on a `Map String v` is in key order
+/// (#25). Keys without content (an `Int`, or a boxed key no caller has
+/// canonicalized) order as machine words, as before. Interning gives equal
+/// content one machine word, so equality stays word equality.
+#[derive(Clone, Debug)]
+struct Key {
+    raw: i64,
+    content: Option<Arc<[u8]>>,
+}
+
+impl Key {
+    /// The key for machine word `raw`, with its content if it was interned.
+    fn of(raw: i64) -> Key {
+        let content = if ANY_INTERNED.load(AtomicOrdering::Acquire) {
+            let guard = match INTERNED_CONTENT.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.as_ref().and_then(|t| t.get(&raw).cloned())
+        } else {
+            None
+        };
+        Key { raw, content }
+    }
+}
+
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (&self.content, &other.content) {
+            (Some(a), Some(b)) => a.cmp(b).then(self.raw.cmp(&other.raw)),
+            (None, None) => self.raw.cmp(&other.raw),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Key {}
 
 // ========================================================================
 // Key canonicalization
@@ -35,6 +93,14 @@ type RtsSet = BTreeSet<i64>;
 /// `bhc_map_canon` does — has to be idempotent.
 type InternTable = HashMap<(i64, Vec<u8>), i64>;
 static INTERNED_KEYS: Mutex<Option<InternTable>> = Mutex::new(None);
+
+/// The content of each interned key, by its canonical machine word, so a
+/// [`Key`] can order by content.
+static INTERNED_CONTENT: Mutex<Option<HashMap<i64, Arc<[u8]>>>> = Mutex::new(None);
+
+/// Whether any key has been interned; until then no key has content and
+/// [`Key::of`] skips the table.
+static ANY_INTERNED: AtomicBool = AtomicBool::new(false);
 
 /// A `BhcText`'s header is `[data_ptr][offset][byte_len]`, 24 bytes.
 /// Canonical definition: `bhc-text`'s `text.rs`.
@@ -84,7 +150,8 @@ const ENUM_KIND_SHIFT: i64 = 16;
 /// The constructor tag of a nullary-constructor value (`[tag]`).
 unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
     let tag = unsafe { *(p as *const i64) };
-    tag.to_le_bytes().to_vec()
+    // Big-endian, so byte order is numeric order (constructor order).
+    tag.to_be_bytes().to_vec()
 }
 
 /// Canonicalize a container key so that equal CONTENTS become the same key.
@@ -99,8 +166,8 @@ unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
 /// where it knows the key's type — an unknown key keeps today's behaviour
 /// rather than risking a dereference of a large integer.
 ///
-/// Ordering among interned keys is by that first pointer, not by content, so
-/// `toList` on a boxed-key map is not in key order.
+/// [`Key`] orders interned keys by their content, so `toList` on a
+/// boxed-key map is in key order.
 ///
 /// # Safety
 /// For `kind` 1 the key must be a live `BhcText`; for `kind` 2 a `[Char]`
@@ -132,7 +199,20 @@ pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
         Err(poisoned) => poisoned.into_inner(),
     };
     let table = guard.get_or_insert_with(InternTable::new);
-    *table.entry((kind, bytes)).or_insert(raw)
+    let key = (kind, bytes);
+    if let Some(&canonical) = table.get(&key) {
+        return canonical;
+    }
+    let content: Arc<[u8]> = key.1.clone().into();
+    table.insert(key, raw);
+    drop(guard);
+    let mut content_guard = match INTERNED_CONTENT.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    content_guard.get_or_insert_with(HashMap::new).insert(raw, content);
+    ANY_INTERNED.store(true, AtomicOrdering::Release);
+    raw
 }
 
 /// Container objects already re-keyed, so the walk happens once each.
@@ -164,10 +244,10 @@ pub unsafe extern "C" fn bhc_map_canon(map_ptr: *mut u8, kind: i64) {
         return;
     }
     let m = unsafe { &mut *(map_ptr as *mut RtsMap) };
-    let entries: Vec<(i64, *mut u8)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+    let entries: Vec<(i64, *mut u8)> = m.iter().map(|(k, v)| (k.raw, *v)).collect();
     let mut rekeyed = BTreeMap::new();
     for (k, v) in entries {
-        rekeyed.insert(unsafe { bhc_container_key(kind, k) }, v);
+        rekeyed.insert(Key::of(unsafe { bhc_container_key(kind, k) }), v);
     }
     *m = rekeyed;
 }
@@ -183,10 +263,10 @@ pub unsafe extern "C" fn bhc_set_canon(set_ptr: *mut u8, kind: i64) {
         return;
     }
     let s = unsafe { &mut *(set_ptr as *mut RtsSet) };
-    let elems: Vec<i64> = s.iter().copied().collect();
+    let elems: Vec<i64> = s.iter().map(|k| k.raw).collect();
     let mut rekeyed = BTreeSet::new();
     for e in elems {
-        rekeyed.insert(unsafe { bhc_container_key(kind, e) });
+        rekeyed.insert(Key::of(unsafe { bhc_container_key(kind, e) }));
     }
     *s = rekeyed;
 }
@@ -206,7 +286,7 @@ pub extern "C" fn bhc_map_empty() -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn bhc_map_singleton(key: i64, value: *mut u8) -> *mut u8 {
     let mut m = BTreeMap::new();
-    m.insert(key, value);
+    m.insert(Key::of(key), value);
     Box::into_raw(Box::new(m)) as *mut u8
 }
 
@@ -259,7 +339,7 @@ pub unsafe extern "C" fn bhc_map_member(key: i64, map_ptr: *mut u8) -> i64 {
         return 0;
     }
     let m = &*(map_ptr as *const RtsMap);
-    if m.contains_key(&key) {
+    if m.contains_key(&Key::of(key)) {
         1
     } else {
         0
@@ -282,7 +362,7 @@ pub unsafe extern "C" fn bhc_map_lookup(key: i64, map_ptr: *mut u8) -> *mut u8 {
         return ptr::null_mut();
     }
     let m = &*(map_ptr as *const RtsMap);
-    match m.get(&key) {
+    match m.get(&Key::of(key)) {
         Some(&v) => v,
         None => ptr::null_mut(),
     }
@@ -306,7 +386,7 @@ pub unsafe extern "C" fn bhc_map_find_with_default(
         return default;
     }
     let m = &*(map_ptr as *const RtsMap);
-    match m.get(&key) {
+    match m.get(&Key::of(key)) {
         Some(&v) => v,
         None => default,
     }
@@ -327,7 +407,7 @@ pub unsafe extern "C" fn bhc_map_insert(key: i64, value: *mut u8, map_ptr: *mut 
     } else {
         (*(map_ptr as *const RtsMap)).clone()
     };
-    m.insert(key, value);
+    m.insert(Key::of(key), value);
     Box::into_raw(Box::new(m)) as *mut u8
 }
 
@@ -345,7 +425,7 @@ pub unsafe extern "C" fn bhc_map_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
         return bhc_map_empty();
     }
     let mut m = (*(map_ptr as *const RtsMap)).clone();
-    m.remove(&key);
+    m.remove(&Key::of(key));
     Box::into_raw(Box::new(m)) as *mut u8
 }
 
@@ -366,8 +446,8 @@ pub unsafe extern "C" fn bhc_map_union(map1: *mut u8, map2: *mut u8) -> *mut u8 
     };
     if !map2.is_null() {
         let m2 = &*(map2 as *const RtsMap);
-        for (&k, &v) in m2.iter() {
-            result.entry(k).or_insert(v);
+        for (k, &v) in m2.iter() {
+            result.entry(k.clone()).or_insert(v);
         }
     }
     Box::into_raw(Box::new(result)) as *mut u8
@@ -391,7 +471,7 @@ pub unsafe extern "C" fn bhc_map_intersection(map1: *mut u8, map2: *mut u8) -> *
     let result: RtsMap = m1
         .iter()
         .filter(|(k, _)| m2.contains_key(k))
-        .map(|(&k, &v)| (k, v))
+        .map(|(k, &v)| (k.clone(), v))
         .collect();
     Box::into_raw(Box::new(result)) as *mut u8
 }
@@ -417,7 +497,7 @@ pub unsafe extern "C" fn bhc_map_difference(map1: *mut u8, map2: *mut u8) -> *mu
     let result: RtsMap = m1
         .iter()
         .filter(|(k, _)| !m2.contains_key(k))
-        .map(|(&k, &v)| (k, v))
+        .map(|(k, &v)| (k.clone(), v))
         .collect();
     Box::into_raw(Box::new(result)) as *mut u8
 }
@@ -453,7 +533,7 @@ pub unsafe extern "C" fn bhc_map_key_at(map_ptr: *mut u8, index: i64) -> i64 {
         return 0;
     }
     let m = &*(map_ptr as *const RtsMap);
-    m.keys().nth(index as usize).copied().unwrap_or(0)
+    m.keys().nth(index as usize).map(|k| k.raw).unwrap_or(0)
 }
 
 /// Get a value at index from the map (for iteration).
@@ -509,14 +589,14 @@ pub unsafe extern "C" fn bhc_map_is_submap_of(map1: *mut u8, map2: *mut u8) -> i
 /// Create an empty set.
 #[no_mangle]
 pub extern "C" fn bhc_set_empty() -> *mut u8 {
-    Box::into_raw(Box::new(BTreeSet::<i64>::new())) as *mut u8
+    Box::into_raw(Box::new(BTreeSet::<Key>::new())) as *mut u8
 }
 
 /// Create a singleton set.
 #[no_mangle]
 pub extern "C" fn bhc_set_singleton(value: i64) -> *mut u8 {
     let mut s = BTreeSet::new();
-    s.insert(value);
+    s.insert(Key::of(value));
     Box::into_raw(Box::new(s)) as *mut u8
 }
 
@@ -569,7 +649,7 @@ pub unsafe extern "C" fn bhc_set_member(value: i64, set_ptr: *mut u8) -> i64 {
         return 0;
     }
     let s = &*(set_ptr as *const RtsSet);
-    if s.contains(&value) {
+    if s.contains(&Key::of(value)) {
         1
     } else {
         0
@@ -591,7 +671,7 @@ pub unsafe extern "C" fn bhc_set_insert(value: i64, set_ptr: *mut u8) -> *mut u8
     } else {
         (*(set_ptr as *const RtsSet)).clone()
     };
-    s.insert(value);
+    s.insert(Key::of(value));
     Box::into_raw(Box::new(s)) as *mut u8
 }
 
@@ -609,7 +689,7 @@ pub unsafe extern "C" fn bhc_set_delete(value: i64, set_ptr: *mut u8) -> *mut u8
         return bhc_set_empty();
     }
     let mut s = (*(set_ptr as *const RtsSet)).clone();
-    s.remove(&value);
+    s.remove(&Key::of(value));
     Box::into_raw(Box::new(s)) as *mut u8
 }
 
@@ -634,7 +714,7 @@ pub unsafe extern "C" fn bhc_set_union(set1: *mut u8, set2: *mut u8) -> *mut u8 
     } else {
         &*(set2 as *const RtsSet)
     };
-    let result: BTreeSet<i64> = s1.union(s2).copied().collect();
+    let result: BTreeSet<Key> = s1.union(s2).cloned().collect();
     Box::into_raw(Box::new(result)) as *mut u8
 }
 
@@ -653,7 +733,7 @@ pub unsafe extern "C" fn bhc_set_intersection(set1: *mut u8, set2: *mut u8) -> *
     }
     let s1 = &*(set1 as *const RtsSet);
     let s2 = &*(set2 as *const RtsSet);
-    let result: BTreeSet<i64> = s1.intersection(s2).copied().collect();
+    let result: BTreeSet<Key> = s1.intersection(s2).cloned().collect();
     Box::into_raw(Box::new(result)) as *mut u8
 }
 
@@ -675,7 +755,7 @@ pub unsafe extern "C" fn bhc_set_difference(set1: *mut u8, set2: *mut u8) -> *mu
     }
     let s1 = &*(set1 as *const RtsSet);
     let s2 = &*(set2 as *const RtsSet);
-    let result: BTreeSet<i64> = s1.difference(s2).copied().collect();
+    let result: BTreeSet<Key> = s1.difference(s2).cloned().collect();
     Box::into_raw(Box::new(result)) as *mut u8
 }
 
@@ -759,7 +839,7 @@ pub unsafe extern "C" fn bhc_set_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
         return 0;
     }
     let s = &*(set_ptr as *const RtsSet);
-    s.iter().nth(index as usize).copied().unwrap_or(0)
+    s.iter().nth(index as usize).map(|k| k.raw).unwrap_or(0)
 }
 
 /// Find the minimum element of a set. Returns 0 if empty.
@@ -775,7 +855,7 @@ pub unsafe extern "C" fn bhc_set_find_min(set_ptr: *mut u8) -> i64 {
         return 0;
     }
     let s = &*(set_ptr as *const RtsSet);
-    s.iter().next().copied().unwrap_or(0)
+    s.iter().next().map(|k| k.raw).unwrap_or(0)
 }
 
 /// Find the maximum element of a set. Returns 0 if empty.
@@ -791,7 +871,7 @@ pub unsafe extern "C" fn bhc_set_find_max(set_ptr: *mut u8) -> i64 {
         return 0;
     }
     let s = &*(set_ptr as *const RtsSet);
-    s.iter().next_back().copied().unwrap_or(0)
+    s.iter().next_back().map(|k| k.raw).unwrap_or(0)
 }
 
 /// Delete the minimum element. Returns a new set.
@@ -808,9 +888,7 @@ pub unsafe extern "C" fn bhc_set_delete_min(set_ptr: *mut u8) -> *mut u8 {
         return bhc_set_empty();
     }
     let mut s = (*(set_ptr as *const RtsSet)).clone();
-    if let Some(&min) = s.iter().next() {
-        s.remove(&min);
-    }
+    s.pop_first();
     Box::into_raw(Box::new(s)) as *mut u8
 }
 
@@ -828,9 +906,7 @@ pub unsafe extern "C" fn bhc_set_delete_max(set_ptr: *mut u8) -> *mut u8 {
         return bhc_set_empty();
     }
     let mut s = (*(set_ptr as *const RtsSet)).clone();
-    if let Some(&max) = s.iter().next_back() {
-        s.remove(&max);
-    }
+    s.pop_last();
     Box::into_raw(Box::new(s)) as *mut u8
 }
 

@@ -40393,6 +40393,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.lower_builtin_map_lookup_val(key, map_val, kind)
     }
 
+    /// Whether `key` is absent from the RTS map `map_ptr`.
+    ///
+    /// `bhc_map_lookup` returns the stored word, and an `Int` 0 (or any other
+    /// value stored as the word 0) is indistinguishable from its "not found"
+    /// null, so `lookup 1 (fromList [(1, 0)])` was `Nothing` (#25). Membership
+    /// decides presence; the looked-up word is only the value.
+    fn build_map_key_absent(
+        &self,
+        key: IntValue<'ctx>,
+        map_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let member_fn = *self
+            .functions
+            .get(&VarId::new(1000104))
+            .ok_or_else(|| CodegenError::Internal("bhc_map_member not declared".to_string()))?;
+        let member = self
+            .builder()
+            .build_call(member_fn, &[key.into(), map_ptr.into()], "map_member")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bhc_map_member returned void".to_string()))?
+            .into_int_value();
+        self.builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                member,
+                self.type_mapper().i64_type().const_zero(),
+                "key_absent",
+            )
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))
+    }
+
     /// Value-level core of `Data.Map.lookup`, shared with the direct path.
     fn lower_builtin_map_lookup_val(
         &mut self,
@@ -40418,10 +40451,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Result is a pointer: null = Nothing, non-null = the value
         // Wrap in Maybe: check for null, construct Just/Nothing ADT
         let result_ptr = result.into_pointer_value();
-        let is_null = self
-            .builder()
-            .build_is_null(result_ptr, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("map_lookup is_null: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
         let nothing = self.alloc_adt(0, 0)?; // Nothing = tag 0, 0 fields
         let just = self.alloc_adt(1, 1)?; // Just = tag 1, 1 field
         self.store_adt_field(just, 1, 0, result_ptr.into())?;
@@ -43139,10 +43169,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, acc_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -43374,10 +43401,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, map2_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, skip_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -43598,10 +43622,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, map2_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -43766,10 +43787,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -43905,10 +43923,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -44270,10 +44285,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_acc_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -44998,10 +45010,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -45164,10 +45173,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         // Build input Maybe: Nothing if not found, Just(val) if found
         let nothing = self.alloc_adt(0, 0)?; // Nothing = tag 0, 0 fields
@@ -50606,6 +50612,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // (parsec's `try`) shadows the builtin — fall through to
                     // the external branch below instead.
                     let arity = self.builtin_info(name).unwrap();
+                    if let Some(lam) = self.typed_functor_eta(var) {
+                        return self.lower_expr(&lam);
+                    }
                     // A monad method passed as a VALUE keeps no record of the
                     // layer it was written at: the closure is called later,
                     // from inside a higher-order builtin, where nothing has
@@ -51600,6 +51609,50 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
         let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
         Ok(Some(closure_ptr.into()))
+    }
+
+    /// `\f x -> fmap f x` for an `fmap`/`<$>` occurrence stamped at a
+    /// `Maybe` or `Either` functor, or `None`.
+    ///
+    /// Used where `fmap` is a function value or partially applied
+    /// (`Map.alter (fmap (+ 1))`, #25): the generic wrapper closure runs with
+    /// no `current_builtin_ty`, so it cannot tell the functor and took the IO
+    /// path. In the lambda the call is saturated, and its head keeps the
+    /// occurrence type that picks the functor.
+    fn typed_functor_eta(&self, var: &Var) -> Option<Expr> {
+        if !matches!(var.name.as_str(), "fmap" | "<$>") {
+            return None;
+        }
+        let mut result = &var.ty;
+        while let Ty::Fun(_, r) = result {
+            result = r;
+        }
+        if self.is_maybe_type(result).is_none() && self.is_either_type(result).is_none() {
+            return None;
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 3_000_000);
+        let span = bhc_span::Span::default();
+        let param = || Var {
+            name: Symbol::intern("$fmap_arg"),
+            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+            ty: Ty::Error,
+        };
+        let (f, x) = (param(), param());
+        let call = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::Var(var.clone(), span)),
+                Box::new(Expr::Var(f.clone(), span)),
+                span,
+            )),
+            Box::new(Expr::Var(x.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(
+            f,
+            Box::new(Expr::Lam(x, Box::new(call), span)),
+            span,
+        ))
     }
 
     /// Create a partially-applied builtin closure.
@@ -57256,6 +57309,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if let Some(arity) = self.builtin_info(name) {
                     let n_provided = args.len() as u32;
                     if n_provided < arity {
+                        if let Some(lam) = self.typed_functor_eta(var) {
+                            let span = bhc_span::Span::default();
+                            let applied = args.iter().fold(lam, |f, a| {
+                                Expr::App(Box::new(f), Box::new((*a).clone()), span)
+                            });
+                            return self.lower_expr(&applied);
+                        }
                         // Partial application: create a closure that captures the provided args
                         // and accepts the remaining args
                         return self.create_partial_builtin_closure(name, arity, &args);

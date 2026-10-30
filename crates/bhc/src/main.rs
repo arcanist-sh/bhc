@@ -11,7 +11,7 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 /// Basel Haskell Compiler - A next-generation Haskell compiler for 2026
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "bhc")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -167,7 +167,7 @@ enum IrStage {
 }
 
 /// Subcommands
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// Compile source files
     Build {
@@ -417,6 +417,30 @@ fn generate_completions(shell: Shell) {
 
 /// Compile source files
 fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
+    try_compile_files(files, cli).map_err(|e| match e.downcast::<CompileFailed>() {
+        Ok(CompileFailed(msg)) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(1);
+        }
+        Err(other) => other,
+    })
+}
+
+/// A compile error, already formatted for `error: ...` reporting.
+#[derive(Debug)]
+struct CompileFailed(String);
+
+impl std::fmt::Display for CompileFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CompileFailed {}
+
+/// [`compile_files`], returning a compile error as [`CompileFailed`] instead
+/// of exiting, so a caller can clean up first (`bhc run`).
+fn try_compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     use bhc_driver::CompilerBuilder;
     use camino::Utf8PathBuf;
 
@@ -561,10 +585,7 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => Err(CompileFailed(e.to_string()).into()),
     }
 }
 
@@ -701,45 +722,51 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Run a Haskell program
+/// Run a Haskell program: compile it natively (the same pipeline as
+/// `bhc FILE`) into a temporary directory, then execute it with `args` and
+/// exit with its status.
+///
+/// This used to evaluate the program in the Core interpreter, whose IO and
+/// monad dispatch differ from compiled code (`getArgs >>= print` ran in the
+/// list monad, #44); `bhc run` now behaves exactly like the compiled program.
 fn run_file(file: &Path, args: &[String], cli: &Cli) -> Result<()> {
-    use bhc_driver::CompilerBuilder;
-    use camino::Utf8PathBuf;
-
     tracing::info!("Running {}", file.display());
 
-    // Convert profile
-    let profile = match cli.profile {
-        Profile::Default => bhc_session::Profile::Default,
-        Profile::Server => bhc_session::Profile::Server,
-        Profile::Numeric => bhc_session::Profile::Numeric,
-        Profile::Edge => bhc_session::Profile::Edge,
-    };
+    let dir = std::env::temp_dir().join(format!("bhc-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let exe = dir.join(
+        file.file_stem()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| "main".into()),
+    );
 
-    // Build compiler
-    let compiler = CompilerBuilder::new()
-        .profile(profile)
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create compiler: {}", e))?;
+    let mut build = cli.clone();
+    build.output = Some(exe.clone());
+    build.quiet = true;
+    build.compile_only = false;
+    let compiled = try_compile_files(&[file.to_path_buf()], &build);
 
-    // Convert path
-    let path = Utf8PathBuf::from_path_buf(file.to_path_buf())
-        .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in path"))?;
-
-    // Run the file. The interpreter prints IO output as it runs, so only a
-    // pure, non-unit result of `main` is shown afterwards.
-    match compiler.run_file_with_args(&path, args) {
-        Ok(outcome) => {
-            if !outcome.produced_io && outcome.display != "()" {
-                println!("{}", outcome.display);
+    let status = compiled.and_then(|()| {
+        std::process::Command::new(&exe)
+            .args(args)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to run {}: {}", exe.display(), e))
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => match e.downcast::<CompileFailed>() {
+            Ok(CompileFailed(msg)) => {
+                eprintln!("error: {}", msg);
+                std::process::exit(1);
             }
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Execution error: {}", e);
-            std::process::exit(1);
-        }
+            Err(other) => return Err(other),
+        },
+    };
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
+    Ok(())
 }
 
 /// Compile source files to object files only (no linking), with optional interface generation.

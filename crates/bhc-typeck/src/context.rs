@@ -5520,267 +5520,133 @@ impl TyCtxt {
                     )
                 }
 
-                // Data.IntMap operations
-                "Data.IntMap.empty" => Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
-                "Data.IntMap.singleton" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.IntMap.null" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                ),
-                "Data.IntMap.size" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), self.builtins.int_ty.clone()),
-                ),
-                "Data.IntMap.member" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.IntMap.lookup" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
-                "Data.IntMap.findWithDefault" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(
-                            self.builtins.int_ty.clone(),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                // Data.IntMap operations, over a real `IntMap` constructor so
+                // results such as `lookup`'s `Maybe a` reach codegen (#56).
+                name if name.starts_with("Data.IntMap.") => {
+                    let int = || self.builtins.int_ty.clone();
+                    let im = |t: Ty| {
+                        let con = TyCon::new(Symbol::intern("IntMap"), Kind::star_to_star());
+                        Ty::App(Box::new(Ty::Con(con)), Box::new(t))
+                    };
+                    let va = || Ty::Var(a.clone());
+                    let vb = || Ty::Var(b.clone());
+                    let ab = vec![a.clone(), b.clone()];
+                    let only_a = vec![a.clone()];
+                    match &name["Data.IntMap.".len()..] {
+                        "empty" => Scheme::poly(only_a, im(va())),
+                        "singleton" => Scheme::poly(only_a, Ty::fun(int(), Ty::fun(va(), im(va())))),
+                        "null" => Scheme::poly(only_a, Ty::fun(im(va()), self.builtins.bool_ty.clone())),
+                        "size" => Scheme::poly(only_a, Ty::fun(im(va()), int())),
+                        "member" => Scheme::poly(
+                            only_a,
+                            Ty::fun(int(), Ty::fun(im(va()), self.builtins.bool_ty.clone())),
                         ),
-                    ),
-                ),
-                // `insert :: Int -> a -> IntMap a -> IntMap a`. These curated
-                // schemes model the map itself as an opaque type variable (there
-                // is no first-class `IntMap` type here), so the map must be a
-                // DISTINCT var `b` from the value `a` — otherwise `insert k v tbl`
-                // returns the *value* type and clashes with `tbl`'s concrete map
-                // type (e.g. `expected IntMap FontFamily, found FontFamily`).
-                "Data.IntMap.insert" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                        "lookup" => Scheme::poly(
+                            only_a,
+                            Ty::fun(int(), Ty::fun(im(va()), self.builtins.maybe_of(va()))),
                         ),
-                    ),
-                ),
-                // `insertWith :: (a -> a -> a) -> Int -> a -> IntMap a -> IntMap a`.
-                // Same as `insert`: the map is a distinct var `b` from the value
-                // `a`, so the result is the map type, not the value type.
-                "Data.IntMap.insertWith" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        Ty::fun(
-                            self.builtins.int_ty.clone(),
+                        "findWithDefault" => Scheme::poly(
+                            only_a,
+                            Ty::fun(va(), Ty::fun(int(), Ty::fun(im(va()), va()))),
+                        ),
+                        "insert" => Scheme::poly(
+                            only_a,
+                            Ty::fun(int(), Ty::fun(va(), Ty::fun(im(va()), im(va())))),
+                        ),
+                        "insertWith" => Scheme::poly(
+                            only_a,
                             Ty::fun(
-                                Ty::Var(a.clone()),
-                                Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                                Ty::fun(va(), Ty::fun(va(), va())),
+                                Ty::fun(int(), Ty::fun(va(), Ty::fun(im(va()), im(va())))),
                             ),
                         ),
-                    ),
-                ),
-                "Data.IntMap.delete" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.IntMap.adjust" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        Ty::fun(
-                            self.builtins.int_ty.clone(),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        ),
-                    ),
-                ),
-                "Data.IntMap.union" | "Data.IntMap.intersection" | "Data.IntMap.difference" => {
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        ),
-                    )
-                }
-                "Data.IntMap.unionWith" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        ),
-                    ),
-                ),
-                "Data.IntMap.map" => {
-                    // map :: (a -> b) -> IntMap a -> IntMap b. The container is a
-                    // higher-kinded var `f` (= IntMap), NOT the element type —
-                    // otherwise `IntMap.map (res:) (sRawTokens st)` forced the
-                    // `IntMap [Tok]` field to be a bare `[Tok]` (`expected [],
-                    // found IntMap`, in Readers.LaTeX.Parsing).
-                    let f = TyVar::new(
-                        0xFFFD_0000,
-                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
-                    );
-                    let fa = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
-                    let fb = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
-                    Scheme::poly(
-                        vec![f.clone(), a.clone(), b.clone()],
-                        Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())), Ty::fun(fa, fb)),
-                    )
-                }
-                "Data.IntMap.mapWithKey" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(
-                            self.builtins.int_ty.clone(),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        ),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
-                "Data.IntMap.filter" => {
-                    // filter :: (a -> Bool) -> IntMap a -> IntMap a. Same as
-                    // `map`: the container is a higher-kinded `f` (= IntMap),
-                    // not the element type.
-                    let f = TyVar::new(
-                        0xFFFD_0000,
-                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
-                    );
-                    let fa = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![f.clone(), a.clone()],
-                        Ty::fun(
-                            Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                            Ty::fun(fa.clone(), fa),
-                        ),
-                    )
-                }
-                "Data.IntMap.foldr" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                        ),
-                        Ty::fun(
-                            Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        ),
-                    ),
-                ),
-                "Data.IntMap.foldlWithKey" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(
-                            Ty::Var(a.clone()),
+                        "delete" => Scheme::poly(only_a, Ty::fun(int(), Ty::fun(im(va()), im(va())))),
+                        "adjust" => Scheme::poly(
+                            only_a,
                             Ty::fun(
-                                self.builtins.int_ty.clone(),
-                                Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                                Ty::fun(va(), va()),
+                                Ty::fun(int(), Ty::fun(im(va()), im(va()))),
                             ),
                         ),
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                        "union" => Scheme::poly(only_a, Ty::fun(im(va()), Ty::fun(im(va()), im(va())))),
+                        "intersection" | "difference" => {
+                            Scheme::poly(ab, Ty::fun(im(va()), Ty::fun(im(vb()), im(va()))))
+                        }
+                        "unionWith" => Scheme::poly(
+                            only_a,
+                            Ty::fun(
+                                Ty::fun(va(), Ty::fun(va(), va())),
+                                Ty::fun(im(va()), Ty::fun(im(va()), im(va()))),
+                            ),
                         ),
-                    ),
-                ),
-                "Data.IntMap.keys" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                ),
-                "Data.IntMap.elems"
-                | "Data.IntMap.toList"
-                | "Data.IntMap.toAscList"
-                | "Data.IntMap.fromList" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                ),
+                        "map" => Scheme::poly(ab, Ty::fun(Ty::fun(va(), vb()), Ty::fun(im(va()), im(vb())))),
+                        "mapWithKey" => Scheme::poly(
+                            ab,
+                            Ty::fun(Ty::fun(int(), Ty::fun(va(), vb())), Ty::fun(im(va()), im(vb()))),
+                        ),
+                        "filter" => Scheme::poly(
+                            only_a,
+                            Ty::fun(
+                                Ty::fun(va(), self.builtins.bool_ty.clone()),
+                                Ty::fun(im(va()), im(va())),
+                            ),
+                        ),
+                        "foldr" => Scheme::poly(
+                            ab,
+                            Ty::fun(Ty::fun(va(), Ty::fun(vb(), vb())), Ty::fun(vb(), Ty::fun(im(va()), vb()))),
+                        ),
+                        "foldlWithKey" => Scheme::poly(
+                            ab,
+                            Ty::fun(
+                                Ty::fun(va(), Ty::fun(int(), Ty::fun(vb(), va()))),
+                                Ty::fun(va(), Ty::fun(im(vb()), va())),
+                            ),
+                        ),
+                        "keys" => Scheme::poly(only_a, Ty::fun(im(va()), Ty::List(Box::new(int())))),
+                        "elems" => Scheme::poly(only_a, Ty::fun(im(va()), Ty::List(Box::new(va())))),
+                        "toList" | "toAscList" => Scheme::poly(
+                            only_a,
+                            Ty::fun(im(va()), Ty::List(Box::new(Ty::Tuple(vec![int(), va()])))),
+                        ),
+                        "fromList" => Scheme::poly(
+                            only_a,
+                            Ty::fun(Ty::List(Box::new(Ty::Tuple(vec![int(), va()]))), im(va())),
+                        ),
+                        _ => continue,
+                    }
+                }
 
-                // Data.IntSet operations
-                "Data.IntSet.empty" => Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
-                "Data.IntSet.singleton" => {
-                    Scheme::mono(Ty::fun(self.builtins.int_ty.clone(), Ty::Var(a.clone())))
+                // Data.IntSet operations, over a real `IntSet` constructor.
+                name if name.starts_with("Data.IntSet.") => {
+                    let int = || self.builtins.int_ty.clone();
+                    let is = || Ty::Con(TyCon::new(Symbol::intern("IntSet"), Kind::Star));
+                    let bool_ty = || self.builtins.bool_ty.clone();
+                    match &name["Data.IntSet.".len()..] {
+                        "empty" => Scheme::mono(is()),
+                        "singleton" => Scheme::mono(Ty::fun(int(), is())),
+                        "null" => Scheme::mono(Ty::fun(is(), bool_ty())),
+                        "size" => Scheme::mono(Ty::fun(is(), int())),
+                        "member" => Scheme::mono(Ty::fun(int(), Ty::fun(is(), bool_ty()))),
+                        "insert" | "delete" => Scheme::mono(Ty::fun(int(), Ty::fun(is(), is()))),
+                        "union" | "intersection" | "difference" => {
+                            Scheme::mono(Ty::fun(is(), Ty::fun(is(), is())))
+                        }
+                        "isSubsetOf" => Scheme::mono(Ty::fun(is(), Ty::fun(is(), bool_ty()))),
+                        "filter" => {
+                            Scheme::mono(Ty::fun(Ty::fun(int(), bool_ty()), Ty::fun(is(), is())))
+                        }
+                        "foldr" => Scheme::poly(
+                            vec![b.clone()],
+                            Ty::fun(
+                                Ty::fun(int(), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))),
+                                Ty::fun(Ty::Var(b.clone()), Ty::fun(is(), Ty::Var(b.clone()))),
+                            ),
+                        ),
+                        "toList" => Scheme::mono(Ty::fun(is(), Ty::List(Box::new(int())))),
+                        "fromList" => Scheme::mono(Ty::fun(Ty::List(Box::new(int())), is())),
+                        _ => continue,
+                    }
                 }
-                "Data.IntSet.null" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                ),
-                "Data.IntSet.size" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), self.builtins.int_ty.clone()),
-                ),
-                "Data.IntSet.member" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.IntSet.insert" | "Data.IntSet.delete" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.IntSet.union" | "Data.IntSet.intersection" | "Data.IntSet.difference" => {
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        ),
-                    )
-                }
-                "Data.IntSet.isSubsetOf" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.IntSet.filter" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::fun(self.builtins.int_ty.clone(), self.builtins.bool_ty.clone()),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.IntSet.foldr" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(
-                            self.builtins.int_ty.clone(),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                        ),
-                        Ty::fun(
-                            Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        ),
-                    ),
-                ),
-                "Data.IntSet.toList" | "Data.IntSet.fromList" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                ),
 
                 // E.25: String type class methods
                 // fromString :: IsString a => String -> a

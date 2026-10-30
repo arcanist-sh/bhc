@@ -29386,17 +29386,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
-    /// The key and (for a Map) value types of a `Map k v` / `Set a`.
-    fn map_or_set_type_args(ty: &Ty) -> Option<(Ty, Option<Ty>)> {
-        let is_named = |t: &Ty, want: &str| matches!(t, Ty::Con(c) if c.name.as_str().rsplit('.').next() == Some(want));
+    /// The key and (for a Map) value types of a `Map k v` / `Set a` /
+    /// `IntMap a` / `IntSet`. A `None` key is `Int`.
+    fn map_or_set_type_args(ty: &Ty) -> Option<(Option<Ty>, Option<Ty>)> {
+        let is_named = |t: &Ty, want: &str| match t {
+            Ty::Con(c) => c.name.as_str().rsplit('.').next() == Some(want),
+            _ => false,
+        };
         match ty {
             Ty::App(f, v) => match f.as_ref() {
                 Ty::App(g, k) if is_named(g, "Map") => {
-                    Some((k.as_ref().clone(), Some(v.as_ref().clone())))
+                    Some((Some(k.as_ref().clone()), Some(v.as_ref().clone())))
                 }
-                g if is_named(g, "Set") => Some((v.as_ref().clone(), None)),
+                g if is_named(g, "Set") => Some((Some(v.as_ref().clone()), None)),
+                g if is_named(g, "IntMap") => Some((None, Some(v.as_ref().clone()))),
                 _ => None,
             },
+            t if is_named(t, "IntSet") => Some((None, None)),
             _ => None,
         }
     }
@@ -29404,10 +29410,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// A Map (tag 16) or Set (tag 17) show descriptor: `child1` describes an
     /// element of the container's ascending list (a pair for a Map) and
     /// `child2` is the containers-crate function producing that list.
+    /// IntMap/IntSet share the Map/Set representation.
     fn try_build_container_show_desc(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
         let (key_ty, val_ty) = Self::map_or_set_type_args(ty)?;
-        let key_desc = self
-            .descriptor_from_ty(&key_ty)
+        let key_desc = key_ty
+            .and_then(|k| self.descriptor_from_ty(&k))
             .unwrap_or_else(|| self.get_primitive_show_desc(0));
         let (tag, elem_desc, to_list_id) = match val_ty {
             Some(val_ty) => {

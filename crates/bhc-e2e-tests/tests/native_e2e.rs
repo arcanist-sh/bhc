@@ -1492,6 +1492,12 @@ fn test_tier3_show_map_set() {
     run_native_test("tier3_io/show_map_set", Profile::Default);
 }
 
+// Data.IntMap / Data.IntSet builtins have real types; show renders them (#56).
+#[test]
+fn test_tier3_intmap_intset_types() {
+    run_native_test("tier3_io/intmap_intset_types", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

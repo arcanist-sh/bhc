@@ -1914,6 +1914,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if self.builtin_info(sym.name.as_str()).is_none() {
                 self.external_functions.insert(sym.name, fn_val);
             }
+            // An imported type's derived `show`: `print`/`show` of a value of
+            // that type dispatch through `derived_show_fns`, which otherwise
+            // only learns this module's own instances, so an imported type
+            // printed its payload or its address. A local instance of the
+            // same type name is registered later and wins.
+            if let Some(rest) = sym.name.as_str().strip_prefix("$derived_show_") {
+                let type_name = Self::strip_deriving_counter_suffix(rest);
+                if sym.param_count == 1 && !self.derived_show_fns.contains_key(&type_name) {
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 5_000_000);
+                    let id = VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed));
+                    self.functions.insert(id, fn_val);
+                    self.derived_show_fns.insert(type_name, id);
+                }
+            }
         }
         Ok(())
     }
@@ -29392,6 +29407,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .add_global(struct_type, None, &name);
         global.set_initializer(&struct_val);
         global.set_constant(true);
+        // Module-local: every module numbers its descriptors from 0.
+        global.set_linkage(inkwell::module::Linkage::Private);
         global.as_pointer_value()
     }
 
@@ -29676,6 +29693,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .add_global(array_type, None, &name);
         global.set_initializer(&array_val);
         global.set_constant(true);
+        // Module-local: every module numbers its descriptors from 0.
+        global.set_linkage(inkwell::module::Linkage::Private);
         let count = self
             .type_mapper()
             .i64_type()

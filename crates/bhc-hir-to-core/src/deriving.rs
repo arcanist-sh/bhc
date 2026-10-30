@@ -1753,64 +1753,20 @@ impl DerivingContext {
     }
 
     /// Derive Show for a newtype.
+    /// Derive Show for a newtype exactly as for the one-constructor `data`
+    /// type it is shaped like, so it gets record syntax (`Sum {getSum = 3}`),
+    /// field types for `show` dispatch, and precedence parentheses.
     fn derive_show_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        let span = newtype_def.span;
-        let instance_type = self.build_instance_type(newtype_def.name, &newtype_def.params);
-        let type_con = TyCon::new(newtype_def.name, Kind::Star);
-
-        let show_method_var = self.fresh_var(
-            &format!("$derived_show_{}", newtype_def.name.as_str()),
-            Ty::Error,
-        );
-
-        let x_var = self.fresh_var("x", Ty::Error);
-        let inner_var = self.fresh_var("inner", Ty::Error);
-
-        let data_con = DataCon {
-            name: newtype_def.con.name,
-            ty_con: type_con,
-            tag: 0,
-            arity: 1,
+        let as_data = DataDef {
+            id: newtype_def.id,
+            name: newtype_def.name,
+            params: newtype_def.params.clone(),
+            cons: vec![newtype_def.con.clone()],
+            is_gadt: false,
+            deriving: newtype_def.deriving.clone(),
+            span: newtype_def.span,
         };
-
-        // show (Con x) = "Con " ++ show x
-        let con_str = self.make_string(newtype_def.con.name.as_str(), span);
-        let space_str = self.make_string(" ", span);
-        let show_inner = self.make_show_call(&inner_var, span);
-
-        let result = self.make_append(self.make_append(con_str, space_str, span), show_inner, span);
-
-        let case_expr = self.make_case(
-            core::Expr::Var(x_var.clone(), span),
-            vec![Alt {
-                con: AltCon::DataCon(data_con),
-                binders: vec![inner_var],
-                rhs: result,
-            }],
-            span,
-        );
-
-        let body = core::Expr::Lam(x_var, Box::new(case_expr), span);
-
-        let mut methods = FxHashMap::default();
-        methods.insert(
-            Symbol::intern("show"),
-            bhc_hir::DefId::new(show_method_var.id.index()),
-        );
-
-        let instance = InstanceInfo {
-            class: Symbol::intern("Show"),
-            instance_types: vec![instance_type],
-            methods,
-            superclass_instances: vec![],
-            assoc_type_impls: FxHashMap::default(),
-            instance_constraints: vec![],
-        };
-
-        Some(DerivedInstance {
-            instance,
-            bindings: vec![Bind::NonRec(show_method_var, Box::new(body))],
-        })
+        self.derive_show_data(&as_data)
     }
 
     // =========================================================================

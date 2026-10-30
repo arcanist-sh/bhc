@@ -1,0 +1,8 @@
+W {unW = 3}
+S {getS = 2}
+(P 3,P (-3))
+R {rf = 1, rg = True}
+[W {unW = 1},W {unW = 2}]
+(Just (W {unW = 5}),Just (P 4))
+L {unL = 7}
+W {unW = 9}

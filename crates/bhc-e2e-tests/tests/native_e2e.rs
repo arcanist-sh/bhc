@@ -1498,6 +1498,12 @@ fn test_tier3_intmap_intset_types() {
     run_native_test("tier3_io/intmap_intset_types", Profile::Default);
 }
 
+// Integer ranges, parity, min/max and show of Integer elements (#51).
+#[test]
+fn test_tier2_integer_ranges() {
+    run_native_test("tier2_functions/integer_ranges", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

@@ -2993,11 +2993,11 @@ impl TyCtxt {
                         ),
                     ),
                 ),
-                // even, odd :: Int -> Bool
-                "even" | "odd" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    self.builtins.bool_ty.clone(),
-                )),
+                // even, odd :: Integral a => a -> Bool (at `Int` or `Integer`)
+                "even" | "odd" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                ),
                 // succ, pred :: a -> a (Enum a =>)
                 "succ" | "pred" => Scheme::poly(
                     vec![a.clone()],

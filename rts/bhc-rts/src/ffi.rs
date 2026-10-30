@@ -2375,7 +2375,8 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 
 /// Descriptor for recursive type-aware show.
 /// Tag assignments:
-///   0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String, 6=Unit, 7=Ordering
+///   0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String, 6=Unit, 7=Ordering,
+///   8=Text, 9=Integer (boxed BigInt)
 ///   10=List, 11=Maybe, 12=Tuple2, 13=Either
 ///   14=Adt (user type with derived Show): `child1` is repurposed to hold the
 ///      value's derived-show function pointer rather than a child descriptor.
@@ -2443,6 +2444,10 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Text: an opaque handle, shown like the String it holds.
                 let s = bhc_text_show_str(ptr);
                 hs_show_string(&s)
+            }
+            9 => {
+                // Integer: a boxed BigInt.
+                (*(ptr as *const BigInt)).to_string()
             }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
@@ -2520,7 +2525,7 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
             || matches!(desc.tag, 16 | 17);
         // A negative number is shown in parentheses above precedence 6, as
         // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
-        if prec > 6 && matches!(desc.tag, 0..=2) && s.starts_with('-') {
+        if prec > 6 && matches!(desc.tag, 0..=2 | 9) && s.starts_with('-') {
             return format!("({})", s);
         }
         if prec > 10 && (is_constructor_app(ptr, desc) || adt_needs_parens) {
@@ -5166,6 +5171,138 @@ pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
         std::cmp::Ordering::Equal => 1,
         std::cmp::Ordering::Greater => 2,
     }
+}
+
+/// 1 if the BigInt is even, else 0 (`even`/`odd` at `Integer`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_is_even(a: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    use num_integer::Integer;
+    i64::from(a.is_even())
+}
+
+/// A thunk for the rest of an unbounded `Integer` range: `[tag -1,
+/// eval_fn, env_size 2, next, step]`, forced by `bhc_force` into
+/// `next : <thunk for next + step>`.
+fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
+    extern "C" fn resume(env: *mut u8) -> *mut u8 {
+        unsafe {
+            let cur = *(env as *const *const u8);
+            let step = *(env.add(8) as *const *const u8);
+            let next = &*(cur as *const BigInt) + &*(step as *const BigInt);
+            alloc_cons(cur as *mut u8, integer_enum_thunk(next, step))
+        }
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
+        let obj = std::alloc::alloc(layout);
+        *(obj as *mut i64) = BHC_TAG_THUNK;
+        *(obj.add(8) as *mut *const u8) = resume as *const u8;
+        *(obj.add(16) as *mut i64) = 2;
+        *(obj.add(24) as *mut *mut u8) = Box::into_raw(Box::new(next)) as *mut u8;
+        *(obj.add(32) as *mut *const u8) = step;
+        obj
+    }
+}
+
+/// `[from, from + step ..]` at `Integer`, produced lazily.
+fn integer_enum_unbounded(from: BigInt, step: BigInt) -> *mut u8 {
+    let step = Box::into_raw(Box::new(step)) as *const u8;
+    let next = &from + unsafe { &*(step as *const BigInt) };
+    let head = Box::into_raw(Box::new(from)) as *mut u8;
+    unsafe { alloc_cons(head, integer_enum_thunk(next, step)) }
+}
+
+/// `[from, from + step .. to]` at `Integer`, Haskell's `enumFromThenTo`:
+/// counts up to `to` for a positive step, down to it for a negative one,
+/// and repeats `from` forever for a zero step when `from <= to`.
+fn integer_enum_bounded(from: &BigInt, step: BigInt, to: &BigInt) -> *mut u8 {
+    use num_traits::{Signed, Zero};
+    if step.is_zero() {
+        if from <= to {
+            return integer_enum_unbounded(from.clone(), step);
+        }
+        return unsafe { alloc_nil() };
+    }
+    let mut elems = Vec::new();
+    let mut x = from.clone();
+    while if step.is_positive() {
+        &x <= to
+    } else {
+        &x >= to
+    } {
+        let next = &x + &step;
+        elems.push(Box::into_raw(Box::new(x)) as *mut u8);
+        x = next;
+    }
+    let mut list = unsafe { alloc_nil() };
+    for e in elems.into_iter().rev() {
+        list = unsafe { alloc_cons(e, list) };
+    }
+    list
+}
+
+/// `enumFrom` at `Integer`: `[from ..]`, lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_integer(from: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    integer_enum_unbounded(from.clone(), BigInt::from(1))
+}
+
+/// `enumFromThen` at `Integer`: `[from, then ..]`, lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_then_integer(from: *const u8, then: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let then = unsafe { &*(then as *const BigInt) };
+    integer_enum_unbounded(from.clone(), then - from)
+}
+
+/// `enumFromTo` at `Integer`: `[from .. to]`.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_to_integer(from: *const u8, to: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let to = unsafe { &*(to as *const BigInt) };
+    integer_enum_bounded(from, BigInt::from(1), to)
+}
+
+/// `enumFromThenTo` at `Integer`: `[from, then .. to]`.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_then_to_integer(
+    from: *const u8,
+    then: *const u8,
+    to: *const u8,
+) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let then = unsafe { &*(then as *const BigInt) };
+    let to = unsafe { &*(to as *const BigInt) };
+    integer_enum_bounded(from, then - from, to)
+}
+
+/// `maximum` (`want_max` 1) or `minimum` (0) of a `[Integer]`.
+#[no_mangle]
+pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut u8 {
+    let mut best: *mut u8 = std::ptr::null_mut();
+    let mut cur = unsafe { bhc_force(list) };
+    while !cur.is_null() && unsafe { *(cur as *const i64) } == 1 {
+        let head = unsafe { *(cur.add(8) as *const *mut u8) };
+        let better = best.is_null() || {
+            let (h, b) = unsafe { (&*(head as *const BigInt), &*(best as *const BigInt)) };
+            if want_max != 0 {
+                h > b
+            } else {
+                h < b
+            }
+        };
+        if better {
+            best = head;
+        }
+        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+    }
+    if best.is_null() {
+        let which = if want_max != 0 { "maximum" } else { "minimum" };
+        rts_abort(&format!("Prelude.{which}: empty list"));
+    }
+    best
 }
 
 /// Show a BigInt as a C string.

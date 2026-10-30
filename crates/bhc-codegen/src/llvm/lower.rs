@@ -3535,6 +3535,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000618), int_show);
+        // Ranges and parity at `Integer` (#51): bhc_enum_from_integer(ptr),
+        // bhc_enum_from_then_integer(ptr, ptr), bhc_enum_from_to_integer(ptr,
+        // ptr), bhc_enum_from_then_to_integer(ptr, ptr, ptr) -> list;
+        // bhc_integer_is_even(ptr) -> i64.
+        for (id, name, n_args) in [
+            (1000505, "bhc_enum_from_integer", 1),
+            (1000506, "bhc_enum_from_then_integer", 2),
+            (1000507, "bhc_enum_from_to_integer", 2),
+            (1000508, "bhc_enum_from_then_to_integer", 3),
+        ] {
+            let params = vec![ptr_type.into(); n_args];
+            let f = self.module.llvm_module().add_function(
+                name,
+                ptr_type.fn_type(&params, false),
+                None,
+            );
+            self.functions.insert(VarId::new(id), f);
+        }
+        let int_is_even = self.module.llvm_module().add_function(
+            "bhc_integer_is_even",
+            i64_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000509), int_is_even);
+        // bhc_integer_list_extreme(list, want_max) -> ptr
+        let int_list_extreme = self.module.llvm_module().add_function(
+            "bhc_integer_list_extreme",
+            ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000510), int_list_extreme);
 
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
@@ -9836,6 +9867,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             {
                 return self.lower_enum_from_to_user_enum(from_expr, to_expr, &type_name);
             }
+        }
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(1000507, &[from_expr, to_expr], "enum_from_to_integer");
         }
 
         let from_val = self
@@ -26485,6 +26519,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `even n` — returns Bool ADT (tag 0=False, 1=True).
     fn lower_builtin_even(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(expr) {
+            return self.lower_integer_parity(expr, true);
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("even: no value".to_string()))?;
@@ -26513,6 +26550,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `odd n` — returns Bool ADT (tag 0=False, 1=True).
     fn lower_builtin_odd(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(expr) {
+            return self.lower_integer_parity(expr, false);
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("odd: no value".to_string()))?;
@@ -26537,6 +26577,60 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_z_extend(is_odd, i64_type, "odd_tag")
             .map_err(|e| CodegenError::Internal(format!("odd: extend failed: {:?}", e)))?;
         self.allocate_bool_adt(tag, "odd")
+    }
+
+    /// Whether this builtin occurrence works at `Integer` (boxed BigInts):
+    /// its stamped argument type says so, or its first argument's type does.
+    fn builtin_at_integer(&self, first_arg: &Expr) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_integer_type(a))
+            || self.is_integer_type(&first_arg.ty())
+    }
+
+    /// Call an Integer RTS function on the lowered (pointer) arguments.
+    fn call_integer_rts(
+        &mut self,
+        var_id: usize,
+        args: &[&Expr],
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let mut call_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let val = self
+                .lower_expr(arg)?
+                .ok_or_else(|| CodegenError::Internal(format!("{label}: no value")))?;
+            call_args.push(self.value_to_ptr(val)?.into());
+        }
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(var_id))
+            .ok_or_else(|| CodegenError::Internal(format!("{label}: not declared")))?;
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &call_args, label)
+            .map_err(|e| CodegenError::Internal(format!("{label} call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
+    }
+
+    /// `even`/`odd` at `Integer`: ask the BigInt, not its address.
+    fn lower_integer_parity(
+        &mut self,
+        expr: &Expr,
+        want_even: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let is_even = self
+            .call_integer_rts(1000509, &[expr], "integer_is_even")?
+            .ok_or_else(|| CodegenError::Internal("integer_is_even: void".to_string()))?
+            .into_int_value();
+        let tag = if want_even {
+            is_even
+        } else {
+            let one = self.type_mapper().i64_type().const_int(1, false);
+            self.builder()
+                .build_xor(is_even, one, "is_odd")
+                .map_err(|e| CodegenError::Internal(format!("odd: xor: {:?}", e)))?
+        };
+        self.allocate_bool_adt(tag, if want_even { "even" } else { "odd" })
     }
 
     /// Allocate a Bool ADT with dynamic tag (0=False, 1=True).
@@ -29334,6 +29428,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::Unit
                 } else if matches!(&ty, Ty::Con(c) if c.name.as_str() == "Ordering") {
                     ShowCoerce::Ordering
+                } else if matches!(&ty, Ty::Con(c) if c.name.as_str() == "Integer") {
+                    ShowCoerce::Integer
                 } else {
                     ShowCoerce::Int
                 }
@@ -29363,7 +29459,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ShowCoerce::Text => self.get_primitive_show_desc(8),
             ShowCoerce::Unit => self.get_primitive_show_desc(6),
             ShowCoerce::Ordering => self.get_primitive_show_desc(7),
-            ShowCoerce::Integer => self.get_primitive_show_desc(0), // Use Int tag (0) — Integer show is handled separately
+            ShowCoerce::Integer => self.get_primitive_show_desc(9),
             ShowCoerce::List => {
                 let elem_desc = self.build_list_elem_descriptor(expr);
                 self.create_show_desc_global(10, Some(elem_desc), None)
@@ -32521,6 +32617,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         from_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(1000505, &[from_expr], "enum_from_integer");
+        }
         // Build a finite list of 10000 elements as fallback
         // Real programs use `take n (enumFrom x)` which the optimizer can handle
         let from_val = self
@@ -32596,6 +32695,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         from_expr: &Expr,
         then_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(
+                1000506,
+                &[from_expr, then_expr],
+                "enum_from_then_integer",
+            );
+        }
         let from_val = self
             .lower_expr(from_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFromThen: from has no value".to_string()))?;
@@ -32696,6 +32802,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         then_expr: &Expr,
         to_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(
+                1000508,
+                &[from_expr, then_expr, to_expr],
+                "enum_from_then_to_integer",
+            );
+        }
         let from_val = self.lower_expr(from_expr)?.ok_or_else(|| {
             CodegenError::Internal("enumFromThenTo: from has no value".to_string())
         })?;
@@ -34156,6 +34269,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.list_builtin_at_integer() {
+            return self.lower_integer_list_extreme(list_expr, true);
+        }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SGT, "maximum")
     }
 
@@ -34164,7 +34280,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.list_builtin_at_integer() {
+            return self.lower_integer_list_extreme(list_expr, false);
+        }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SLT, "minimum")
+    }
+
+    /// Whether this list builtin's stamped argument is `[Integer]`.
+    fn list_builtin_at_integer(&self) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _)
+            if matches!(a.as_ref(), Ty::List(e) if self.is_integer_type(e)))
+    }
+
+    /// `maximum`/`minimum` over `[Integer]`: compare the BigInts, not their
+    /// addresses (#51).
+    fn lower_integer_list_extreme(
+        &mut self,
+        list_expr: &Expr,
+        want_max: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("integer extreme: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list)?;
+        let rts_fn = *self.functions.get(&VarId::new(1000510)).ok_or_else(|| {
+            CodegenError::Internal("bhc_integer_list_extreme not declared".to_string())
+        })?;
+        let flag = self
+            .type_mapper()
+            .i64_type()
+            .const_int(u64::from(want_max), false);
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &[list_ptr.into(), flag.into()], "integer_extreme")
+            .map_err(|e| CodegenError::Internal(format!("integer extreme call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
     }
 
     /// Shared implementation for `maximum` and `minimum`.
@@ -51404,11 +51555,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
         let elem = Self::wide_numeric_ty(elem)?.clone();
         let is_integer = matches!(&elem, Ty::Con(c) if c.name.as_str() == "Integer");
-        // An `Integer` range is built from machine ints (as everything that
-        // consumes one expects), not bignums; leave it to the Int loop.
-        if is_integer && self.app_head_var_name(list_expr) == Some("enumFromTo") {
-            return None;
-        }
         let unit = if op == "*" { 1 } else { 0 };
         let literal = if is_integer {
             Literal::Integer(unit)
@@ -51699,48 +51845,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure_ptr.into()))
     }
 
-    /// `\f x -> fmap f x` for an `fmap`/`<$>` occurrence stamped at a
-    /// `Maybe` or `Either` functor, or `None`.
+    /// An eta-expansion of a builtin occurrence whose stamped type picks its
+    /// implementation, or `None`:
     ///
-    /// Used where `fmap` is a function value or partially applied
-    /// (`Map.alter (fmap (+ 1))`, #25): the generic wrapper closure runs with
-    /// no `current_builtin_ty`, so it cannot tell the functor and took the IO
-    /// path. In the lambda the call is saturated, and its head keeps the
-    /// occurrence type that picks the functor.
+    /// - `\f x -> fmap f x` for `fmap`/`<$>` at a `Maybe` or `Either` functor
+    ///   (`Map.alter (fmap (+ 1))`, #25);
+    /// - `\x -> even x` / `\x -> odd x` at `Integer` (`filter even`, #51).
+    ///
+    /// Used where the builtin is a function value or partially applied: the
+    /// generic wrapper closure runs with no `current_builtin_ty` and sees only
+    /// untyped values. In the lambda the call is saturated, and its head
+    /// keeps the occurrence type that picks the implementation.
     fn typed_functor_eta(&self, var: &Var) -> Option<Expr> {
-        if !matches!(var.name.as_str(), "fmap" | "<$>") {
-            return None;
-        }
-        let mut result = &var.ty;
-        while let Ty::Fun(_, r) = result {
-            result = r;
-        }
-        if self.is_maybe_type(result).is_none() && self.is_either_type(result).is_none() {
-            return None;
-        }
+        let arity = match var.name.as_str() {
+            "fmap" | "<$>" => {
+                let mut result = &var.ty;
+                while let Ty::Fun(_, r) = result {
+                    result = r;
+                }
+                if self.is_maybe_type(result).is_none() && self.is_either_type(result).is_none() {
+                    return None;
+                }
+                2
+            }
+            "even" | "odd" => match &var.ty {
+                Ty::Fun(a, _) if self.is_integer_type(a) => 1,
+                _ => return None,
+            },
+            _ => return None,
+        };
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 3_000_000);
         let span = bhc_span::Span::default();
-        let param = || Var {
-            name: Symbol::intern("$fmap_arg"),
-            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
-            ty: Ty::Error,
-        };
-        let (f, x) = (param(), param());
-        let call = Expr::App(
-            Box::new(Expr::App(
-                Box::new(Expr::Var(var.clone(), span)),
-                Box::new(Expr::Var(f.clone(), span)),
-                span,
-            )),
-            Box::new(Expr::Var(x.clone(), span)),
-            span,
-        );
-        Some(Expr::Lam(
-            f,
-            Box::new(Expr::Lam(x, Box::new(call), span)),
-            span,
-        ))
+        // `even`/`odd` parameters carry the occurrence's argument types; the
+        // `fmap` ones stay untyped (the head's type alone picks the functor).
+        let typed_params = arity == 1;
+        let mut params = Vec::with_capacity(arity);
+        let mut ty = &var.ty;
+        for _ in 0..arity {
+            let (param_ty, rest) = match ty {
+                Ty::Fun(a, r) if typed_params => (a.as_ref().clone(), r.as_ref()),
+                Ty::Fun(_, r) => (Ty::Error, r.as_ref()),
+                _ => (Ty::Error, ty),
+            };
+            params.push(Var {
+                name: Symbol::intern("$eta_arg"),
+                id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                ty: param_ty,
+            });
+            ty = rest;
+        }
+        let call = params.iter().fold(Expr::Var(var.clone(), span), |f, p| {
+            Expr::App(Box::new(f), Box::new(Expr::Var(p.clone(), span)), span)
+        });
+        Some(
+            params
+                .into_iter()
+                .rev()
+                .fold(call, |body, p| Expr::Lam(p, Box::new(body), span)),
+        )
     }
 
     /// Create a partially-applied builtin closure.

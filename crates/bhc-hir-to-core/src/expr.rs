@@ -987,17 +987,31 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
                     if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")));
             if integer || ground_list_eq || floating {
                 v.ty = resolved;
+            } else if matches!(
+                v.name.as_str(),
+                "+" | "-" | "*" | "div" | "mod" | "quot" | "rem"
+            ) && matches!(&resolved, Ty::Con(c) if c.name.as_str() == "Integer")
+            {
+                // An infix application can record its span for the operator,
+                // so the type found there is the RESULT (`[x * x | x <- xs]`,
+                // #51). These operators' operands share the result's type.
+                v.ty = Ty::fun(resolved.clone(), Ty::fun(resolved.clone(), resolved));
             }
         }
         return;
     }
-    if matches!(v.name.as_str(), "sum" | "product") {
+    if matches!(v.name.as_str(), "sum" | "product" | "maximum" | "minimum") {
         // The element type of a `sum`/`product` over `Integer` (boxed
         // bignums) or `Double`/`Float`; codegen's loop adds machine ints.
+        // `maximum`/`minimum` likewise compare machine ints (#51).
+        let wanted = if matches!(v.name.as_str(), "sum" | "product") {
+            &["Integer", "Double", "Float"][..]
+        } else {
+            &["Integer"][..]
+        };
         if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
             if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::List(e)
-                if matches!(e.as_ref(), Ty::Con(c)
-                    if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))))
+                if matches!(e.as_ref(), Ty::Con(c) if wanted.contains(&c.name.as_str()))))
             {
                 v.ty = resolved;
             }
@@ -1137,14 +1151,35 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // A range `[a .. b]` desugars to `enumFromTo a b` with the range's own
         // span, so its recorded type is the result: at `[Double]`/`[Float]`
         // the bounds count in floating point even when written as integer
-        // literals (`[1 .. 3] :: [Double]`).
-        if v.name.as_str() == "enumFromTo" && matches!(v.ty, Ty::Error) {
+        // literals (`[1 .. 3] :: [Double]`), and at `[Integer]` in BigInts
+        // (#51). The other range forms likewise.
+        let range_arity = match v.name.as_str() {
+            "enumFrom" => 1,
+            "enumFromTo" | "enumFromThen" => 2,
+            "enumFromThenTo" => 3,
+            _ => 0,
+        };
+        if range_arity > 0 && matches!(v.ty, Ty::Error) {
             if let Some(Ty::List(elem)) = ctx.resolved_expr_ty_opt(def_ref.span) {
-                if matches!(elem.as_ref(), Ty::Con(c)
-                    if matches!(c.name.as_str(), "Double" | "Float"))
-                {
+                let wanted = if v.name.as_str() == "enumFromTo" {
+                    &["Double", "Float", "Integer"][..]
+                } else {
+                    &["Integer"][..]
+                };
+                if matches!(elem.as_ref(), Ty::Con(c) if wanted.contains(&c.name.as_str())) {
                     let e = elem.as_ref().clone();
-                    v.ty = Ty::fun(e.clone(), Ty::fun(e.clone(), Ty::List(Box::new(e))));
+                    v.ty = (0..range_arity)
+                        .fold(Ty::List(Box::new(e.clone())), |r, _| Ty::fun(e.clone(), r));
+                }
+            }
+        }
+        // `even`/`odd` at `Integer` test the BigInt, not its address (#51).
+        if matches!(v.name.as_str(), "even" | "odd") && matches!(v.ty, Ty::Error) {
+            if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                if matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
+                {
+                    v.ty = resolved;
                 }
             }
         }

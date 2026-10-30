@@ -3248,6 +3248,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000164), set_elem_at);
+        // bhc_map_to_assoc_list(map_ptr) -> ptr / bhc_set_to_list(set_ptr) -> ptr
+        // (referenced from Map/Set show descriptors)
+        let map_to_assoc_list = self.module.llvm_module().add_function(
+            "bhc_map_to_assoc_list",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions
+            .insert(VarId::new(1000165), map_to_assoc_list);
+        let set_to_list = self.module.llvm_module().add_function(
+            "bhc_set_to_list",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000166), set_to_list);
 
         // ---- List RTS functions (VarId 1170-1175) ----
         // bhc_list_sort(list_ptr) -> ptr
@@ -16944,7 +16959,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || self.is_string_type(&expr_ty)
                     || self.is_maybe_type(&expr_ty).is_some()
                     || self.is_either_type(&expr_ty).is_some()
-                    || self.is_tuple_type(&expr_ty).is_some();
+                    || self.is_tuple_type(&expr_ty).is_some()
+                    || Self::map_or_set_type_args(&expr_ty).is_some()
+                    || matches!(&self.current_builtin_ty,
+                        Ty::Fun(a, _) if Self::map_or_set_type_args(a).is_some());
                 if compound_show {
                     self.print_via_show_desc(p, val_expr)?;
                 } else if let Some(adt_type) = self
@@ -28794,6 +28812,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if self.is_unit_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000097, "show_unit", ShowCoerce::Unit);
             }
+            // `fromList [...]`: the value is an opaque containers handle, so
+            // only a descriptor carrying its to-list function can show it.
+            if let Some(desc) = self.try_build_container_show_desc(&ty) {
+                let val = self.lower_expr(expr)?.ok_or_else(|| {
+                    CodegenError::Internal("show container: no value".to_string())
+                })?;
+                let ptr = self.value_to_ptr(val)?;
+                let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_show_with_desc not declared".to_string())
+                })?;
+                let cstr = self
+                    .builder()
+                    .build_call(show_fn, &[ptr.into(), desc.into()], "show_container")
+                    .map_err(|e| CodegenError::Internal(format!("show_with_desc call: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("show_with_desc: returned void".to_string())
+                    })?;
+                let char_list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
             if self.is_rational_type(&ty) {
                 // Call bhc_rational_show (VarId 1000915) which returns a C string,
                 // then convert to BHC char list for putStrLn
@@ -29260,6 +29300,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Build a recursive show descriptor from a ShowCoerce + expression.
     fn build_show_descriptor(&mut self, expr: &Expr) -> PointerValue<'ctx> {
+        if let Some(desc) = self.try_build_container_show_desc(&expr.ty()) {
+            return desc;
+        }
         // First determine the coerce type
         let coerce = if let Some((c, _, _)) = self.infer_show_from_expr(expr) {
             c
@@ -29341,6 +29384,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.create_show_desc_global(13, Some(l_d), Some(r_d))
             }
         }
+    }
+
+    /// The key and (for a Map) value types of a `Map k v` / `Set a`.
+    fn map_or_set_type_args(ty: &Ty) -> Option<(Ty, Option<Ty>)> {
+        let is_named = |t: &Ty, want: &str| matches!(t, Ty::Con(c) if c.name.as_str().rsplit('.').next() == Some(want));
+        match ty {
+            Ty::App(f, v) => match f.as_ref() {
+                Ty::App(g, k) if is_named(g, "Map") => {
+                    Some((k.as_ref().clone(), Some(v.as_ref().clone())))
+                }
+                g if is_named(g, "Set") => Some((v.as_ref().clone(), None)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A Map (tag 16) or Set (tag 17) show descriptor: `child1` describes an
+    /// element of the container's ascending list (a pair for a Map) and
+    /// `child2` is the containers-crate function producing that list.
+    fn try_build_container_show_desc(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
+        let (key_ty, val_ty) = Self::map_or_set_type_args(ty)?;
+        let key_desc = self
+            .descriptor_from_ty(&key_ty)
+            .unwrap_or_else(|| self.get_primitive_show_desc(0));
+        let (tag, elem_desc, to_list_id) = match val_ty {
+            Some(val_ty) => {
+                let val_desc = self
+                    .descriptor_from_ty(&val_ty)
+                    .unwrap_or_else(|| self.get_primitive_show_desc(0));
+                let pair = self.create_show_desc_global(12, Some(key_desc), Some(val_desc));
+                (16, pair, 1000165)
+            }
+            None => (17, key_desc, 1000166),
+        };
+        let to_list = *self.functions.get(&VarId::new(to_list_id))?;
+        let fn_ptr = to_list.as_global_value().as_pointer_value();
+        Some(self.create_show_desc_global(tag, Some(elem_desc), Some(fn_ptr)))
     }
 
     /// Build an `Adt` show descriptor (tag 14) for a user-defined type with

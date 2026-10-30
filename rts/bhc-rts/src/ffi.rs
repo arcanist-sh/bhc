@@ -2381,6 +2381,9 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///      value's derived-show function pointer rather than a child descriptor.
 ///   15=Tuple of 3+ components: `child1` points to an array of component
 ///      descriptors and `child2` holds the component count (not a pointer).
+///   16=Map, 17=Set: `child1` is the descriptor of an element of the
+///      container's ascending list (a Tuple2 for Map) and `child2` holds the
+///      container's to-list function pointer. Shown as `fromList [...]`.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2490,6 +2493,17 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 let result = show_fn(std::ptr::null(), ptr);
                 read_char_list(result)
             }
+            16 | 17 => {
+                // Map / Set: child2 holds the container's to-list function
+                // (`bhc_map_to_assoc_list` / `bhc_set_to_list`), child1 the
+                // descriptor of a list element (a pair for Map).
+                let raw = desc.child2 as *const ();
+                let to_list: extern "C" fn(*const u8) -> *const u8 = std::mem::transmute(raw);
+                format!(
+                    "fromList {}",
+                    show_list_recursive(to_list(ptr), &*desc.child1)
+                )
+            }
             _ => format!("<tag {}>", desc.tag),
         }
     }
@@ -2502,7 +2516,8 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
         // For a user ADT (tag 14) the derived show yields the rendered form;
         // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
         // precedence, a nullary one ("Red") does not — detect via a space.
-        let adt_needs_parens = desc.tag == 14 && s.contains(' ') && !s.starts_with('(');
+        let adt_needs_parens = (desc.tag == 14 && s.contains(' ') && !s.starts_with('('))
+            || matches!(desc.tag, 16 | 17);
         // A negative number is shown in parentheses above precedence 6, as
         // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
         if prec > 6 && matches!(desc.tag, 0..=2) && s.starts_with('-') {

@@ -210,7 +210,9 @@ pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    content_guard.get_or_insert_with(HashMap::new).insert(raw, content);
+    content_guard
+        .get_or_insert_with(HashMap::new)
+        .insert(raw, content);
     ANY_INTERNED.store(true, AtomicOrdering::Release);
     raw
 }
@@ -840,6 +842,51 @@ pub unsafe extern "C" fn bhc_set_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
     }
     let s = &*(set_ptr as *const RtsSet);
     s.iter().nth(index as usize).map(|k| k.raw).unwrap_or(0)
+}
+
+/// The map's entries as an ascending `[(k, v)]` cons list of pairs
+/// (`[i64 tag=0, ptr fst, ptr snd]`). `show` of a Map reaches this through
+/// its descriptor, so the RTS needs no link-time dependency on this crate.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_map_to_assoc_list(map_ptr: *mut u8) -> *mut u8 {
+    let mut list = seq_nil();
+    if map_ptr.is_null() {
+        return list;
+    }
+    let m = &*(map_ptr as *const RtsMap);
+    for (k, v) in m.iter().rev() {
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let pair = std::alloc::alloc(layout);
+        *(pair as *mut i64) = 0;
+        *(pair.add(8) as *mut *mut u8) = k.raw as *mut u8;
+        *(pair.add(16) as *mut *mut u8) = *v;
+        list = seq_cons_cell(pair, list);
+    }
+    list
+}
+
+/// The set's elements as an ascending cons list.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_set_to_list(set_ptr: *mut u8) -> *mut u8 {
+    let mut list = seq_nil();
+    if set_ptr.is_null() {
+        return list;
+    }
+    let s = &*(set_ptr as *const RtsSet);
+    for k in s.iter().rev() {
+        list = seq_cons_cell(k.raw as *mut u8, list);
+    }
+    list
 }
 
 /// Find the minimum element of a set. Returns 0 if empty.

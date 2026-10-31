@@ -1562,7 +1562,10 @@ fn test_tier2_integer_literals_wide() {
 // Defaulting does not overwrite a type an annotation already fixed (#57).
 #[test]
 fn test_tier2_integer_annotation_chains() {
-    run_native_test("tier2_functions/integer_annotation_chains", Profile::Default);
+    run_native_test(
+        "tier2_functions/integer_annotation_chains",
+        Profile::Default,
+    );
 }
 
 // Derived Show of fields typed by a type parameter, nested and recursive,

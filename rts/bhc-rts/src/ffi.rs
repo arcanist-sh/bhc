@@ -2535,8 +2535,9 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
         // For a user ADT (tag 14) the derived show yields the rendered form;
         // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
         // precedence, a nullary one ("Red") does not — detect via a space.
-        let adt_needs_parens = (matches!(desc.tag, 14 | 19) && s.contains(' ') && !s.starts_with('('))
-            || matches!(desc.tag, 16 | 17);
+        let adt_needs_parens =
+            (matches!(desc.tag, 14 | 19) && s.contains(' ') && !s.starts_with('('))
+                || matches!(desc.tag, 16 | 17);
         // A negative number is shown in parentheses above precedence 6, as
         // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
         if prec > 6 && matches!(desc.tag, 0..=2 | 9) && s.starts_with('-') {

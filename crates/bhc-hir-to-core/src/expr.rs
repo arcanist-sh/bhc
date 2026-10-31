@@ -428,6 +428,13 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
             }
             _ => {}
         }
+        // At a type variable (a literal in a class-polymorphic body), keep the
+        // variable: a specialized copy (`numeric_specialize`) substitutes it
+        // and turns the literal into an `Integer`/`Double` one. The machine
+        // literal itself is unchanged.
+        if let (Some(tv @ Ty::Var(_)), core::Expr::Lit(l, _, s)) = (resolved, &core_lit) {
+            return Ok(core::Expr::Lit(l.clone(), tv, *s));
+        }
     }
     if !matches!(lit, Lit::String(_)) {
         return Ok(core_lit);

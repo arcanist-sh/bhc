@@ -2306,3 +2306,13 @@ fn test_tier3_file_append_roundtrip() {
 fn test_tier3_show_string_list() {
     run_native_test("tier3_io/show_string_list", Profile::Default);
 }
+
+// Class-polymorphic functions at Integer/Double/String get specialized
+// copies (#57).
+#[test]
+fn test_tier2_class_polymorphic_numeric() {
+    run_native_test(
+        "tier2_functions/class_polymorphic_numeric",
+        Profile::Default,
+    );
+}

@@ -1695,6 +1695,14 @@ impl Compiler {
         if mono > 0 {
             debug!(specialized = mono, "monad monomorphization complete");
         }
+        // Copies of class-polymorphic bindings at representation-sensitive
+        // types (`sq :: Num a => …` at `Integer`; #57). Same span-keyed types,
+        // so it also runs before the simplifier.
+        let numspec =
+            bhc_core::numeric_specialize::specialize_numeric(&mut core, &typed.resolved_expr_types);
+        if numspec > 0 {
+            debug!(specialized = numspec, "numeric specialization complete");
+        }
 
         // Core IR optimization (simplifier)
         if self.session.options.opt_level != bhc_session::OptLevel::None {

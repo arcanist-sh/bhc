@@ -994,7 +994,7 @@ fn specialize_bind(bind: &Bind, subst: &Subst, ctx: &mut Ctx) -> Bind {
 
 /// One-sided structural match: bind `pat`'s type variables so that it becomes
 /// `conc`. Fails on any inconsistency.
-fn match_ty(pat: &Ty, conc: &Ty, subst: &mut Subst) -> bool {
+pub(crate) fn match_ty(pat: &Ty, conc: &Ty, subst: &mut Subst) -> bool {
     match (pat, conc) {
         (Ty::Var(v), _) => match subst.get(v) {
             Some(existing) => existing == conc,
@@ -1054,7 +1054,7 @@ fn class_sel_builtin(class: &str, sel: &str) -> Option<&'static str> {
 }
 
 /// The ultimate result of a function type (all leading `->` arrows stripped).
-fn ultimate_result(ty: &Ty) -> &Ty {
+pub(crate) fn ultimate_result(ty: &Ty) -> &Ty {
     let mut r = ty;
     while let Ty::Fun(_, b) = r {
         r = b;
@@ -1062,7 +1062,7 @@ fn ultimate_result(ty: &Ty) -> &Ty {
     r
 }
 
-fn has_free_tyvar(ty: &Ty) -> bool {
+pub(crate) fn has_free_tyvar(ty: &Ty) -> bool {
     match ty {
         Ty::Var(_) => true,
         Ty::App(a, b) | Ty::Fun(a, b) => has_free_tyvar(a) || has_free_tyvar(b),
@@ -1126,7 +1126,7 @@ fn collect_monad_tyvars(ty: &Ty, out: &mut Vec<TyVar>) {
     }
 }
 
-fn collect_tyvars(ty: &Ty, out: &mut Vec<TyVar>) {
+pub(crate) fn collect_tyvars(ty: &Ty, out: &mut Vec<TyVar>) {
     match ty {
         Ty::Var(v) => {
             if !out.contains(v) {

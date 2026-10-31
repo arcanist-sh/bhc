@@ -712,8 +712,15 @@ impl WasmModule {
         let file_read_func =
             wasi::generate_file_read(file_table_idx, exn_flag_idx, file_read_host_idx);
         let file_read_idx = self.add_function(file_read_func);
-        let file_append_func =
-            wasi::generate_file_append(alloc_idx, concat_str_idx, file_table_idx);
+        let file_append_host_func =
+            wasi::generate_file_append_host(wasi::PATH_OPEN_IDX, fd_write_idx, wasi::FD_CLOSE_IDX);
+        let file_append_host_idx = self.add_function(file_append_host_func);
+        let file_append_func = wasi::generate_file_append(
+            alloc_idx,
+            concat_str_idx,
+            file_table_idx,
+            file_append_host_idx,
+        );
         let file_append_idx = self.add_function(file_append_func);
 
         // Rational (Ratio Int) constructor.

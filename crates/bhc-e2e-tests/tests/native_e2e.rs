@@ -2290,3 +2290,10 @@ fn test_tier4_sum_map_named_numeric() {
 fn test_tier4_foldl_map_lambda_numeric() {
     run_native_test("tier4_fusion/foldl_map_lambda", Profile::Numeric);
 }
+
+// writeFile/appendFile with computed strings, read back; `++` after a
+// computed String (#40).
+#[test]
+fn test_tier3_file_append_roundtrip() {
+    run_native_test("tier3_io/file_append_roundtrip", Profile::Default);
+}

@@ -827,6 +827,8 @@ impl<'a> WasmLowering<'a> {
         let expr = peel_runtime_identity(expr);
         match expr {
             Expr::Lit(Literal::Int(n), _, _) => Some(BigInt::from(*n)),
+            // An `Integer`-typed literal (`factorial 50`'s `1`, `50`).
+            Expr::Lit(Literal::Integer(n), _, _) => Some(BigInt::from(*n)),
             Expr::Var(v, _) => env.get(&v.id).cloned(),
             Expr::Let(bind, body, _) => {
                 let Bind::NonRec(var, rhs) = bind.as_ref() else {
@@ -864,6 +866,11 @@ impl<'a> WasmLowering<'a> {
                             break;
                         }
                         AltCon::Lit(Literal::Int(_)) => {}
+                        AltCon::Lit(Literal::Integer(k)) if s == BigInt::from(*k) => {
+                            chosen = Some(alt);
+                            break;
+                        }
+                        AltCon::Lit(Literal::Integer(_)) => {}
                         AltCon::DataCon(dc) if s == BigInt::from(dc.tag) => {
                             chosen = Some(alt);
                             break;
@@ -4673,9 +4680,12 @@ impl<'a> WasmLowering<'a> {
                 if args.len() == 2 =>
             {
                 if is_list_operand(args[0]) || is_list_operand(args[1]) {
-                    // Cons-list append.
-                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                    self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                    // Cons-list append. Either side may still be a String
+                    // `pstr` (a literal beside a computed `reverse s`):
+                    // `append_list` would hang it on as the tail unconverted,
+                    // and `reverse "hello" ++ "!"` lost its `"!"` (#40).
+                    self.emit_ensure_charlist(args[0], instrs, locals, local_count)?;
+                    self.emit_ensure_charlist(args[1], instrs, locals, local_count)?;
                     instrs.push(WasmInstr::Call(self.runtime.append_list_idx));
                 } else {
                     // String concat: `concat_str` needs `pstr` operands, but a
@@ -5020,15 +5030,18 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
                 instrs.push(WasmInstr::Call(self.runtime.file_read_idx));
             }
+            // The content (and path) as a flat `pstr`: a computed String can be
+            // a cons `[Char]`, whose first word the host writer read as the
+            // length — `writeFile f (reverse "hello")` wrote `o` (#40).
             Some(n) if args.len() == 2 && strip_qualifier(n) == "writeFile" => {
-                self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
-                self.lower_expr(args[1], instrs, locals, local_count, false)?; // content
+                self.emit_string_as_pstr(args[0], instrs, locals, local_count)?; // path
+                self.emit_string_as_pstr(args[1], instrs, locals, local_count)?; // content
                 instrs.push(WasmInstr::Call(self.runtime.file_write_idx));
                 instrs.push(WasmInstr::I32Const(0)); // ()
             }
             Some(n) if args.len() == 2 && strip_qualifier(n) == "appendFile" => {
-                self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
-                self.lower_expr(args[1], instrs, locals, local_count, false)?; // content
+                self.emit_string_as_pstr(args[0], instrs, locals, local_count)?; // path
+                self.emit_string_as_pstr(args[1], instrs, locals, local_count)?; // content
                 instrs.push(WasmInstr::Call(self.runtime.file_append_idx));
                 instrs.push(WasmInstr::I32Const(0)); // ()
             }
@@ -11352,6 +11365,16 @@ fn collect_app_spine(expr: &Expr) -> (&Expr, Vec<&Expr>) {
             // Skip type applications
             Expr::TyApp(f, _, _) => {
                 current = f;
+            }
+            // A method resolved at a known instance arrives wrapped in its
+            // (unused) dictionary binding: `fmap` at `[]` is `(let
+            // $dictFunctor_[] = … in map) f xs`. See through it to the
+            // method, or `show (fmap f xs)` lost its list-ness.
+            Expr::Let(bind, body, _)
+                if matches!(body.as_ref(), Expr::Var(v, _)
+                    if !matches!(bind.as_ref(), Bind::NonRec(b, _) if b.id == v.id)) =>
+            {
+                current = body;
             }
             _ => break,
         }

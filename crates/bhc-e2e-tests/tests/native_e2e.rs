@@ -1559,6 +1559,12 @@ fn test_tier2_integer_literals_wide() {
     run_native_test("tier2_functions/integer_literals_wide", Profile::Default);
 }
 
+// Defaulting does not overwrite a type an annotation already fixed (#57).
+#[test]
+fn test_tier2_integer_annotation_chains() {
+    run_native_test("tier2_functions/integer_annotation_chains", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

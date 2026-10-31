@@ -500,9 +500,13 @@ enum PatHead {
 /// compared with the bignum's address and never matched (#57).
 fn lit_pattern_to_core(ctx: &LowerContext, lit: &hir::Lit, span: Span) -> Literal {
     if let hir::Lit::Int(n) = lit {
-        if matches!(ctx.resolved_expr_ty_opt(span), Some(Ty::Con(c)) if c.name.as_str() == "Integer")
-        {
-            return Literal::Integer(*n);
+        match ctx.resolved_expr_ty_opt(span) {
+            Some(Ty::Con(c)) if c.name.as_str() == "Integer" => return Literal::Integer(*n),
+            // `f 0 = ..` at `Double`: the pattern is the float `0.0`.
+            Some(Ty::Con(c)) if matches!(c.name.as_str(), "Double" | "Float") => {
+                return Literal::Double(*n as f64)
+            }
+            _ => {}
         }
     }
     hir_lit_to_core(lit)

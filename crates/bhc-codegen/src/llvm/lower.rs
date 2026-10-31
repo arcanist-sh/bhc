@@ -59676,6 +59676,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             match &alt.con {
                 AltCon::Lit(Literal::Float(f)) => literal_alts.push((*f, alt)),
                 AltCon::Lit(Literal::Double(d)) => literal_alts.push((*d, alt)),
+                // An integer literal pattern at a floating type (`f 0 = ..`
+                // on a `Double`) is that number as a float.
+                AltCon::Lit(Literal::Int(n)) => literal_alts.push((*n as f64, alt)),
                 AltCon::Default => default_alt = Some(alt),
                 _ => {
                     return Err(CodegenError::Unsupported(format!(

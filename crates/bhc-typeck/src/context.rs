@@ -1000,6 +1000,15 @@ impl TyCtxt {
     /// - Num defaults to Int (or Integer in standard Haskell)
     /// - Fractional defaults to Double
     fn try_default_constraint(&mut self, class: Symbol, var: &TyVar) -> bool {
+        // A variable that is already bound is not ambiguous. A caller holding
+        // a constraint argument from before a later unification passed one,
+        // and overwriting its binding cut the chain to the real type:
+        // `2 ^ 64 + 5 :: Integer` defaulted the sum back to `Int` after the
+        // annotation had fixed it (#57). Not defaulting leaves the constraint
+        // to be checked at the variable's real type.
+        if !matches!(self.subst.apply(&Ty::Var(var.clone())), Ty::Var(ref v) if v == var) {
+            return false;
+        }
         let class_name = class.as_str();
 
         let default_ty = match class_name {

@@ -1370,6 +1370,228 @@ pub fn generate_file_read(
     func
 }
 
+/// Emit: copy the NUL-terminated C string at local `src` into a freshly
+/// allocated `pstr`, leaving its pointer in local `out`. `len` and `k` are
+/// scratch locals.
+fn emit_cstr_to_pstr(func: &mut WasmFunc, alloc_idx: u32, src: u32, len: u32, k: u32, out: u32) {
+    // len = strlen(src)
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(len));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(src));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(len));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+    // out = alloc(4 + len); [out] = len | PSTR_MARKER
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(out));
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // copy the bytes
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(k));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32GeS);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(src));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Store8(0, 4));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(k));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+}
+
+/// Emit: fetch the program arguments into heap buffers, leaving `argc` and
+/// the `argv` pointer array in locals.
+fn emit_fetch_args(func: &mut WasmFunc, alloc_idx: u32, argc: u32, argv: u32, scratch: u32) {
+    // scratch = alloc(8); args_sizes_get(scratch, scratch + 4)
+    func.emit(WasmInstr::I32Const(8));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(scratch));
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(ARGS_SIZES_GET_IDX));
+    func.emit(WasmInstr::Drop);
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(argc));
+    // argv = alloc(argc * 4 + 4); buf = alloc(bufsize + 1)
+    func.emit(WasmInstr::LocalGet(argc));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Mul);
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(argv));
+    func.emit(WasmInstr::LocalGet(argv));
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::I32Load(2, 4));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::Call(ARGS_GET_IDX));
+    func.emit(WasmInstr::Drop);
+}
+
+/// Generate `get_args() -> [String]`: the program arguments after the program
+/// name, as a cons list of `pstr`s (`getArgs`, #41).
+pub fn generate_get_args(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![], vec![WasmType::I32]));
+    func.name = Some("get_args".to_string());
+    func.exported = true;
+    let argc = func.add_local(WasmType::I32);
+    let argv = func.add_local(WasmType::I32);
+    let scratch = func.add_local(WasmType::I32);
+    let i = func.add_local(WasmType::I32);
+    let src = func.add_local(WasmType::I32);
+    let len = func.add_local(WasmType::I32);
+    let k = func.add_local(WasmType::I32);
+    let s = func.add_local(WasmType::I32);
+    let list = func.add_local(WasmType::I32);
+    let cell = func.add_local(WasmType::I32);
+
+    emit_fetch_args(&mut func, alloc_idx, argc, argv, scratch);
+    // Build the list back to front: i = argc - 1 down to 1.
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(list));
+    func.emit(WasmInstr::LocalGet(argc));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32LtS);
+    func.emit(WasmInstr::BrIf(1));
+    // src = argv[i]
+    func.emit(WasmInstr::LocalGet(argv));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Mul);
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(src));
+    emit_cstr_to_pstr(&mut func, alloc_idx, src, len, k, s);
+    // cell = [1 | s | list]; list = cell
+    func.emit(WasmInstr::I32Const(12));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(cell));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalGet(s));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalGet(list));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalSet(list));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(list));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `get_prog_name() -> String`: `argv[0]` after its last `/`, as
+/// GHC's `getProgName` (#41). Empty when there is no `argv[0]`.
+pub fn generate_get_prog_name(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![], vec![WasmType::I32]));
+    func.name = Some("get_prog_name".to_string());
+    func.exported = true;
+    let argc = func.add_local(WasmType::I32);
+    let argv = func.add_local(WasmType::I32);
+    let scratch = func.add_local(WasmType::I32);
+    let src = func.add_local(WasmType::I32);
+    let len = func.add_local(WasmType::I32);
+    let k = func.add_local(WasmType::I32);
+    let out = func.add_local(WasmType::I32);
+    let c = func.add_local(WasmType::I32);
+
+    emit_fetch_args(&mut func, alloc_idx, argc, argv, scratch);
+    // No argv[0]: the empty string (an empty C string in the scratch block).
+    func.emit(WasmInstr::LocalGet(argc));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(scratch));
+    func.emit(WasmInstr::LocalSet(src));
+    func.emit(WasmInstr::Else);
+    func.emit(WasmInstr::LocalGet(argv));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(src));
+    func.emit(WasmInstr::End);
+    // Skip past every '/': walk the string, moving the start after each.
+    func.emit(WasmInstr::LocalGet(src));
+    func.emit(WasmInstr::LocalSet(k));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::LocalTee(c));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(c));
+    func.emit(WasmInstr::I32Const(b'/' as i32));
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(src));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(k));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(k));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+    emit_cstr_to_pstr(&mut func, alloc_idx, src, len, k, out);
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Generate `file_append(path, content)`: append `content` to the host file
 /// (best-effort, via `file_append_host`) AND to the in-memory file table entry
 /// (via `concat_str`), creating either if it is absent.

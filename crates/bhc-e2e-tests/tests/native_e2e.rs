@@ -2300,3 +2300,9 @@ fn test_tier4_foldl_map_lambda_numeric() {
 fn test_tier3_file_append_roundtrip() {
     run_native_test("tier3_io/file_append_roundtrip", Profile::Default);
 }
+
+// getArgs and runtime String lists show quoted (#41).
+#[test]
+fn test_tier3_show_string_list() {
+    run_native_test("tier3_io/show_string_list", Profile::Default);
+}

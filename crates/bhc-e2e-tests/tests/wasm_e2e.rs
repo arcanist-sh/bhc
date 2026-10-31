@@ -1042,3 +1042,9 @@ fn test_tier4_foldl_map_lambda_wasm() {
 fn test_tier3_file_append_roundtrip_wasm() {
     run_wasm_test("tier3_io/file_append_roundtrip", Profile::Default);
 }
+
+// getArgs and runtime String lists show quoted (#41).
+#[test]
+fn test_tier3_show_string_list_wasm() {
+    run_wasm_test("tier3_io/show_string_list", Profile::Default);
+}

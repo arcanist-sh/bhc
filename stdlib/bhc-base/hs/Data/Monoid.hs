@@ -4,17 +4,17 @@
 -- License     : BSD-3-Clause
 -- Stability   : experimental
 --
--- 'Sum', 'Product', 'All', 'Any' and the 'Maybe'-wrapping 'First'/'Last',
+-- 'Sum', 'Product', 'All', 'Any', 'Dual' and the 'Maybe'-wrapping 'First'/'Last',
 -- with their 'Semigroup' and 'Monoid' instances. ('Endo' is still a builtin.)
 --
 -- Bundled with the compiler and compiled with the program (#52).
 module Data.Monoid
   ( Semigroup(..), Monoid(..)
-  , Sum(..), Product(..), All(..), Any(..)
+  , Sum(..), Product(..), All(..), Any(..), Dual(..)
   , First(..), Last(..)
   ) where
 
-import Data.Semigroup.Internal (Sum(..), Product(..), All(..), Any(..))
+import Data.Semigroup.Internal (Sum(..), Product(..), All(..), Any(..), Dual(..))
 
 -- | The leftmost 'Just'.
 newtype First a = First { getFirst :: Maybe a } deriving (Eq, Ord, Show)

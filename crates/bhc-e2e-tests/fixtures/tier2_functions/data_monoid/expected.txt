@@ -6,3 +6,6 @@ Just 3
 (Sum {getSum = 2},Product {getProduct = 1})
 (All {getAll = True},Any {getAny = False})
 0
+[2,1]
+Sum {getSum = 3}
+Dual {getDual = "ab"}

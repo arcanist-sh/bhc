@@ -11,3 +11,6 @@ main = do
   print (Sum (2 :: Int), mempty :: Product Int)
   print (All True <> mempty, Any False)
   print (getSum (mempty :: Sum Int))
+  print (getDual (Dual [1 :: Int] <> Dual [2]))
+  print (getDual (Dual (Sum (1 :: Int)) <> Dual (Sum 2)))
+  print (Dual "ab" <> mempty)

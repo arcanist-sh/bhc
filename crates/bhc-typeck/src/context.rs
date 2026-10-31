@@ -8218,12 +8218,28 @@ impl TyCtxt {
         // If the class is unknown (e.g., Stream from an external package),
         // skip body type-checking to avoid spurious errors.
         let class_known = self.env.lookup_class(instance.class).is_some();
+        // This instance's own copies of its head's type variables: the HIR
+        // variables are shared by every instance that writes `a`, so a
+        // builtin method shape built on them tied instances together —
+        // `mempty = S 0` defaulted `a` to `Int` in an unrelated `instance
+        // Semigroup a => Semigroup (Dual a)` too, whose inner `<>` then
+        // resolved to Dual's own and looped (#60).
+        let mut own = Subst::new();
+        for t in &instance.types {
+            for v in t.free_vars() {
+                if own.get(&v).is_none() {
+                    let fresh = self.fresh_ty();
+                    own.insert(&v, fresh);
+                }
+            }
+        }
         for method in &instance.methods {
             if class_known {
                 self.check_value_def(method);
                 self.guide_instance_method_type(instance, method);
             } else if let Some(shape) = builtin_value_method_shape(instance, method.name)
                 .or_else(|| self.monad_family_method_shape(instance, method.name))
+                .map(|shape| own.apply(&shape))
             {
                 // Semigroup/Monoid are builtin (no ClassDef), but every method
                 // shape is fixed by the instance type, so the body CAN be
@@ -8405,9 +8421,24 @@ impl TyCtxt {
         let Some(inferred) = self.def_schemes.get(&method.id).map(|s| s.ty.clone()) else {
             return;
         };
+        // The instance head's type variables are this instance's own: fresh
+        // copies, not the HIR variables themselves. Every instance that
+        // writes `a` shares one such variable, so `mempty = S 0` in `instance
+        // Num a => Monoid (S a)` defaulted `a` to `Int` in `instance
+        // Semigroup a => Semigroup (Dual a)` too, and its inner `b <> a`
+        // resolved to Dual's own `<>` and looped (#60).
+        let mut own = Subst::new();
+        for t in &instance.types {
+            for v in t.free_vars() {
+                if own.get(&v).is_none() {
+                    let fresh = self.fresh_ty();
+                    own.insert(&v, fresh);
+                }
+            }
+        }
         let mut subst = Subst::new();
         for (p, t) in class.params.iter().zip(&instance.types) {
-            subst.insert(p, t.clone());
+            subst.insert(p, own.apply(t));
         }
         for v in &method_scheme.vars {
             if !class.params.iter().any(|p| p.id == v.id) {

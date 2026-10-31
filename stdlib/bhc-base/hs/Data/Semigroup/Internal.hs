@@ -12,7 +12,7 @@
 --
 -- Bundled with the compiler and compiled with the program (#52).
 module Data.Semigroup.Internal
-  ( Sum(..), Product(..), All(..), Any(..)
+  ( Sum(..), Product(..), All(..), Any(..), Dual(..)
   ) where
 
 -- | Monoid under addition.
@@ -50,3 +50,12 @@ instance Semigroup Any where
 
 instance Monoid Any where
   mempty = Any False
+
+-- | The dual of a monoid: '<>' with its arguments flipped.
+newtype Dual a = Dual { getDual :: a } deriving (Eq, Ord, Show)
+
+instance Semigroup a => Semigroup (Dual a) where
+  Dual a <> Dual b = Dual (b <> a)
+
+instance Monoid a => Monoid (Dual a) where
+  mempty = Dual mempty

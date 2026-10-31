@@ -10,11 +10,11 @@
 -- Bundled with the compiler and compiled with the program (#52).
 module Data.Semigroup
   ( Semigroup(..), Monoid(..)
-  , Sum(..), Product(..), All(..), Any(..)
+  , Sum(..), Product(..), All(..), Any(..), Dual(..)
   , Min(..), Max(..), First(..), Last(..)
   ) where
 
-import Data.Semigroup.Internal (Sum(..), Product(..), All(..), Any(..))
+import Data.Semigroup.Internal (Sum(..), Product(..), All(..), Any(..), Dual(..))
 
 -- | The smaller of two values.
 newtype Min a = Min { getMin :: a } deriving (Eq, Ord, Show)

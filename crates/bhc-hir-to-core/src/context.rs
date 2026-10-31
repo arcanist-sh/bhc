@@ -3354,12 +3354,17 @@ impl LowerContext {
     /// Returns the class name if the symbol is a method of some class.
     #[must_use]
     pub fn is_class_method(&self, method_name: Symbol) -> Option<Symbol> {
-        for (class_name, class_info) in &self.class_registry.classes {
-            if class_info.methods.contains(&method_name) {
-                return Some(*class_name);
-            }
-        }
-        None
+        // Several classes can declare a method of the same name: a user
+        // `class Bag b where empty :: b` beside the builtin `Alternative`'s
+        // `empty` (#34). The registry is a hash map, so taking the first hit
+        // picked either at random; a class the program declares shadows a
+        // builtin homonym, and ties go by name so the answer is stable.
+        self.class_registry
+            .classes
+            .iter()
+            .filter(|(_, info)| info.methods.contains(&method_name))
+            .map(|(name, _)| *name)
+            .min_by_key(|name| (!self.is_user_class(*name), name.as_str().to_string()))
     }
 
     /// Check if a class belongs to the monad family (Functor, Applicative, Monad).

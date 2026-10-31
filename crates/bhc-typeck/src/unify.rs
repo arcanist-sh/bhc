@@ -376,7 +376,7 @@ fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
 /// ```
 ///
 /// Then `Elem [Int]` reduces to `Int`.
-fn try_reduce_type_family(ctx: &TyCtxt, ty: &Ty) -> Ty {
+pub(crate) fn try_reduce_type_family(ctx: &TyCtxt, ty: &Ty) -> Ty {
     // Extract the type constructor name and arguments from the type.
     // A type family application looks like: App(App(Con(name), arg1), arg2)...
     let (family_name, args) = match extract_type_family_app(ty) {

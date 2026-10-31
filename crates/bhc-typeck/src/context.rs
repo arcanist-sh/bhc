@@ -460,11 +460,14 @@ impl TyCtxt {
                 continue;
             }
 
-            // Apply substitution to all constraint arguments
+            // Apply substitution to all constraint arguments, and reduce an
+            // argument that is a type family application: `insert 1 b` at
+            // `Elem IntBag` asks for `Num (Elem IntBag)`, which is `Num Int`
+            // (#34).
             let args: Vec<Ty> = constraint
                 .args
                 .iter()
-                .map(|t| self.subst.apply(t))
+                .map(|t| crate::unify::try_reduce_type_family(self, &self.subst.apply(t)))
                 .collect();
 
             // Try to solve the constraint
@@ -534,11 +537,14 @@ impl TyCtxt {
                 continue;
             }
 
-            // Apply substitution to all constraint arguments
+            // Apply substitution to all constraint arguments, and reduce an
+            // argument that is a type family application: `insert 1 b` at
+            // `Elem IntBag` asks for `Num (Elem IntBag)`, which is `Num Int`
+            // (#34).
             let args: Vec<Ty> = constraint
                 .args
                 .iter()
-                .map(|t| self.subst.apply(t))
+                .map(|t| crate::unify::try_reduce_type_family(self, &self.subst.apply(t)))
                 .collect();
 
             // Try to solve the constraint

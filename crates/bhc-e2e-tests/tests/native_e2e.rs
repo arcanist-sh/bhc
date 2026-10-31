@@ -1540,6 +1540,13 @@ fn test_tier2_deriving_via_monoid() {
     run_native_test("tier2_functions/deriving_via_monoid", Profile::Default);
 }
 
+// Associated type reduced before instance resolution; user class method
+// named like a builtin one (#34).
+#[test]
+fn test_tier2_assoc_type_literal() {
+    run_native_test("tier2_functions/assoc_type_literal", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

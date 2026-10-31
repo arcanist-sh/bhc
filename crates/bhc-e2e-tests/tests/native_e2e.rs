@@ -1565,6 +1565,13 @@ fn test_tier2_integer_annotation_chains() {
     run_native_test("tier2_functions/integer_annotation_chains", Profile::Default);
 }
 
+// Derived Show of fields typed by a type parameter, nested and recursive,
+// and across modules (#59).
+#[test]
+fn test_tier2_show_type_param_fields() {
+    run_native_test("tier2_functions/show_type_param_fields", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

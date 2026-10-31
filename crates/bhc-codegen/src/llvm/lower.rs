@@ -446,6 +446,9 @@ pub struct Lowering<'ctx, 'm> {
     writer_t_functions: FxHashSet<String>,
     /// Map from type name → VarId of the $derived_show_TypeName function.
     derived_show_fns: FxHashMap<String, VarId>,
+    /// Type name -> its `$derived_showt_<T>` (a parameterized type's show,
+    /// taking the type arguments' descriptors first; #59).
+    derived_showt_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_read_TypeName function.
     derived_read_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_eq_TypeName function.
@@ -568,6 +571,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_showt_fns: FxHashMap::default(),
             derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
@@ -629,6 +633,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_showt_fns: FxHashMap::default(),
             derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
@@ -1919,14 +1924,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // only learns this module's own instances, so an imported type
             // printed its payload or its address. A local instance of the
             // same type name is registered later and wins.
-            if let Some(rest) = sym.name.as_str().strip_prefix("$derived_show_") {
+            let showt = sym.name.as_str().strip_prefix("$derived_showt_");
+            let show = sym.name.as_str().strip_prefix("$derived_show_");
+            let (rest, table_is_showt, arity) = match (showt, show) {
+                (Some(rest), _) => (Some(rest), true, 2),
+                (None, Some(rest)) => (Some(rest), false, 1),
+                _ => (None, false, 0),
+            };
+            if let Some(rest) = rest {
                 let type_name = Self::strip_deriving_counter_suffix(rest);
-                if sym.param_count == 1 && !self.derived_show_fns.contains_key(&type_name) {
+                let known = if table_is_showt {
+                    self.derived_showt_fns.contains_key(&type_name)
+                } else {
+                    self.derived_show_fns.contains_key(&type_name)
+                };
+                if sym.param_count == arity && !known {
                     use std::sync::atomic::{AtomicUsize, Ordering};
                     static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 5_000_000);
                     let id = VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed));
                     self.functions.insert(id, fn_val);
-                    self.derived_show_fns.insert(type_name, id);
+                    if table_is_showt {
+                        self.derived_showt_fns.insert(type_name, id);
+                    } else {
+                        self.derived_show_fns.insert(type_name, id);
+                    }
                 }
             }
         }
@@ -3589,6 +3610,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         );
         self.functions
             .insert(VarId::new(1000511), enum_from_step_int);
+        // bhc_show_with_targs(value, template, targs) -> C string (#59)
+        let show_with_targs = self.module.llvm_module().add_function(
+            "bhc_show_with_targs",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000512), show_with_targs);
 
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
@@ -7588,6 +7616,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "and" => self.lower_builtin_and(args[0]),
             "or" => self.lower_builtin_or(args[0]),
             "maximum" => self.lower_builtin_maximum(args[0]),
+            "$null_targs" => Ok(Some(self.type_mapper().ptr_type().const_null().into())),
+            "$show_field" => self.lower_show_field(args[0], args[1]),
             "minimum" => self.lower_builtin_minimum(args[0]),
             "elem" => self.lower_builtin_elem(args[0], args[1]),
             "notElem" => self.lower_builtin_not_elem(args[0], args[1]),
@@ -17036,7 +17066,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // value whose type survived codegen (a `let`-bound var, a
                     // function result), from the expression's type — otherwise
                     // the boxed-int branch below would print its pointer.
-                    self.print_adt_via_derived_show(p, &adt_type)?;
+                    if matches!(&expr_ty, Ty::App(..))
+                        && self.derived_showt_fns.contains_key(&adt_type)
+                    {
+                        self.print_via_show_desc(p, val_expr)?;
+                    } else {
+                        self.print_adt_via_derived_show(p, &adt_type)?;
+                    }
                 } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
                     // Bool value - use extract_bool_tag which handles both Bool ADT
                     // (heap-allocated from any/all/even/odd/char predicates) and
@@ -28832,6 +28868,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let Some(name) = head_name(ty) else {
             return Ok(None);
         };
+        // A parameterized type at known arguments: through its descriptor,
+        // so its parameter-typed fields show at their types (#59).
+        if matches!(ty, Ty::App(..)) && self.derived_showt_fns.contains_key(&name) {
+            let stand_in = Self::ty_only_expr(ty.clone());
+            if let Some(desc) = self.try_build_adt_show_desc(&stand_in) {
+                let val = self
+                    .lower_expr(expr)?
+                    .ok_or_else(|| CodegenError::Internal("show adt: no value".to_string()))?;
+                let val_ptr = self.value_to_ptr(val)?;
+                let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_show_with_desc not declared".to_string())
+                })?;
+                let cstr = self
+                    .builder()
+                    .build_call(show_fn, &[val_ptr.into(), desc.into()], "show_adt_desc")
+                    .map_err(|e| CodegenError::Internal(format!("show_with_desc: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("show_with_desc: void".to_string()))?;
+                let list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+                return Ok(Some(list.into()));
+            }
+        }
         let Some(show_var_id) = self.derived_show_fns.get(&name).copied() else {
             return Ok(None);
         };
@@ -29431,6 +29490,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Build a recursive show descriptor from a ShowCoerce + expression.
     fn build_show_descriptor(&mut self, expr: &Expr) -> PointerValue<'ctx> {
+        // `$targ<i>`: type parameter `i` of the enclosing derived show (#59).
+        if let Ty::Con(c) = expr.ty() {
+            if let Some(Ok(i)) = c.name.as_str().strip_prefix("$targ").map(str::parse::<u64>) {
+                let index = self
+                    .type_mapper()
+                    .i64_type()
+                    .const_int(i, false)
+                    .const_to_pointer(self.type_mapper().ptr_type());
+                return self.create_show_desc_global(18, Some(index), None);
+            }
+        }
         if let Some(desc) = self.try_build_container_show_desc(&expr.ty()) {
             return desc;
         }
@@ -29583,10 +29653,96 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 _ => None,
             }
         })?;
+        // A parameterized type at known arguments shows its parameter-typed
+        // fields by their descriptors (tag 19, #59).
+        let ty_args = {
+            let mut args = Vec::new();
+            let mut head = expr.ty();
+            while let Ty::App(f, a) = head {
+                args.push(*a);
+                head = *f;
+            }
+            args.reverse();
+            args
+        };
+        if !ty_args.is_empty() {
+            if let Some(showt) = self
+                .derived_showt_fns
+                .get(&type_name)
+                .and_then(|id| self.functions.get(id))
+                .copied()
+            {
+                let descs: Vec<PointerValue<'ctx>> = ty_args
+                    .iter()
+                    .map(|t| {
+                        self.descriptor_from_ty(t)
+                            .unwrap_or_else(|| self.get_primitive_show_desc(0))
+                    })
+                    .collect();
+                let args = self.create_show_desc_array(&descs);
+                let fn_ptr = showt.as_global_value().as_pointer_value();
+                return Some(self.create_show_desc_global(19, Some(fn_ptr), Some(args)));
+            }
+        }
         let show_var_id = *self.derived_show_fns.get(&type_name)?;
         let show_fn = *self.functions.get(&show_var_id)?;
         let fn_ptr = show_fn.as_global_value().as_pointer_value();
         Some(self.create_show_desc_global(14, Some(fn_ptr), None))
+    }
+
+    /// A null-terminated global array of descriptor pointers (tag 19's
+    /// type arguments).
+    fn create_show_desc_array(&mut self, descs: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let mut items = descs.to_vec();
+        items.push(ptr_type.const_null());
+        let array_type = ptr_type.array_type(items.len() as u32);
+        let array_val = ptr_type.const_array(&items);
+        let name = format!("show_desc_targs_{}", self.show_desc_counter);
+        self.show_desc_counter += 1;
+        let global = self
+            .module
+            .llvm_module()
+            .add_global(array_type, None, &name);
+        global.set_initializer(&array_val);
+        global.set_constant(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.as_pointer_value()
+    }
+
+    /// `$show_field targs f`: show a field of a parameterized type's derived
+    /// show whose type mentions the type's parameters (`$targ<i>`, #59), by a
+    /// descriptor template the RTS fills from `targs`.
+    fn lower_show_field(
+        &mut self,
+        targs_expr: &Expr,
+        field: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let targs = self
+            .lower_expr(targs_expr)?
+            .ok_or_else(|| CodegenError::Internal("$show_field: no targs".to_string()))?;
+        let targs = self.value_to_ptr(targs)?;
+        let val = self
+            .lower_expr(field)?
+            .ok_or_else(|| CodegenError::Internal("$show_field: no value".to_string()))?;
+        let val = self.value_to_ptr(val)?;
+        let template = self.build_show_descriptor(field);
+        let rts_fn = *self.functions.get(&VarId::new(1000512)).ok_or_else(|| {
+            CodegenError::Internal("bhc_show_with_targs not declared".to_string())
+        })?;
+        let cstr = self
+            .builder()
+            .build_call(
+                rts_fn,
+                &[val.into(), template.into(), targs.into()],
+                "show_field",
+            )
+            .map_err(|e| CodegenError::Internal(format!("show_with_targs call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("show_with_targs: void".to_string()))?;
+        let list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+        Ok(Some(list.into()))
     }
 
     /// Build a descriptor for the element type of a list expression.
@@ -50020,8 +50176,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         for bind in bindings {
             if let Bind::NonRec(var, expr) = bind {
                 let name = var.name.as_str();
+                // `$derived_showt_T` first: `$derived_show_` is its prefix.
+                if let Some(remainder) = name.strip_prefix("$derived_showt_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_showt_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
                 // Detect auto-derived instance methods ($derived_show_TypeName_COUNTER)
-                if let Some(remainder) = name.strip_prefix("$derived_show_") {
+                else if let Some(remainder) = name.strip_prefix("$derived_show_") {
                     let type_name = Self::strip_deriving_counter_suffix(remainder);
                     self.derived_show_fns.insert(type_name.clone(), var.id);
                     // Tag constructors found in this binding with their type_name
@@ -62582,6 +62744,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         return None;
     }
     match name {
+        // Derived show of a parameterized type (#59)
+        "$null_targs" => Some(0),
+        "$show_field" => Some(2),
         // List operations
         "head" => Some(1),
         "tail" => Some(1),

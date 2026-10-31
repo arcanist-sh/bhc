@@ -2385,6 +2385,12 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///   16=Map, 17=Set: `child1` is the descriptor of an element of the
 ///      container's ascending list (a Tuple2 for Map) and `child2` holds the
 ///      container's to-list function pointer. Shown as `fromList [...]`.
+///   18=type argument `i` of the enclosing derived show (`child1` holds `i`):
+///      a placeholder in a TEMPLATE, replaced by [`resolve_show_desc`]. Shown
+///      as an `Int` if it survives (no type arguments were known).
+///   19=Adt with type arguments: `child1` holds the type's derived
+///      `$derived_showt_*` function (`fn(env, targs, value) -> [Char]`) and
+///      `child2` a null-terminated array of the type arguments' descriptors.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2498,6 +2504,14 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 let result = show_fn(std::ptr::null(), ptr);
                 read_char_list(result)
             }
+            18 => format!("{}", ptr as i64),
+            19 => {
+                let raw = desc.child1 as *const ();
+                let show_fn: extern "C" fn(*const u8, *const u8, *const u8) -> *const u8 =
+                    std::mem::transmute(raw);
+                let result = show_fn(std::ptr::null(), desc.child2 as *const u8, ptr);
+                read_char_list(result)
+            }
             16 | 17 => {
                 // Map / Set: child2 holds the container's to-list function
                 // (`bhc_map_to_assoc_list` / `bhc_set_to_list`), child1 the
@@ -2521,7 +2535,7 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
         // For a user ADT (tag 14) the derived show yields the rendered form;
         // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
         // precedence, a nullary one ("Red") does not — detect via a space.
-        let adt_needs_parens = (desc.tag == 14 && s.contains(' ') && !s.starts_with('('))
+        let adt_needs_parens = (matches!(desc.tag, 14 | 19) && s.contains(' ') && !s.starts_with('('))
             || matches!(desc.tag, 16 | 17);
         // A negative number is shown in parentheses above precedence 6, as
         // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
@@ -2619,6 +2633,90 @@ unsafe fn show_either_recursive(
             format!("Right {}", show_any_prec(val, right_desc, 11))
         }
     }
+}
+
+/// A copy of `desc` with every type-argument placeholder (tag 18) replaced by
+/// the descriptor in `targs` (a null-terminated array; null means none are
+/// known, and placeholders stay). Unchanged sub-descriptors are shared;
+/// replaced ones are leaked, like every other runtime allocation.
+unsafe fn resolve_show_desc(
+    desc: *const ShowTypeDesc,
+    targs: *const *const ShowTypeDesc,
+) -> *const ShowTypeDesc {
+    unsafe fn resolve_array(
+        array: *const *const ShowTypeDesc,
+        len: usize,
+        targs: *const *const ShowTypeDesc,
+        terminate: bool,
+    ) -> *const *const ShowTypeDesc {
+        let mut out: Vec<*const ShowTypeDesc> = (0..len)
+            .map(|i| unsafe { resolve_show_desc(*array.add(i), targs) })
+            .collect();
+        if terminate {
+            out.push(std::ptr::null());
+        }
+        Box::leak(out.into_boxed_slice()).as_ptr()
+    }
+    unsafe {
+        if desc.is_null() || targs.is_null() {
+            return desc;
+        }
+        let d = &*desc;
+        let (child1, child2) = match d.tag {
+            18 => {
+                let index = d.child1 as usize;
+                let mut n = 0;
+                while !(*targs.add(n)).is_null() {
+                    n += 1;
+                }
+                return if index < n { *targs.add(index) } else { desc };
+            }
+            10 | 11 => (resolve_show_desc(d.child1, targs), d.child2),
+            12 | 13 => (
+                resolve_show_desc(d.child1, targs),
+                resolve_show_desc(d.child2, targs),
+            ),
+            15 => {
+                let count = d.child2 as usize;
+                let comps = d.child1 as *const *const ShowTypeDesc;
+                (
+                    resolve_array(comps, count, targs, false) as *const ShowTypeDesc,
+                    d.child2,
+                )
+            }
+            16 | 17 => (resolve_show_desc(d.child1, targs), d.child2),
+            19 => {
+                let args = d.child2 as *const *const ShowTypeDesc;
+                let mut n = 0;
+                while !args.is_null() && !(*args.add(n)).is_null() {
+                    n += 1;
+                }
+                (
+                    d.child1,
+                    resolve_array(args, n, targs, true) as *const ShowTypeDesc,
+                )
+            }
+            _ => return desc,
+        };
+        Box::leak(Box::new(ShowTypeDesc {
+            tag: d.tag,
+            child1,
+            child2,
+        }))
+    }
+}
+
+/// Show `ptr` by a descriptor TEMPLATE whose type-argument placeholders are
+/// filled from `targs`: a field of a derived show whose type mentions the
+/// type's parameters (`data D a = D a`; `$derived_showt_D`'s `targs`).
+#[no_mangle]
+pub extern "C" fn bhc_show_with_targs(
+    ptr: *const u8,
+    template: *const ShowTypeDesc,
+    targs: *const *const ShowTypeDesc,
+) -> *mut c_char {
+    let desc = unsafe { resolve_show_desc(template, targs) };
+    bhc_show_with_desc(ptr, desc)
 }
 
 /// Show any value using a recursive type descriptor.

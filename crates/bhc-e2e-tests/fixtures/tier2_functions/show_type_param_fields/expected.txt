@@ -1,0 +1,11 @@
+D True
+(D 'x',D "str",D 2.5)
+P 'a' False
+S {getS = 'x'}
+Node Leaf 'q' (Node Leaf 'r' Leaf)
+W "ab" (Just 'c')
+[D True,D False]
+Just (D (Just 'z'))
+D True
+(D 3,D (-4))
+(Box {unBox = True},Box {unBox = "boxed"})

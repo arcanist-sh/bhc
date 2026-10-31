@@ -55,6 +55,10 @@ pub struct DerivingContext {
     eq_vars: FxHashMap<Symbol, Var>,
     /// Type name -> its `$derived_compare_<T>` binding variable.
     compare_vars: FxHashMap<Symbol, Var>,
+    /// While generating a parameterized type's `$derived_showt_<T>` body: its
+    /// `targs` parameter. A field whose type mentions a type parameter is
+    /// shown through it (#59).
+    show_targs: Option<Var>,
 }
 
 impl DerivingContext {
@@ -67,6 +71,7 @@ impl DerivingContext {
             local_ord: FxHashSet::default(),
             eq_vars: FxHashMap::default(),
             compare_vars: FxHashMap::default(),
+            show_targs: None,
         }
     }
 
@@ -1549,7 +1554,50 @@ impl DerivingContext {
             Ty::Error,
         );
 
-        let show_body = self.generate_show_body(data_def, span);
+        // A parameterized type shows its parameter-typed fields through the
+        // descriptors of its type arguments, which a caller that knows them
+        // passes to `$derived_showt_<T>` (#59). `$derived_show_<T>` — the
+        // instance method, and what every caller without them uses — passes
+        // none, and such fields fall back to the old behaviour.
+        let bindings = if data_def.params.is_empty() {
+            vec![Bind::NonRec(
+                show_method_var.clone(),
+                Box::new(self.generate_show_body(data_def, span)),
+            )]
+        } else {
+            let showt_var = self.fresh_var(
+                &format!("$derived_showt_{}", data_def.name.as_str()),
+                Ty::Error,
+            );
+            let targs = self.fresh_var("targs", Ty::Error);
+            self.show_targs = Some(targs.clone());
+            let body = self.generate_show_body(data_def, span);
+            self.show_targs = None;
+            let showt_body = core::Expr::Lam(targs, Box::new(body), span);
+            let x = self.fresh_var("x", Ty::Error);
+            let null_targs = core::Expr::Var(
+                Var {
+                    name: Symbol::intern("$null_targs"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                },
+                span,
+            );
+            let call = core::Expr::App(
+                Box::new(core::Expr::App(
+                    Box::new(core::Expr::Var(showt_var.clone(), span)),
+                    Box::new(null_targs),
+                    span,
+                )),
+                Box::new(core::Expr::Var(x.clone(), span)),
+                span,
+            );
+            let wrapper = core::Expr::Lam(x, Box::new(call), span);
+            vec![
+                Bind::NonRec(showt_var, Box::new(showt_body)),
+                Bind::NonRec(show_method_var.clone(), Box::new(wrapper)),
+            ]
+        };
 
         let mut methods = FxHashMap::default();
         methods.insert(
@@ -1566,10 +1614,7 @@ impl DerivingContext {
             instance_constraints: vec![],
         };
 
-        Some(DerivedInstance {
-            instance,
-            bindings: vec![Bind::NonRec(show_method_var, Box::new(show_body))],
-        })
+        Some(DerivedInstance { instance, bindings })
     }
 
     /// Generate the body of the show method.
@@ -1600,6 +1645,17 @@ impl DerivingContext {
             let field_tys: Vec<Ty> = match &con.fields {
                 ConFields::Positional(tys) => tys.clone(),
                 ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+            };
+            // In a `$derived_showt_<T>` body, parameter `i` of the type is
+            // spelled `$targ<i>`: codegen shows such a field through the
+            // matching entry of `targs`.
+            let field_tys: Vec<Ty> = if self.show_targs.is_some() {
+                field_tys
+                    .iter()
+                    .map(|t| mark_type_params(t, &data_def.params))
+                    .collect()
+            } else {
+                field_tys
             };
             let fields: Vec<Var> = (0..field_count)
                 .map(|i| {
@@ -1728,6 +1784,24 @@ impl DerivingContext {
 
     /// Make a call to show for a variable.
     fn make_show_call(&self, x: &Var, span: Span) -> core::Expr {
+        if let Some(targs) = &self.show_targs {
+            if mentions_type_param_marker(&x.ty) {
+                let show_field = Var {
+                    name: Symbol::intern("$show_field"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                return core::Expr::App(
+                    Box::new(core::Expr::App(
+                        Box::new(core::Expr::Var(show_field, span)),
+                        Box::new(core::Expr::Var(targs.clone(), span)),
+                        span,
+                    )),
+                    Box::new(core::Expr::Var(x.clone(), span)),
+                    span,
+                );
+            }
+        }
         let show_var = Var {
             name: Symbol::intern("show"),
             id: VarId::new(0),
@@ -4064,5 +4138,40 @@ mod tests {
             .instance
             .methods
             .contains_key(&Symbol::intern("traverse")));
+    }
+}
+
+/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
+/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
+fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
+    match ty {
+        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
+            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
+            None => ty.clone(),
+        },
+        Ty::App(f, a) => Ty::App(
+            Box::new(mark_type_params(f, params)),
+            Box::new(mark_type_params(a, params)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(mark_type_params(a, params)),
+            Box::new(mark_type_params(b, params)),
+        ),
+        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+/// Whether `ty` mentions a `$targ<i>` marker.
+fn mentions_type_param_marker(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
+        Ty::App(f, a) | Ty::Fun(f, a) => {
+            mentions_type_param_marker(f) || mentions_type_param_marker(a)
+        }
+        Ty::List(a) => mentions_type_param_marker(a),
+        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
+        _ => false,
     }
 }

@@ -8858,7 +8858,7 @@ fn is_magic_hash_box_con(name: &str) -> bool {
 /// Lower a literal.
 fn lower_lit(lit: &ast::Lit) -> hir::Lit {
     match lit {
-        ast::Lit::Int(n) => hir::Lit::Int(i128::from(*n)),
+        ast::Lit::Int(n) => hir::Lit::Int(*n),
         ast::Lit::Float(f) => hir::Lit::Float(*f),
         ast::Lit::Char(c) => hir::Lit::Char(*c),
         ast::Lit::String(s) => hir::Lit::String(Symbol::intern(s)),

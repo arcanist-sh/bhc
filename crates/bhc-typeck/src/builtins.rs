@@ -7824,7 +7824,7 @@ impl Builtins {
                 Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
             );
             let io_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
-            let io_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
+            let _io_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
             let io_unit = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::unit()));
             // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)
             // The container's element and the result's shape are tied to the

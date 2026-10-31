@@ -6,7 +6,66 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.24] - 2026-10-31
+
+A correctness release: around fifty issue fixes in laziness, `Integer`,
+containers, derived `Show`, the type checker, `bhc run` and the WebAssembly
+backend, each with an end-to-end fixture.
+
+### Added
+
+- `Data.Monoid` and `Data.Semigroup` are real modules, bundled with the
+  compiler as Haskell source and compiled with the program: `Sum`, `Product`,
+  `All`, `Any`, `Dual`, `Min`, `Max` and both modules' `First`/`Last`, with
+  their `Semigroup`/`Monoid` instances (#52). `DerivingVia` through them works
+  (#35). `Endo` is still a stub (#60).
+
+### Changed
+
+- `bhc run FILE [ARGS...]` compiles the program natively to a temporary
+  executable, runs it with `ARGS` and exits with its exit code, instead of
+  evaluating it in the Core interpreter (#44).
+
 ### Fixed
+
+- Laziness: corecursive lists and `iterate`/`repeat`/`cycle` are lazy (#28);
+  `map`, `filter`, `concatMap`, `zipWith` and `zip` work over infinite lists
+  (#54); `[n ..]` and `[a, b ..]` at `Int` are lazy instead of capped at 10000
+  elements (#58).
+- `Integer`:
+  - ranges build bignums, and `Integer` elements show, compare and test
+    parity by value (#51);
+  - literals beyond 64 bits parse;
+  - literal patterns match by value;
+  - `negate`/`abs`/`signum` work at `Integer`;
+  - an annotation fixes the type of a whole operator chain
+    (`2 ^ 64 + 5 :: Integer`), and a list-comprehension `let` takes its
+    generator's type (#57).
+- Containers:
+  - `Data.Map`/`Data.Set` order boxed keys by content, and a stored `0` is
+    found (#25);
+  - `show`/`print` of a `Map` or `Set` renders `fromList [...]` (#55);
+  - `Data.IntMap`/`Data.IntSet` builtins have real types (#56).
+- Derived `Show`:
+  - fields whose type is a type parameter show at their types: `D True`, not
+    an address (#59);
+  - newtypes use record syntax;
+  - a type imported from another module shows with its derived instance;
+  - `deriving Show via T` shows the value as a `T` (#35).
+- Type checker:
+  - GADTs indexed at several types (#33);
+  - associated type families at a literal (#34);
+  - a user class method named like a builtin one (`empty`) (#34);
+  - instance type variables no longer leak between instances, which made
+    `Dual`'s `<>` loop (#60);
+  - defaulting never overwrites an already-known type;
+  - an integer literal pattern at `Double` matches as a float.
+- `zip3`/`zipWith3`/`unzip3` have their real types.
+- `fmap`/`<$>` passed as a value at `Maybe`/`Either` (#25).
+- WebAssembly:
+  - `appendFile` reaches the host file;
+  - computed `writeFile` contents are written whole;
+  - `++` keeps a literal operand beside a computed string (#40).
 
 - Derived `Show` parenthesizes a field that is a constructor application or
   a negative number, as GHC's `showsPrec 11` does: `Node Leaf 3 (Node Leaf 4
@@ -187,6 +246,15 @@ All notable changes to BHC are recorded here. The format follows
   divs, pipe tables, definition lists and task lists render (16 of 21
   extension test inputs now match pandoc).
 
+### Known issues
+
+- A polymorphic `Num a =>` function used at `Integer` does machine-int
+  arithmetic (#57), and derived `traverse` over recursive fields or other
+  applicatives is wrong (#53). Both need dictionaries for the builtin classes.
+- `Data.Monoid.Endo` is a stub (#60).
+- `forkIO`/`MVar` abort at run time (#38); `foreign import` and `getArgs` on
+  WebAssembly (#41).
+
 ## [0.2.23] - 2026-10-22
 
 The pandoc release: pandoc's markdown reader and HTML writer now run end to
@@ -276,6 +344,7 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.23...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...HEAD
+[0.2.24]: https://github.com/arcanist-sh/bhc/compare/v0.2.23...v0.2.24
 [0.2.23]: https://github.com/arcanist-sh/bhc/compare/v0.2.22...v0.2.23
 [0.2.22]: https://github.com/arcanist-sh/bhc/releases/tag/v0.2.22

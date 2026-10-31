@@ -12,7 +12,7 @@
 --
 -- Bundled with the compiler and compiled with the program (#52).
 module Data.Semigroup.Internal
-  ( Sum(..), Product(..), All(..), Any(..), Dual(..)
+  ( Sum(..), Product(..), All(..), Any(..), Dual(..), Endo(..)
   ) where
 
 -- | Monoid under addition.
@@ -59,3 +59,12 @@ instance Semigroup a => Semigroup (Dual a) where
 
 instance Monoid a => Monoid (Dual a) where
   mempty = Dual mempty
+
+-- | The monoid of endomorphisms under composition.
+newtype Endo a = Endo { appEndo :: a -> a }
+
+instance Semigroup (Endo a) where
+  Endo f <> Endo g = Endo (f . g)
+
+instance Monoid (Endo a) where
+  mempty = Endo id

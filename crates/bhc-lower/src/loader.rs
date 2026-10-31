@@ -1014,6 +1014,17 @@ pub fn register_imported_names(
     let imported_methods: rustc_hash::FxHashSet<Symbol> =
         exports.class_methods.values().flatten().copied().collect();
 
+    // The library modules bundled with the compiler (compiled from source in
+    // whole-program builds) define what the builtins only stub: their names —
+    // `Endo`, `appEndo`, `getAll` — must win over the always-in-scope
+    // builtins, or `Endo (+ 1)` built the stub, which has no `<>` (#60).
+    let from_bundled_library = matches!(
+        module_name.as_str(),
+        "Data.Monoid" | "Data.Semigroup" | "Data.Semigroup.Internal"
+    );
+    let is_builtin_def =
+        |def: DefId| bhc_index::Idx::index(def) < crate::context::BUILTIN_DEF_LIMIT;
+
     // Register values
     for (&name, &def_id) in &exports.values {
         // Register qualified name: Module.name -> name
@@ -1062,12 +1073,17 @@ pub fn register_imported_names(
                 bhc_index::Idx::index(existing) < crate::context::BUILTIN_DEF_LIMIT
             })
             && !crate::lower::is_prelude_export(name.as_str());
+        let bundled_over_builtin = from_bundled_library
+            && ctx
+                .lookup_value(name)
+                .is_some_and(|existing| is_builtin_def(existing) && existing != def_id);
         if !import.qualified
             && (ctx.lookup_value(name).is_none()
                 || imported_methods.contains(&name)
                 || leaked
                 || shadows_builtin
-                || explicitly_listed)
+                || explicitly_listed
+                || bundled_over_builtin)
         {
             ctx.bind_value(name, def_id);
             // A name held only by a qualified import's alias-backing stub is
@@ -1093,7 +1109,11 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_constructor(qualified, info.def_id);
 
-        if !import.qualified && ctx.lookup_constructor(name).is_none() {
+        let bundled_over_builtin = from_bundled_library
+            && ctx
+                .lookup_constructor(name)
+                .is_some_and(|existing| is_builtin_def(existing) && existing != info.def_id);
+        if !import.qualified && (ctx.lookup_constructor(name).is_none() || bundled_over_builtin) {
             ctx.bind_constructor(name, info.def_id);
         }
     }

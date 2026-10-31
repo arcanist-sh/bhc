@@ -431,6 +431,25 @@ impl<'src> Parser<'src> {
             }
 
             TokenKind::LParen => self.parse_paren_expr(),
+            // An unboxed tuple `(# a, b #)`, built as a boxed tuple (#36).
+            TokenKind::LParenHash => {
+                let start = self.current_span();
+                self.advance();
+                let mut exprs = Vec::new();
+                if !self.check(&TokenKind::HashRParen) {
+                    exprs.push(self.parse_expr()?);
+                    while self.eat(&TokenKind::Comma) {
+                        exprs.push(self.parse_expr()?);
+                    }
+                }
+                let end = self.expect(&TokenKind::HashRParen)?;
+                let span = start.to(end.span);
+                match exprs.len() {
+                    0 => Ok(Expr::Con(Ident::from_str("()"), span)),
+                    1 => Ok(Expr::Paren(Box::new(exprs.pop().expect("one")), span)),
+                    _ => Ok(Expr::Tuple(exprs, span)),
+                }
+            }
 
             TokenKind::LBracket => self.parse_list_expr(),
 
@@ -460,14 +479,14 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse an integer literal.
-    pub(crate) fn parse_int_literal(&self, s: &str, span: Span) -> ParseResult<i64> {
+    pub(crate) fn parse_int_literal(&self, s: &str, span: Span) -> ParseResult<i128> {
         let s = s.replace('_', "");
         let value = if s.starts_with("0x") || s.starts_with("0X") {
-            i64::from_str_radix(&s[2..], 16)
+            i128::from_str_radix(&s[2..], 16)
         } else if s.starts_with("0o") || s.starts_with("0O") {
-            i64::from_str_radix(&s[2..], 8)
+            i128::from_str_radix(&s[2..], 8)
         } else if s.starts_with("0b") || s.starts_with("0B") {
-            i64::from_str_radix(&s[2..], 2)
+            i128::from_str_radix(&s[2..], 2)
         } else {
             s.parse()
         };
@@ -703,18 +722,10 @@ impl<'src> Parser<'src> {
                 infix_expr
             };
 
-            // Check if this is a tuple: (a .|. b, c, ...)
+            // Check if this is a tuple: (a .|. b, c, ...) or a section
+            // `(p </> fp,)` (pandoc's PandocMonad, #36)
             if self.eat(&TokenKind::Comma) {
-                let mut exprs = vec![infix_expr];
-                loop {
-                    exprs.push(self.parse_expr()?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                let end = self.expect(&TokenKind::RParen)?;
-                let span = start.to(end.span);
-                return Ok(Expr::Tuple(exprs, span));
+                return self.parse_tuple_rest(start, infix_expr);
             }
 
             let end = self.expect(&TokenKind::RParen)?;
@@ -807,16 +818,7 @@ impl<'src> Parser<'src> {
             let annotated = self.parse_type_annotation(first)?;
             // Check for tuple with type annotation: (expr :: Type, ...)
             if self.eat(&TokenKind::Comma) {
-                let mut exprs = vec![annotated];
-                loop {
-                    exprs.push(self.parse_expr()?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                let end = self.expect(&TokenKind::RParen)?;
-                let span = start.to(end.span);
-                return Ok(Expr::Tuple(exprs, span));
+                return self.parse_tuple_rest(start, annotated);
             }
             let end = self.expect(&TokenKind::RParen)?;
             let span = start.to(end.span);
@@ -824,37 +826,38 @@ impl<'src> Parser<'src> {
         }
 
         if self.eat(&TokenKind::Comma) {
-            // Check for TupleSections: (x,,z) or (x,) etc.
-            // If the next token is `,` or `)`, there's a hole after the comma.
-            if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
-                // The comma we just ate separates first from a hole
-                return self.parse_tuple_section(start, vec![Some(first), None]);
-            }
-
-            // Regular tuple
-            let mut exprs = vec![first];
-            loop {
-                exprs.push(self.parse_expr()?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-                // Check for hole after comma in middle of tuple
-                if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
-                    // Switch to tuple section parser, adding None for the hole
-                    let mut elements: Vec<Option<Expr>> = exprs.into_iter().map(Some).collect();
-                    elements.push(None);
-                    return self.parse_tuple_section(start, elements);
-                }
-            }
-            let end = self.expect(&TokenKind::RParen)?;
-            let span = start.to(end.span);
-            Ok(Expr::Tuple(exprs, span))
+            self.parse_tuple_rest(start, first)
         } else {
             // Parenthesized expression
             let end = self.expect(&TokenKind::RParen)?;
             let span = start.to(end.span);
             Ok(Expr::Paren(Box::new(first), span))
         }
+    }
+
+    /// The rest of a tuple after its first element and comma: a plain tuple,
+    /// or a tuple section when an element is missing (`(x,)`, `(x,,z)`).
+    fn parse_tuple_rest(&mut self, start: Span, first: Expr) -> ParseResult<Expr> {
+        // If the next token is `,` or `)`, there's a hole after the comma.
+        if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
+            return self.parse_tuple_section(start, vec![Some(first), None]);
+        }
+        let mut exprs = vec![first];
+        loop {
+            exprs.push(self.parse_expr()?);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // A hole after a comma in the middle of the tuple
+            if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
+                let mut elements: Vec<Option<Expr>> = exprs.into_iter().map(Some).collect();
+                elements.push(None);
+                return self.parse_tuple_section(start, elements);
+            }
+        }
+        let end = self.expect(&TokenKind::RParen)?;
+        let span = start.to(end.span);
+        Ok(Expr::Tuple(exprs, span))
     }
 
     /// Parse a tuple section (TupleSections extension).
@@ -1018,6 +1021,18 @@ impl<'src> Parser<'src> {
         if self.check(&TokenKind::Let) {
             self.advance();
             let decls = self.parse_local_decls()?;
+            // `let … in e` as a statement: a `let` EXPRESSION, not a `let`
+            // statement (pandoc's Markdown reader writes the `in` on the next
+            // line, indented past the `do` block, #36).
+            if self.eat(&TokenKind::In) {
+                while self.check(&TokenKind::VirtualRBrace) {
+                    self.advance();
+                }
+                let body = self.parse_expr()?;
+                let span = start.to(body.span());
+                let expr = Expr::Let(decls, Box::new(body), span);
+                return Ok(Stmt::Qualifier(expr, span));
+            }
             let span = start.to(self.tokens[self.pos - 1].span);
             return Ok(Stmt::LetStmt(decls, span));
         }
@@ -1345,6 +1360,7 @@ impl<'src> Parser<'src> {
 
             if !is_terminated(self) {
                 alts.push(self.parse_alt()?);
+                self.skip_phantom_rbraces();
                 // Accept either real or virtual semicolons
                 while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
                     if is_terminated(self) {
@@ -1356,6 +1372,7 @@ impl<'src> Parser<'src> {
                         break;
                     }
                     alts.push(self.parse_alt()?);
+                    self.skip_phantom_rbraces();
                 }
             }
 
@@ -1364,6 +1381,7 @@ impl<'src> Parser<'src> {
             } else {
                 // Virtual braces: consume if present, but don't require.
                 // Don't consume `in` — it's consumed by parse_let_expr.
+                self.skip_phantom_rbraces();
                 self.eat(&TokenKind::VirtualRBrace);
             }
         } else {
@@ -1494,6 +1512,7 @@ impl<'src> Parser<'src> {
 
             if !self.check(&rbrace) {
                 stmts.push(self.parse_stmt()?);
+                self.skip_phantom_rbraces();
                 // Accept either real or virtual semicolons
                 while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
                     if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
@@ -1502,6 +1521,21 @@ impl<'src> Parser<'src> {
                     // Stop at 'where' - it belongs to the enclosing function binding
                     if self.check(&TokenKind::Where) {
                         break;
+                    }
+                    // `then`/`else`/`in`/`|` cannot start a statement: the
+                    // layout rule's parse-error(t) case closes the implicit
+                    // block there. pandoc's LaTeX writer puts an `else` at
+                    // the column of the `then do` block's statements, and its
+                    // RTF writer a case guard `| otherwise ->` at the column
+                    // of the previous guard's `do` statements (#36).
+                    if !explicit_braces
+                        && (self.check(&TokenKind::Else)
+                            || self.check(&TokenKind::Then)
+                            || self.check(&TokenKind::In)
+                            || self.check(&TokenKind::Pipe))
+                    {
+                        self.phantom_rbraces += 1;
+                        return Ok(stmts);
                     }
                     // Skip any extra semicolons
                     while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {}
@@ -1513,6 +1547,7 @@ impl<'src> Parser<'src> {
                         break;
                     }
                     stmts.push(self.parse_stmt()?);
+                    self.skip_phantom_rbraces();
                 }
             }
 
@@ -1520,7 +1555,18 @@ impl<'src> Parser<'src> {
                 self.expect(&TokenKind::RBrace)?;
             } else {
                 // Virtual braces: consume if present, but don't require
-                self.eat(&TokenKind::VirtualRBrace);
+                self.skip_phantom_rbraces();
+                if !self.eat(&TokenKind::VirtualRBrace)
+                    && (self.check(&TokenKind::Pipe)
+                        || self.check(&TokenKind::Else)
+                        || self.check(&TokenKind::Then))
+                {
+                    // Closed by a token that cannot continue it, on the
+                    // block's own column without a separator (a case guard
+                    // `| otherwise -> …` under the previous guard's `do`
+                    // statements): its VirtualRBrace comes later.
+                    self.phantom_rbraces += 1;
+                }
             }
         } else {
             // No braces at all - single statement

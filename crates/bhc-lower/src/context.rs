@@ -1434,6 +1434,15 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // `pi` at fixed DefId 10351 (kept in sync with bhc-typeck and
+        // bhc-hir-to-core, which lowers it to a `Double` literal).
+        {
+            let sym = Symbol::intern("pi");
+            let def_id = DefId::new(10351);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // IORef operations at fixed DefIds 10400-10404
         let ioref_builtins: &[(usize, &str)] = &[
             (10400, "newIORef"),
@@ -2667,6 +2676,16 @@ impl LowerContext {
     /// `register_import_alias("M", "Data.Map")`
     pub fn register_import_alias(&mut self, alias: Symbol, module: Symbol) {
         self.import_aliases.insert(alias, module);
+    }
+
+    /// Every qualified spelling (`Alias.name`) registered for `unqualified`.
+    #[must_use]
+    pub fn qualified_spellings_of(&self, unqualified: Symbol) -> Vec<Symbol> {
+        self.qualified_names
+            .iter()
+            .filter(|(_, u)| **u == unqualified)
+            .map(|(q, _)| *q)
+            .collect()
     }
 
     /// Registers a qualified name mapping.

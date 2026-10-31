@@ -265,6 +265,26 @@ impl<'src> Parser<'src> {
             }
 
             TokenKind::LParen => self.parse_paren_pattern(),
+            // An unboxed tuple pattern `(# a, b #)`, matched as a boxed tuple
+            // (#36).
+            TokenKind::LParenHash => {
+                let start = self.current_span();
+                self.advance();
+                let mut pats = Vec::new();
+                if !self.check(&TokenKind::HashRParen) {
+                    pats.push(self.parse_pattern()?);
+                    while self.eat(&TokenKind::Comma) {
+                        pats.push(self.parse_pattern()?);
+                    }
+                }
+                let end = self.expect(&TokenKind::HashRParen)?;
+                let span = start.to(end.span);
+                match pats.len() {
+                    0 => Ok(Pat::Con(Ident::from_str("()"), vec![], span)),
+                    1 => Ok(pats.pop().expect("one")),
+                    _ => Ok(Pat::Tuple(pats, span)),
+                }
+            }
 
             TokenKind::LBracket => self.parse_list_pattern(),
 
@@ -301,6 +321,27 @@ impl<'src> Parser<'src> {
             // Unit pattern: ()
             let span = start.to(self.tokens[self.pos - 1].span);
             return Ok(Pat::Con(Ident::from_str("()"), vec![], span));
+        }
+
+        // An operator variable: `chooseMaxWith (><) (Right a) (Right b) =
+        // Right $ a >< b` binds the parameter `><` (pandoc's
+        // ODT.Generic.Fallible, #36).
+        let op_name = match self.current_kind() {
+            Some(TokenKind::Operator(sym)) => Some(*sym),
+            Some(TokenKind::Star) => Some(Symbol::intern("*")),
+            Some(TokenKind::Percent) => Some(Symbol::intern("%")),
+            Some(TokenKind::Dot) => Some(Symbol::intern(".")),
+            _ => None,
+        };
+        if let Some(sym) = op_name {
+            if matches!(
+                self.peek_nth(1).map(|t| &t.node.kind),
+                Some(TokenKind::RParen)
+            ) {
+                self.advance();
+                let end = self.expect(&TokenKind::RParen)?;
+                return Ok(Pat::Var(Ident::new(sym), start.to(end.span)));
+            }
         }
 
         // Parse the first element, allowing a view pattern (`expr -> pat`).

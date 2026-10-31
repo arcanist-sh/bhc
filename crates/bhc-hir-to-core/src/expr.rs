@@ -629,6 +629,33 @@ fn occurrence_in_dict_monad_var(ctx: &LowerContext, span: Span) -> bool {
 /// below; refusing restores exactly that behaviour instead of guessing.
 fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> bool {
     let Some(dict_ty) = ctx.lookup_dict_ty(class_name).cloned() else {
+        // An instance context's monad dictionary is registered untyped, but
+        // the context says it is for a type variable: an occurrence at a
+        // CONCRETE monad is not its. pandoc's `withQuoteContext` (in `instance
+        // Monad m => HasQuoteContext ParserState m`) ran its ParsecT do-block
+        // with `m`'s `>>=`. An unrecorded occurrence keeps the old answer.
+        if ctx.instance_context_var_arg(class_name).is_some() {
+            fn result_head(t: &Ty) -> &Ty {
+                match t {
+                    Ty::Fun(_, r) => result_head(r),
+                    Ty::App(f, _) => result_head(f),
+                    other => other,
+                }
+            }
+            // A do-block bind's recorded type can lack its first argument
+            // (`(a -> ParsecT …) -> ParsecT …`); its RESULT still names the
+            // monad.
+            let occ = refined_occurrence_ty(ctx, span);
+            let occ_head = occ
+                .as_ref()
+                .and_then(monad_head_of_method_occurrence)
+                .or_else(|| occ.as_ref().map(|t| result_head(t).clone()));
+            // The monad itself is usually applied (`ParsecT s u m`): look
+            // at its head constructor.
+            if matches!(occ_head.as_ref().map(result_head), Some(Ty::Con(_))) {
+                return false;
+            }
+        }
         // No recorded type: this dictionary predates the witness (an
         // existential pattern match, say), so keep the old behaviour.
         return true;
@@ -670,9 +697,24 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // A multi-parameter class's dictionary is for ALL its arguments, and
         // the monad is not necessarily the first: `MonadSt s m` records
         // `s := Int` first, which never matched `getx`'s monad `m`.
-        Some(occ_head) if ctx.class_param_count(class_name) > 1 => ctx
-            .lookup_dict_args(class_name)
-            .is_some_and(|args| args.iter().any(|a| same_type_head(a, &occ_head))),
+        // Nor need the class's monad be the occurrence's head: pandoc's
+        // `HasQuoteContext st m` has `getQuoteContext :: ParsecT s st m
+        // QuoteContext`, whose head is ParsecT while the dictionary is for `st`
+        // and the INNER `m`. A dictionary argument that is a type variable the
+        // occurrence type mentions is that dictionary's; otherwise the method
+        // fell to a stub inside `failIfInQuoteContext`, and every markdown read
+        // with `smart` on aborted.
+        Some(occ_head) if ctx.class_param_count(class_name) > 1 => {
+            let occ = refined_occurrence_ty(ctx, span);
+            ctx.lookup_dict_args(class_name).is_some_and(|args| {
+                args.iter().any(|a| {
+                    same_type_head(a, &occ_head)
+                        || matches!(a, Ty::Var(v) if occ.as_ref().is_some_and(|o| {
+                            o.free_vars().iter().any(|fv| fv.id == v.id)
+                        }))
+                })
+            })
+        }
         Some(occ_head) => same_type_head(&dict_ty, &occ_head),
         // Nothing recorded: keep what each class kind did before.
         None => !ctx.is_monad_family_class(class_name),
@@ -925,7 +967,21 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     };
     if matches!(
         v.name.as_str(),
-        "+" | "-" | "*" | "==" | "/=" | "<" | "<=" | ">" | ">=" | "div" | "mod" | "quot" | "rem"
+        "+" | "-"
+            | "*"
+            | "=="
+            | "/="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "div"
+            | "mod"
+            | "quot"
+            | "rem"
+            | "negate"
+            | "abs"
+            | "signum"
     ) {
         // Core bakes the single-pass type (`t -> t -> Bool`); the resolved
         // one tells codegen the operands are bignums when they are — and, for
@@ -938,7 +994,39 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
             let ground_list_eq = matches!(v.name.as_str(), "==" | "/=")
                 && matches!(&resolved, Ty::Fun(a, _)
                     if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
-            if integer || ground_list_eq {
+            // Arithmetic on Double/Float: passed as a function value
+            // (`foldr (+) 0 xs`) the operator has no operands to read it from.
+            let floating = matches!(v.name.as_str(), "+" | "-" | "*")
+                && matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")));
+            if integer || ground_list_eq || floating {
+                v.ty = resolved;
+            } else if matches!(
+                v.name.as_str(),
+                "+" | "-" | "*" | "div" | "mod" | "quot" | "rem"
+            ) && matches!(&resolved, Ty::Con(c) if c.name.as_str() == "Integer")
+            {
+                // An infix application can record its span for the operator,
+                // so the type found there is the RESULT (`[x * x | x <- xs]`,
+                // #51). These operators' operands share the result's type.
+                v.ty = Ty::fun(resolved.clone(), Ty::fun(resolved.clone(), resolved));
+            }
+        }
+        return;
+    }
+    if matches!(v.name.as_str(), "sum" | "product" | "maximum" | "minimum") {
+        // The element type of a `sum`/`product` over `Integer` (boxed
+        // bignums) or `Double`/`Float`; codegen's loop adds machine ints.
+        // `maximum`/`minimum` likewise compare machine ints (#51).
+        let wanted = if matches!(v.name.as_str(), "sum" | "product") {
+            &["Integer", "Double", "Float"][..]
+        } else {
+            &["Integer"][..]
+        };
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::List(e)
+                if matches!(e.as_ref(), Ty::Con(c) if wanted.contains(&c.name.as_str()))))
+            {
                 v.ty = resolved;
             }
         }
@@ -987,7 +1075,160 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     }
 }
 
+/// `Control.Arrow`'s `(***)` and `(&&&)` at the function arrow, as Core:
+///
+/// ```text
+/// (***) = \f g p -> case p of (a, b) -> (f a, g b)
+/// (&&&) = \f g x -> (f x, g x)
+/// ```
+///
+/// Neither had an implementation, so they ran as stubs (pandoc-types'
+/// `definitionList = … map (toList *** map toList)`). Only when the
+/// occurrence's first argument is a function: another `Arrow` instance
+/// (pandoc's ODT readers) keeps its own methods.
+fn lower_function_arrow_combinator(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let base = name.as_str().rsplit('.').next().unwrap_or(name.as_str());
+    if !matches!(base, "***" | "&&&") {
+        return None;
+    }
+    let occ = refined_occurrence_ty(ctx, span)?;
+    let Ty::Fun(first_param, _) = &occ else {
+        return None;
+    };
+    if !matches!(first_param.as_ref(), Ty::Fun(..)) {
+        return None;
+    }
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let pair_con = Var {
+        name: Symbol::intern("(,)"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let pair = |a: core::Expr, b: core::Expr| app(app(var(&pair_con), a), b);
+    let f = ctx.fresh_var("$arr_f", Ty::Error, span);
+    let g = ctx.fresh_var("$arr_g", Ty::Error, span);
+    let x = ctx.fresh_var("$arr_x", Ty::Error, span);
+    let body = if base == "&&&" {
+        pair(app(var(&f), var(&x)), app(var(&g), var(&x)))
+    } else {
+        let a = ctx.fresh_var("$arr_a", Ty::Error, span);
+        let b = ctx.fresh_var("$arr_b", Ty::Error, span);
+        let con = core::DataCon {
+            name: Symbol::intern("(,)"),
+            ty_con: bhc_types::TyCon::new(Symbol::intern("(,)"), bhc_types::Kind::Star),
+            tag: 0,
+            arity: 2,
+        };
+        core::Expr::Case(
+            Box::new(var(&x)),
+            vec![core::Alt {
+                con: core::AltCon::DataCon(con),
+                binders: vec![a.clone(), b.clone()],
+                rhs: pair(app(var(&f), var(&a)), app(var(&g), var(&b))),
+            }],
+            Ty::Error,
+            span,
+        )
+    };
+    Some(core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(
+            g,
+            Box::new(core::Expr::Lam(x, Box::new(body), span)),
+            span,
+        )),
+        span,
+    ))
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
+    let mut expr = lower_var_inner(ctx, def_ref)?;
+    // The builtin `read` is dispatched on its result type in codegen
+    // (`read "3.25" :: Double`). Its own type is `String -> a`, so give the
+    // occurrence the type it was resolved at. (Builtins reach here untyped.)
+    if let core::Expr::Var(v, _) = &mut expr {
+        let generic = match &v.ty {
+            Ty::Error => true,
+            Ty::Fun(_, r) => matches!(**r, Ty::Var(_)),
+            _ => false,
+        };
+        if v.name.as_str() == "read" && generic {
+            if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                v.ty = resolved;
+            }
+        }
+        // A range `[a .. b]` desugars to `enumFromTo a b` with the range's own
+        // span, so its recorded type is the result: at `[Double]`/`[Float]`
+        // the bounds count in floating point even when written as integer
+        // literals (`[1 .. 3] :: [Double]`), and at `[Integer]` in BigInts
+        // (#51). The other range forms likewise.
+        let range_arity = match v.name.as_str() {
+            "enumFrom" => 1,
+            "enumFromTo" | "enumFromThen" => 2,
+            "enumFromThenTo" => 3,
+            _ => 0,
+        };
+        if range_arity > 0 && matches!(v.ty, Ty::Error) {
+            if let Some(Ty::List(elem)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                let wanted = if v.name.as_str() == "enumFromTo" {
+                    &["Double", "Float", "Integer"][..]
+                } else {
+                    &["Integer"][..]
+                };
+                if matches!(elem.as_ref(), Ty::Con(c) if wanted.contains(&c.name.as_str())) {
+                    let e = elem.as_ref().clone();
+                    v.ty = (0..range_arity)
+                        .fold(Ty::List(Box::new(e.clone())), |r, _| Ty::fun(e.clone(), r));
+                }
+            }
+        }
+        // `even`/`odd` at `Integer` test the BigInt, not its address (#51).
+        if matches!(v.name.as_str(), "even" | "odd") && matches!(v.ty, Ty::Error) {
+            if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                if matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
+                {
+                    v.ty = resolved;
+                }
+            }
+        }
+        // `traverse` at `Maybe`/`Either`: codegen specializes a derived
+        // Traversable's traversal to that applicative (#32), which the
+        // generic derived body cannot choose by itself.
+        // `fmap`/`<$>` at `Maybe`/`Either` likewise, so that `fmap f` passed
+        // as a function value (`Map.alter (fmap (+ 1))`) still maps the
+        // payload; the functor is otherwise unknown where the closure runs.
+        if matches!(v.name.as_str(), "traverse" | "fmap" | "<$>") && matches!(v.ty, Ty::Error) {
+            if let Some(resolved) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                let mut result = &resolved;
+                while let Ty::Fun(_, r) = result {
+                    result = r;
+                }
+                let mut head = result;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                if matches!(head, Ty::Con(c) if matches!(c.name.as_str(), "Maybe" | "Either")) {
+                    v.ty = resolved;
+                }
+            }
+        }
+        // `readLn :: IO a` likewise parses at the type it is used at.
+        if v.name.as_str() == "readLn" && matches!(v.ty, Ty::Error) {
+            if let Some(resolved @ Ty::App(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                v.ty = resolved;
+            }
+        }
+    }
+    Ok(expr)
+}
+
+fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
     if let (Some(want), Some(n)) = (occ_dbg_name(), var_name) {
@@ -1021,7 +1262,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
 
+    // `pi` (builtin at fixed DefId 10351, see bhc-lower) is a `Double`
+    // constant.
+    if def_ref.def_id.index() == 10351 {
+        return Ok(core::Expr::Lit(
+            core::Literal::Double(std::f64::consts::PI),
+            Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Double"),
+                bhc_types::Kind::Star,
+            )),
+            def_ref.span,
+        ));
+    }
+
     if let Some(name) = var_name {
+        if let Some(e) = lower_function_arrow_combinator(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         if let Some(e) = lower_monad_plus_builtin(ctx, name, def_ref.span) {
             return Ok(e);
         }
@@ -1252,7 +1509,16 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             // in-scope `Semigroup` dictionary is the ELEMENT's, and taking it
             // ran Inlines' `<>` on two Futures.
             if ctx.is_instance_alias(def_ref.span) {
-                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                // Only through an instance the program declares: `sh = show`
+                // in `instance Sh Bool` has no `Show Bool` instance to
+                // resolve, and constructing one built a bogus dictionary
+                // whose `show` was `++` (#30). The bare builtin below is the
+                // instance-typed `show` once the method is eta-expanded.
+                if let Some(inst_ty) = ctx
+                    .current_instance_type()
+                    .cloned()
+                    .filter(|t| ctx.has_registered_instance(class_name, t))
+                {
                     if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                         name,
                         class_name,
@@ -1359,6 +1625,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                             &inst_ty,
                             def_ref.span,
                         ) {
+                            return Ok(method_expr);
+                        }
+                    }
+                }
+                // A multi-parameter class method used as a VALUE (a parser
+                // action, `context <- getQuoteContext`): no argument will drive
+                // resolution later, so build its dictionary from the instance
+                // the occurrence's class parameters pick.
+                if ctx.is_user_class(class_name) && ctx.class_param_count(class_name) > 1 {
+                    if let Some(want) = ctx.class_params_from_occurrence_any(
+                        class_name,
+                        def_ref.def_id,
+                        def_ref.span,
+                    ) {
+                        if let Some(method_expr) =
+                            method_from_instance_dict(ctx, class_name, name, &want, def_ref.span)
+                        {
                             return Ok(method_expr);
                         }
                     }
@@ -2314,11 +2597,7 @@ fn lower_constrained_value_all_dicts(
     // `Stream s m t`) is not fixed by the occurrence type, and without it
     // `notFollowedBy . char` passed notFollowedBy with no dictionary.
     if let Some(dicts) = resolve_user_dicts(ctx, constraints, &subst, def_ref.span) {
-        let mut result = core::Expr::Var(var, def_ref.span);
-        for dict in dicts {
-            result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
-        }
-        return Some(result);
+        return Some(apply_value_dicts(ctx, def_ref, var, constraints, dicts));
     }
     let mut dicts = Vec::with_capacity(constraints.len());
     let mut any_real = false;
@@ -2345,10 +2624,7 @@ fn lower_constrained_value_all_dicts(
     if !any_real {
         return None;
     }
-    let mut result = core::Expr::Var(var, def_ref.span);
-    for dict in dicts {
-        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
-    }
+    let result = apply_value_dicts(ctx, def_ref, var, constraints, dicts);
     Some(result)
 }
 
@@ -2365,6 +2641,19 @@ fn callee_param_tys_and_subst(
         cur = r.as_ref();
     }
     let mut subst = bhc_types::Subst::new();
+    // The occurrence's FIXPOINT-resolved type goes first: it is this
+    // instantiation of the scheme with everything typeck learned, while an
+    // argument's single-pass type can still hold variables that only look
+    // open. `asks fst` with `fst : (t1, t2) -> t1` bound `r := (t1, t2)`,
+    // and since `match_ty` never overrides, the occurrence's `r := ([Int],
+    // Int)` was lost — `MonadReader r (RWST r …)` then matched no instance
+    // and `asks` ran with no dictionary (pandoc's AnnotatedTable crashed).
+    let resolved_occ = ctx
+        .resolved_expr_ty_opt(head_ref.span)
+        .map(|t| crate::context::canonical_list_spelling(&t));
+    if let Some(occ_ty) = &resolved_occ {
+        match_ty(&scheme_ty, occ_ty, &mut subst);
+    }
     for (p, arg) in param_tys.iter().zip(args.iter()) {
         if let Some(at) = try_infer_arg_type(ctx, arg) {
             match_ty(p, &at, &mut subst);
@@ -2376,11 +2665,10 @@ fn callee_param_tys_and_subst(
     // instantiated type (concrete via the binding's annotation); match the
     // scheme against it to fill the remaining variables (argument-driven
     // bindings win — `match_ty` never overrides).
-    if let Some(occ_ty) = ctx
-        .resolved_expr_ty_opt(head_ref.span)
-        .or_else(|| ctx.expr_ty_opt(head_ref.span))
-    {
-        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    if resolved_occ.is_none() {
+        if let Some(occ_ty) = ctx.expr_ty_opt(head_ref.span) {
+            match_ty(&scheme_ty, &occ_ty, &mut subst);
+        }
     }
     Some((param_tys, subst))
 }
@@ -3233,8 +3521,15 @@ fn resolve_constrained_fn_dicts(
         cur = r.as_ref();
     }
 
-    // Instantiate the constrained type variables from the argument types.
+    // Instantiate the constrained type variables from the argument types —
+    // after the occurrence's fixpoint-resolved type, which knows more than a
+    // single-pass argument type (see `callee_param_tys_and_subst`: `asks fst`
+    // bound `r` to `fst`'s open `(t1, t2)` and resolved no dictionary).
     let mut subst = bhc_types::Subst::new();
+    if let Some(occ_ty) = ctx.resolved_expr_ty_opt(head_ref.span) {
+        let occ_ty = crate::context::canonical_list_spelling(&ctx.expand_type_aliases(&occ_ty));
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    }
     for (p, arg) in param_tys.iter().zip(args.iter()) {
         if let Some(at) = try_infer_arg_type(ctx, arg) {
             match_ty(p, &at, &mut subst);
@@ -4850,6 +5145,9 @@ fn lower_monadic_traversal_spine(
             )
             .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
         else {
+            if std::env::var("BHC_DBG_TRAV").is_ok() {
+                eprintln!("trav {}: no >>= at {:?}", name.as_str(), monad_ty);
+            }
             return Ok(None);
         };
         let Some(pure_e) = ctx
@@ -4861,6 +5159,9 @@ fn lower_monadic_traversal_spine(
             )
             .or_else(|| builtin_layer.then(|| typed_builtin("return")))
         else {
+            if std::env::var("BHC_DBG_TRAV").is_ok() {
+                eprintln!("trav {}: no pure at {:?}", name.as_str(), monad_ty);
+            }
             return Ok(None);
         };
         (bind_e, pure_e)
@@ -5680,6 +5981,84 @@ fn try_lower_typed_container_key(
     )))
 }
 
+/// A constrained value applied to its dictionaries, one per constraint in
+/// order. For a user-class METHOD the dictionary of its own class SELECTS the
+/// method and only the rest (its method-level constraints) are applied:
+/// passed as an ordinary argument, `getQuoteContext $dHasQuoteContext
+/// $dStream` reached codegen as a stub (pandoc's `failIfInQuoteContext` and
+/// every smart-quote parser).
+fn apply_value_dicts(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    var: Var,
+    constraints: &[Constraint],
+    dicts: Vec<core::Expr>,
+) -> core::Expr {
+    let span = def_ref.span;
+    let own = ctx
+        .class_method_of_def(def_ref.def_id, var.name)
+        .filter(|class| ctx.is_user_class(*class))
+        .and_then(|class| {
+            constraints
+                .iter()
+                .position(|c| c.class == class)
+                .map(|i| (class, i))
+        });
+    let mut dicts = dicts;
+    let mut result = core::Expr::Var(var.clone(), span);
+    // Only from a real dictionary: an unresolved constraint is filled with a
+    // literal placeholder, and selecting from one fails codegen (parsec's
+    // Text.Parsec.Prim stopped compiling).
+    if let Some((class, i)) = own
+        .filter(|(_, i)| *i < dicts.len())
+        .filter(|(_, i)| !matches!(dicts[*i], core::Expr::Lit(..)))
+    {
+        let dict = dicts.remove(i);
+        let dict_var = ctx.fresh_var("$dself", Ty::Error, span);
+        if let Some(selected) = ctx.select_method_from_dict(&dict_var, class, var.name, span) {
+            result = core::Expr::Let(
+                Box::new(Bind::NonRec(dict_var, Box::new(dict))),
+                Box::new(selected),
+                span,
+            );
+        } else {
+            dicts.insert(i, dict);
+        }
+    }
+    for dict in dicts {
+        result = core::Expr::App(Box::new(result), Box::new(dict), span);
+    }
+    result
+}
+
+/// A multi-parameter class method selected from a dictionary built for the
+/// class parameters `want`, at least one of them concrete. An instance whose
+/// head leaves a parameter as a variable (pandoc's `instance Monad m =>
+/// HasQuoteContext ParserState m`) is resolved like a constrained function's
+/// dictionary, its context from the dictionaries in scope. Without this the
+/// method stayed bare: applied, its dictionary was passed as an ordinary
+/// argument; as a value, it reached codegen as a stub.
+fn method_from_instance_dict(
+    ctx: &mut LowerContext,
+    class_name: Symbol,
+    method_name: Symbol,
+    want: &[Ty],
+    span: Span,
+) -> Option<core::Expr> {
+    if !want.iter().any(has_concrete_head) {
+        return None;
+    }
+    let constraint = Constraint::new_multi(class_name, want.to_vec(), span);
+    let dict = ctx.resolve_dictionary(&constraint, span)?;
+    let dict_var = ctx.fresh_var("$dmulti", Ty::Error, span);
+    let selected = ctx.select_method_from_dict(&dict_var, class_name, method_name, span)?;
+    Some(core::Expr::Let(
+        Box::new(Bind::NonRec(dict_var, Box::new(dict))),
+        Box::new(selected),
+        span,
+    ))
+}
+
 /// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
@@ -6427,6 +6806,23 @@ fn lower_app(
                             }
                             _ => None,
                         };
+                        // An instance whose head leaves a parameter as a
+                        // variable (pandoc's `instance Monad m => HasQuoteContext
+                        // ParserState m`) is resolved like a constrained
+                        // function's dictionary — its context from the
+                        // dictionaries in scope — and the method SELECTED from
+                        // it. Left to the later cases, the dictionary was passed
+                        // to `withQuoteContext` as an ordinary argument and the
+                        // method reached codegen as a stub.
+                        let method_expr = method_expr.or_else(|| {
+                            method_from_instance_dict(
+                                ctx,
+                                class_name,
+                                method_name,
+                                &want,
+                                head_def_ref.span,
+                            )
+                        });
                         if let Some(method_expr) = method_expr {
                             let mut result = method_expr;
                             for arg in &collected_args {
@@ -7443,7 +7839,23 @@ fn lower_con(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     // Constructors are represented as variables in Core
     // (they get special treatment during optimization)
     if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-        Ok(core::Expr::Var(var.clone(), def_ref.span))
+        let mut var = var.clone();
+        // Codegen finds a constructor by NAME. When two known constructors
+        // share this one's name (`Block`'s `Table` and the HTML writer's
+        // `Ann.Table`), spell it `Type::Con#arity`, which codegen also
+        // registers.
+        let found = ctx
+            .lookup_constructor_or_by_name(def_ref.def_id)
+            .map(|info| (info.name, info.type_name, info.arity));
+        if let Some((con_name, type_name, arity)) = found {
+            if ctx.constructor_name_is_ambiguous(con_name) {
+                let type_name = type_name.as_str();
+                let type_name = type_name.rsplit('.').next().unwrap_or(type_name);
+                var.name =
+                    Symbol::intern(&format!("{}::{}#{}", type_name, con_name.as_str(), arity));
+            }
+        }
+        Ok(core::Expr::Var(var, def_ref.span))
     } else {
         let placeholder = Var {
             name: Symbol::intern("Con"),
@@ -7488,6 +7900,22 @@ fn lower_lambda(
         for pat in pats {
             let Ty::Fun(arg_ty, ret_ty) = ty else { break };
             crate::binding::retype_pattern_binders(ctx, pat, arg_ty.as_ref());
+            ty = ret_ty.as_ref().clone();
+        }
+    } else if let Some(own) = ctx.resolved_expr_ty_opt(span) {
+        // Otherwise the lambda's own inferred type, for the parameters whose
+        // type changes their representation: an `Integer` (a boxed bignum) or
+        // a `Double`/`Float`. Untyped, `foldl (\a b -> a + b) 0 xs` over
+        // `[Integer]` or `[Double]` added them as machine ints (#18, #22).
+        // Other parameters stay untyped, as codegen's width inference expects.
+        let mut ty = own;
+        for pat in pats {
+            let Ty::Fun(arg_ty, ret_ty) = ty else { break };
+            if matches!(arg_ty.as_ref(), Ty::Con(c)
+                if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            {
+                crate::binding::retype_pattern_binders(ctx, pat, arg_ty.as_ref());
+            }
             ty = ret_ty.as_ref().clone();
         }
     }
@@ -8408,7 +8836,7 @@ fn type_tuple_alt_binders(alt: &mut core::Alt, scrut_ty: &Ty) {
 }
 
 /// Set the type of every untyped occurrence (and binder) of variable `id`.
-fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
+pub(crate) fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
     let fix = |v: &mut Var| {
         if v.id == id && matches!(v.ty, Ty::Error) {
             v.ty = ty.clone();

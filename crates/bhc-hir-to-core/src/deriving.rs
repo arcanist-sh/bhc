@@ -55,6 +55,10 @@ pub struct DerivingContext {
     eq_vars: FxHashMap<Symbol, Var>,
     /// Type name -> its `$derived_compare_<T>` binding variable.
     compare_vars: FxHashMap<Symbol, Var>,
+    /// While generating a parameterized type's `$derived_showt_<T>` body: its
+    /// `targs` parameter. A field whose type mentions a type parameter is
+    /// shown through it (#59).
+    show_targs: Option<Var>,
 }
 
 impl DerivingContext {
@@ -67,6 +71,7 @@ impl DerivingContext {
             local_ord: FxHashSet::default(),
             eq_vars: FxHashMap::default(),
             compare_vars: FxHashMap::default(),
+            show_targs: None,
         }
     }
 
@@ -1549,7 +1554,50 @@ impl DerivingContext {
             Ty::Error,
         );
 
-        let show_body = self.generate_show_body(data_def, span);
+        // A parameterized type shows its parameter-typed fields through the
+        // descriptors of its type arguments, which a caller that knows them
+        // passes to `$derived_showt_<T>` (#59). `$derived_show_<T>` — the
+        // instance method, and what every caller without them uses — passes
+        // none, and such fields fall back to the old behaviour.
+        let bindings = if data_def.params.is_empty() {
+            vec![Bind::NonRec(
+                show_method_var.clone(),
+                Box::new(self.generate_show_body(data_def, span)),
+            )]
+        } else {
+            let showt_var = self.fresh_var(
+                &format!("$derived_showt_{}", data_def.name.as_str()),
+                Ty::Error,
+            );
+            let targs = self.fresh_var("targs", Ty::Error);
+            self.show_targs = Some(targs.clone());
+            let body = self.generate_show_body(data_def, span);
+            self.show_targs = None;
+            let showt_body = core::Expr::Lam(targs, Box::new(body), span);
+            let x = self.fresh_var("x", Ty::Error);
+            let null_targs = core::Expr::Var(
+                Var {
+                    name: Symbol::intern("$null_targs"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                },
+                span,
+            );
+            let call = core::Expr::App(
+                Box::new(core::Expr::App(
+                    Box::new(core::Expr::Var(showt_var.clone(), span)),
+                    Box::new(null_targs),
+                    span,
+                )),
+                Box::new(core::Expr::Var(x.clone(), span)),
+                span,
+            );
+            let wrapper = core::Expr::Lam(x, Box::new(call), span);
+            vec![
+                Bind::NonRec(showt_var, Box::new(showt_body)),
+                Bind::NonRec(show_method_var.clone(), Box::new(wrapper)),
+            ]
+        };
 
         let mut methods = FxHashMap::default();
         methods.insert(
@@ -1566,10 +1614,7 @@ impl DerivingContext {
             instance_constraints: vec![],
         };
 
-        Some(DerivedInstance {
-            instance,
-            bindings: vec![Bind::NonRec(show_method_var, Box::new(show_body))],
-        })
+        Some(DerivedInstance { instance, bindings })
     }
 
     /// Generate the body of the show method.
@@ -1601,6 +1646,17 @@ impl DerivingContext {
                 ConFields::Positional(tys) => tys.clone(),
                 ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
             };
+            // In a `$derived_showt_<T>` body, parameter `i` of the type is
+            // spelled `$targ<i>`: codegen shows such a field through the
+            // matching entry of `targs`.
+            let field_tys: Vec<Ty> = if self.show_targs.is_some() {
+                field_tys
+                    .iter()
+                    .map(|t| mark_type_params(t, &data_def.params))
+                    .collect()
+            } else {
+                field_tys
+            };
             let fields: Vec<Var> = (0..field_count)
                 .map(|i| {
                     let ty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
@@ -1611,6 +1667,10 @@ impl DerivingContext {
             let show_expr = if field_count == 0 {
                 // Just the constructor name
                 self.make_string(con.name.as_str(), span)
+            } else if let ConFields::Named(named) = &con.fields {
+                // Record syntax, as GHC derives it (#49)
+                let names: Vec<Symbol> = named.iter().map(|f| f.name).collect();
+                self.generate_show_record(con.name, &names, &fields, span)
             } else {
                 // Constructor name followed by shown fields
                 self.generate_show_with_fields(con.name, &fields, span)
@@ -1641,16 +1701,107 @@ impl DerivingContext {
         for field in fields {
             // Append " "
             result = self.make_append(result, self.make_string(" ", span), span);
-            // Append show field
+            // Append the field shown at precedence 11
             let show_call = self.make_show_call(field, span);
-            result = self.make_append(result, show_call, span);
+            let shown = self.paren_if_compound(show_call, span);
+            result = self.make_append(result, shown, span);
         }
 
         result
     }
 
+    /// `Con {f0 = <show a0>, f1 = <show a1>}`: a record shows its fields at
+    /// precedence 0 (`P {x = -1}`), so they are never parenthesized.
+    fn generate_show_record(
+        &mut self,
+        con_name: Symbol,
+        field_names: &[Symbol],
+        fields: &[Var],
+        span: Span,
+    ) -> core::Expr {
+        let mut result = self.make_string(&format!("{} {{", con_name.as_str()), span);
+        for (i, (name, field)) in field_names.iter().zip(fields).enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let label = self.make_string(&format!("{sep}{} = ", name.as_str()), span);
+            result = self.make_append(result, label, span);
+            let shown = self.make_show_call(field, span);
+            result = self.make_append(result, shown, span);
+        }
+        self.make_append(result, self.make_string("}", span), span)
+    }
+
+    /// `showsPrec 11` for a constructor field, from its plain `show`: wrap it
+    /// in parentheses when it is a constructor application or a negative
+    /// number (`Node Leaf 3 (Node Leaf 4 Leaf)`, `P (-1)`), i.e. when it has
+    /// a space or starts with `-`, unless it is already bracketed or quoted
+    /// (a tuple, list, string or char).
+    ///
+    /// `let s = shown in if (elem ' ' s || head s == '-') && not (elem (head s)
+    /// "([\"'") then "(" ++ s ++ ")" else s`
+    fn paren_if_compound(&mut self, shown: core::Expr, span: Span) -> core::Expr {
+        let s = self.fresh_var("shown", Ty::Error);
+        let builtin = |name: &str| {
+            core::Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                },
+                span,
+            )
+        };
+        let app2 = |f: core::Expr, a: core::Expr, b: core::Expr| {
+            core::Expr::App(
+                Box::new(core::Expr::App(Box::new(f), Box::new(a), span)),
+                Box::new(b),
+                span,
+            )
+        };
+        let app1 = |f: core::Expr, a: core::Expr| core::Expr::App(Box::new(f), Box::new(a), span);
+        let s_ref = || core::Expr::Var(s.clone(), span);
+        let chr = |c: char| core::Expr::Lit(core::Literal::Char(c), Ty::Error, span);
+        let head_s = || app1(builtin("head"), s_ref());
+        let has_space = app2(builtin("elem"), chr(' '), s_ref());
+        let negative = app2(builtin("=="), head_s(), chr('-'));
+        let bracketed = app2(builtin("elem"), head_s(), self.make_string("([\"'", span));
+        let needs = app2(
+            builtin("&&"),
+            app2(builtin("||"), has_space, negative),
+            app1(builtin("not"), bracketed),
+        );
+        let parened = self.make_append(
+            self.make_string("(", span),
+            self.make_append(s_ref(), self.make_string(")", span), span),
+            span,
+        );
+        let cond = self.make_if(needs, parened, s_ref(), span);
+        core::Expr::Let(
+            Box::new(Bind::NonRec(s, Box::new(shown))),
+            Box::new(cond),
+            span,
+        )
+    }
+
     /// Make a call to show for a variable.
     fn make_show_call(&self, x: &Var, span: Span) -> core::Expr {
+        if let Some(targs) = &self.show_targs {
+            if mentions_type_param_marker(&x.ty) {
+                let show_field = Var {
+                    name: Symbol::intern("$show_field"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                return core::Expr::App(
+                    Box::new(core::Expr::App(
+                        Box::new(core::Expr::Var(show_field, span)),
+                        Box::new(core::Expr::Var(targs.clone(), span)),
+                        span,
+                    )),
+                    Box::new(core::Expr::Var(x.clone(), span)),
+                    span,
+                );
+            }
+        }
         let show_var = Var {
             name: Symbol::intern("show"),
             id: VarId::new(0),
@@ -1676,51 +1827,36 @@ impl DerivingContext {
     }
 
     /// Derive Show for a newtype.
-    fn derive_show_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
+    /// `deriving Show via T` on a newtype: show the value as a `T`.
+    ///
+    /// `Show` is a builtin class with no dictionary to select from, so the
+    /// generic via path produced an empty instance and printing crashed. A
+    /// newtype keeps its box (tag 0, one field), the same layout as the via
+    /// newtype's, so the value can be handed to `T`'s `show` as it is:
+    /// `show` dispatches on the binder's type, which is `T`.
+    pub fn derive_show_via(
+        &mut self,
+        newtype_def: &NewtypeDef,
+        via: &Ty,
+    ) -> Option<DerivedInstance> {
         let span = newtype_def.span;
         let instance_type = self.build_instance_type(newtype_def.name, &newtype_def.params);
-        let type_con = TyCon::new(newtype_def.name, Kind::Star);
-
         let show_method_var = self.fresh_var(
             &format!("$derived_show_{}", newtype_def.name.as_str()),
             Ty::Error,
         );
-
-        let x_var = self.fresh_var("x", Ty::Error);
-        let inner_var = self.fresh_var("inner", Ty::Error);
-
-        let data_con = DataCon {
-            name: newtype_def.con.name,
-            ty_con: type_con,
-            tag: 0,
-            arity: 1,
-        };
-
-        // show (Con x) = "Con " ++ show x
-        let con_str = self.make_string(newtype_def.con.name.as_str(), span);
-        let space_str = self.make_string(" ", span);
-        let show_inner = self.make_show_call(&inner_var, span);
-
-        let result = self.make_append(self.make_append(con_str, space_str, span), show_inner, span);
-
-        let case_expr = self.make_case(
-            core::Expr::Var(x_var.clone(), span),
-            vec![Alt {
-                con: AltCon::DataCon(data_con),
-                binders: vec![inner_var],
-                rhs: result,
-            }],
+        let x_var = self.fresh_var("x", via.clone());
+        let body = core::Expr::Lam(
+            x_var.clone(),
+            Box::new(self.make_show_call(&x_var, span)),
             span,
         );
-
-        let body = core::Expr::Lam(x_var, Box::new(case_expr), span);
 
         let mut methods = FxHashMap::default();
         methods.insert(
             Symbol::intern("show"),
             bhc_hir::DefId::new(show_method_var.id.index()),
         );
-
         let instance = InstanceInfo {
             class: Symbol::intern("Show"),
             instance_types: vec![instance_type],
@@ -1729,11 +1865,26 @@ impl DerivingContext {
             assoc_type_impls: FxHashMap::default(),
             instance_constraints: vec![],
         };
-
         Some(DerivedInstance {
             instance,
             bindings: vec![Bind::NonRec(show_method_var, Box::new(body))],
         })
+    }
+
+    /// Derive Show for a newtype exactly as for the one-constructor `data`
+    /// type it is shaped like, so it gets record syntax (`Sum {getSum = 3}`),
+    /// field types for `show` dispatch, and precedence parentheses.
+    fn derive_show_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
+        let as_data = DataDef {
+            id: newtype_def.id,
+            name: newtype_def.name,
+            params: newtype_def.params.clone(),
+            cons: vec![newtype_def.con.clone()],
+            is_gadt: false,
+            deriving: newtype_def.deriving.clone(),
+            span: newtype_def.span,
+        };
+        self.derive_show_data(&as_data)
     }
 
     // =========================================================================
@@ -2178,7 +2329,7 @@ impl DerivingContext {
             &format!("$derived_fmap_{}", data_def.name.as_str()),
             Ty::Error,
         );
-        let fmap_body = self.generate_fmap_body(data_def, type_param, span);
+        let fmap_body = self.generate_fmap_body(data_def, type_param, &fmap_var, span);
 
         let mut methods = FxHashMap::default();
         methods.insert(
@@ -2197,7 +2348,8 @@ impl DerivingContext {
 
         Some(DerivedInstance {
             instance,
-            bindings: vec![Bind::NonRec(fmap_var, Box::new(fmap_body))],
+            // Recursive: a field of the type itself maps through `fmap_var`.
+            bindings: vec![Bind::Rec(vec![(fmap_var, Box::new(fmap_body))])],
         })
     }
 
@@ -2210,6 +2362,7 @@ impl DerivingContext {
         &mut self,
         data_def: &DataDef,
         type_param: &TyVar,
+        self_fmap: &Var,
         span: Span,
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
@@ -2226,22 +2379,37 @@ impl DerivingContext {
                     ConFields::Named(fields) => fields.iter().map(|f| f.ty.clone()).collect(),
                 };
 
-                // Create binders for each field
+                // Create binders for each field. A field that holds the
+                // parameter inside another functor (`[a]`, `Maybe a`) is
+                // typed, so the `fmap` over it dispatches on that container.
                 let binders: Vec<Var> = field_types
                     .iter()
                     .enumerate()
-                    .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
+                    .map(|(i, ty)| {
+                        let typed = !matches!(ty, Ty::Var(v) if v == type_param)
+                            && self.type_contains_param(ty, type_param);
+                        let ty = if typed { ty.clone() } else { Ty::Error };
+                        self.fresh_var(&format!("a{i}"), ty)
+                    })
                     .collect();
 
-                // Build the result: apply f to fields that contain the type param
+                // Build the result: `f` on a field of the parameter type, the
+                // derived `fmap` itself on a field of this type (`Tree a` in
+                // `Node (Tree a) a (Tree a)`), `fmap f` on any other field that
+                // contains the parameter. Applying `f` to the recursive fields
+                // handed it whole subtrees.
                 let mut result_args: Vec<core::Expr> = vec![];
                 for (i, field_ty) in field_types.iter().enumerate() {
                     let field_var = &binders[i];
+                    let field_ref = core::Expr::Var(field_var.clone(), span);
                     if self.type_contains_param(field_ty, type_param) {
-                        // Apply f to this field
-                        let mapped = core::Expr::App(
-                            Box::new(core::Expr::Var(f_var.clone(), span)),
-                            Box::new(core::Expr::Var(field_var.clone(), span)),
+                        let mapped = self.map_functor_field(
+                            field_ty,
+                            field_ref,
+                            type_param,
+                            data_def.name,
+                            &f_var,
+                            self_fmap,
                             span,
                         );
                         result_args.push(mapped);
@@ -2272,6 +2440,66 @@ impl DerivingContext {
         let case_expr = self.make_case(core::Expr::Var(x_var.clone(), span), alts, span);
         let inner = core::Expr::Lam(x_var, Box::new(case_expr), span);
         core::Expr::Lam(f_var, Box::new(inner), span)
+    }
+
+    /// Map `f` over one field of a derived `fmap`, by the field's type:
+    /// the parameter itself is `f x`, this type (`Tree a`) is the derived
+    /// `fmap` applied recursively, and a functor around either (`[Rose a]`,
+    /// `Maybe a`) is `fmap (\\y -> <map y>) x` with `y` typed at the element.
+    #[allow(clippy::too_many_arguments)]
+    fn map_functor_field(
+        &mut self,
+        field_ty: &Ty,
+        x: core::Expr,
+        type_param: &TyVar,
+        self_name: Symbol,
+        f_var: &Var,
+        self_fmap: &Var,
+        span: Span,
+    ) -> core::Expr {
+        let f_ref = core::Expr::Var(f_var.clone(), span);
+        if matches!(field_ty, Ty::Var(v) if v == type_param) {
+            return core::Expr::App(Box::new(f_ref), Box::new(x), span);
+        }
+        let mut head = field_ty;
+        while let Ty::App(h, _) = head {
+            head = h;
+        }
+        if matches!(head, Ty::Con(c) if c.name == self_name) {
+            return core::Expr::App(
+                Box::new(core::Expr::App(
+                    Box::new(core::Expr::Var(self_fmap.clone(), span)),
+                    Box::new(f_ref),
+                    span,
+                )),
+                Box::new(x),
+                span,
+            );
+        }
+        let inner = match field_ty {
+            Ty::List(elem) => Some(elem.as_ref().clone()),
+            Ty::App(_, last) => Some(last.as_ref().clone()),
+            _ => None,
+        };
+        match inner {
+            Some(inner) if self.type_contains_param(&inner, type_param) => {
+                let y = self.fresh_var("y", inner.clone());
+                let body = self.map_functor_field(
+                    &inner,
+                    core::Expr::Var(y.clone(), span),
+                    type_param,
+                    self_name,
+                    f_var,
+                    self_fmap,
+                    span,
+                );
+                let mapper = core::Expr::Lam(y, Box::new(body), span);
+                self.make_fmap(mapper, x, span)
+            }
+            // A shape this does not know (a function, a tuple): `fmap f`,
+            // as before.
+            _ => self.make_fmap(f_ref, x, span),
+        }
     }
 
     /// Derive Functor for a newtype.
@@ -3910,5 +4138,40 @@ mod tests {
             .instance
             .methods
             .contains_key(&Symbol::intern("traverse")));
+    }
+}
+
+/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
+/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
+fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
+    match ty {
+        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
+            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
+            None => ty.clone(),
+        },
+        Ty::App(f, a) => Ty::App(
+            Box::new(mark_type_params(f, params)),
+            Box::new(mark_type_params(a, params)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(mark_type_params(a, params)),
+            Box::new(mark_type_params(b, params)),
+        ),
+        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+/// Whether `ty` mentions a `$targ<i>` marker.
+fn mentions_type_param_marker(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
+        Ty::App(f, a) | Ty::Fun(f, a) => {
+            mentions_type_param_marker(f) || mentions_type_param_marker(a)
+        }
+        Ty::List(a) => mentions_type_param_marker(a),
+        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
+        _ => false,
     }
 }

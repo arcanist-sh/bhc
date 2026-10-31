@@ -1,0 +1,14 @@
+(1,True,'c')
+(2,"two",[3,4],Just False)
+(1.5,'x',())
+[(1,'a',True),(2,'b',False)]
+[(1,True),(2,True)]
+'B'
+'o'
+Just (-3)
+[Left (-1.5),Right 2]
+'h'
+'i'
+(1,True)
+LT
+[GT,EQ]

@@ -1035,3 +1035,10 @@ fn test_tier4_sum_map_named_wasm() {
 fn test_tier4_foldl_map_lambda_wasm() {
     run_wasm_test("tier4_fusion/foldl_map_lambda", Profile::Numeric);
 }
+
+// writeFile/appendFile with computed strings, read back; `++` after a
+// computed String (#40).
+#[test]
+fn test_tier3_file_append_roundtrip_wasm() {
+    run_wasm_test("tier3_io/file_append_roundtrip", Profile::Default);
+}

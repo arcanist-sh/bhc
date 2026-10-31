@@ -1,0 +1,10 @@
+Just 3
+Nothing
+Just ('a',True)
+Right 3
+Left "e"
+Just 15
+Right 2
+Left "no"
+Right 2
+Right 42

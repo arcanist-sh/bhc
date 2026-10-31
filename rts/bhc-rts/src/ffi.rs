@@ -296,6 +296,23 @@ pub extern "C" fn bhc_print_double(d: f64) {
     print!("{}", format_double(d));
 }
 
+/// Format an `f32` like Haskell's `show` for a `Float`: the shortest digits
+/// that read back as the same `f32`, with `format_double`'s layout rules.
+fn format_float(n: f32) -> String {
+    let as_double = format_double(f64::from(n));
+    if !n.is_finite() || n == 0.0 || !(n.abs() >= 0.1 && n.abs() < 1e7) {
+        return as_double;
+    }
+    // Widening to f64 would print the f32's exact binary value
+    // (`1.100000023841858`); the f32's own shortest form is what GHC shows.
+    let s = format!("{n}");
+    if s.contains('.') {
+        s
+    } else {
+        s + ".0"
+    }
+}
+
 /// Format an `f64` the way Haskell's `show` does: whole numbers keep a trailing
 /// `.0` (`show 6.0 == "6.0"`), and non-finite values use `Infinity` /
 /// `-Infinity` / `NaN`. Shared by `print`/`show` of a `Double`.
@@ -2017,11 +2034,69 @@ pub extern "C" fn bhc_int_to_char(n: i64) -> u32 {
     n as u32
 }
 
+/// ASCII control-character names, as Haskell's `showLitChar` prints them.
+const ASCII_CONTROL_NAMES: [&str; 32] = [
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "a", "b", "t", "n", "v", "f", "r", "SO", "SI",
+    "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB", "CAN", "EM", "SUB", "ESC", "FS", "GS",
+    "RS", "US",
+];
+
+/// Append `ch` escaped as Haskell's `showLitChar` does, inside a string
+/// literal (`in_string`) or a character literal. Returns whether a following
+/// digit (or `H` after `\SO`) needs a `\&` separator.
+fn push_hs_lit_char(out: &mut String, ch: char, in_string: bool) -> Option<char> {
+    match ch {
+        '\\' => out.push_str("\\\\"),
+        '"' if in_string => out.push_str("\\\""),
+        '\'' if !in_string => out.push_str("\\'"),
+        '\x7f' => out.push_str("\\DEL"),
+        c if (c as u32) < 0x20 => {
+            out.push('\\');
+            out.push_str(ASCII_CONTROL_NAMES[c as usize]);
+            if c == '\x0e' {
+                return Some('H');
+            }
+        }
+        c if (c as u32) > 0x7f => {
+            out.push_str(&format!("\\{}", c as u32));
+            return Some('0');
+        }
+        c => out.push(c),
+    }
+    None
+}
+
+/// `show` for a `String`: quoted, escaped like Haskell (not Rust).
+pub(crate) fn hs_show_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut pending: Option<char> = None;
+    for ch in s.chars() {
+        // `"\1234" ++ "5"` must not read back as `\12345`.
+        match pending {
+            Some('0') if ch.is_ascii_digit() => out.push_str("\\&"),
+            Some('H') if ch == 'H' => out.push_str("\\&"),
+            _ => {}
+        }
+        pending = push_hs_lit_char(&mut out, ch, true);
+    }
+    out.push('"');
+    out
+}
+
+/// `show` for a `Char`: single-quoted, escaped like Haskell.
+pub(crate) fn hs_show_char(ch: char) -> String {
+    let mut out = String::from("'");
+    push_hs_lit_char(&mut out, ch, false);
+    out.push('\'');
+    out
+}
+
 /// Show Char - returns the character representation with quotes
 #[no_mangle]
 pub extern "C" fn bhc_show_char(c: u32) -> *mut c_char {
     let s = if let Some(ch) = char::from_u32(c) {
-        format!("'{}'", ch.escape_default())
+        hs_show_char(ch)
     } else {
         format!("'\\x{:x}'", c)
     };
@@ -2047,13 +2122,13 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 // Double: interpret as f64 bits
                 let bits = ptr as i64;
                 let val = f64::from_bits(bits as u64);
-                format!("{}", val)
+                format_double(val)
             }
             2 => {
                 // Float: interpret as f32 bits (lower 32 bits)
                 let bits = ptr as i32;
                 let val = f32::from_bits(bits as u32);
-                format!("{}", val)
+                format_float(val)
             }
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
@@ -2070,7 +2145,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 // Char: stored as u32 via int-to-ptr
                 let c = ptr as u32;
                 if let Some(ch) = char::from_u32(c) {
-                    format!("'{}'", ch.escape_default())
+                    hs_show_char(ch)
                 } else {
                     format!("'\\x{:x}'", c)
                 }
@@ -2078,7 +2153,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
             5 => {
                 // String: [Char] linked list, show with quotes
                 let s = read_char_list(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
             }
             _ => {
                 // Default: treat as Int
@@ -2116,10 +2191,7 @@ unsafe fn bhc_text_show_str(text: *const u8) -> String {
 /// `text` must be null or a live `BhcText`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_show_text(text: *const u8) -> *mut c_char {
-    let shown = format!(
-        "\"{}\"",
-        unsafe { bhc_text_show_str(text) }.escape_default()
-    );
+    let shown = hs_show_string(&unsafe { bhc_text_show_str(text) });
     CString::new(shown)
         .unwrap_or_else(|_| CString::new("\"\"").expect("static"))
         .into_raw()
@@ -2155,7 +2227,7 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
             if let Some(ch) = char::from_u32(char_val) {
                 result.push(ch);
             }
-            list_ptr = *(list_ptr.add(16) as *const *const u8);
+            list_ptr = bhc_force(*(list_ptr.add(16) as *const *mut u8));
         }
         result
     }
@@ -2209,7 +2281,7 @@ pub unsafe extern "C" fn bhc_string_eq_cstr(list_ptr: *const u8, pat: *const c_c
 #[no_mangle]
 pub extern "C" fn bhc_show_string(list_ptr: *const u8) -> *mut c_char {
     let s = unsafe { read_char_list(list_ptr) };
-    let shown = format!("\"{}\"", s.escape_default());
+    let shown = hs_show_string(&s);
     let c_string = CString::new(shown).unwrap();
     c_string.into_raw()
 }
@@ -2233,7 +2305,7 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
             }
             let head = *(cur.add(8) as *const *const u8);
             elems.push(show_elem(head, elem_type_tag));
-            cur = *(cur.add(16) as *const *const u8);
+            cur = bhc_force(*(cur.add(16) as *const *mut u8));
         }
     }
     let shown = format!("[{}]", elems.join(","));
@@ -2303,10 +2375,22 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 
 /// Descriptor for recursive type-aware show.
 /// Tag assignments:
-///   0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String, 6=Unit, 7=Ordering
+///   0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String, 6=Unit, 7=Ordering,
+///   8=Text, 9=Integer (boxed BigInt)
 ///   10=List, 11=Maybe, 12=Tuple2, 13=Either
 ///   14=Adt (user type with derived Show): `child1` is repurposed to hold the
 ///      value's derived-show function pointer rather than a child descriptor.
+///   15=Tuple of 3+ components: `child1` points to an array of component
+///      descriptors and `child2` holds the component count (not a pointer).
+///   16=Map, 17=Set: `child1` is the descriptor of an element of the
+///      container's ascending list (a Tuple2 for Map) and `child2` holds the
+///      container's to-list function pointer. Shown as `fromList [...]`.
+///   18=type argument `i` of the enclosing derived show (`child1` holds `i`):
+///      a placeholder in a TEMPLATE, replaced by [`resolve_show_desc`]. Shown
+///      as an `Int` if it survives (no type arguments were known).
+///   19=Adt with type arguments: `child1` holds the type's derived
+///      `$derived_showt_*` function (`fn(env, targs, value) -> [Char]`) and
+///      `child2` a null-terminated array of the type arguments' descriptors.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2329,12 +2413,12 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             1 => {
                 // Double: interpret as f64 bits
                 let val = f64::from_bits(ptr as u64);
-                format!("{}", val)
+                format_double(val)
             }
             2 => {
                 // Float: interpret as f32 bits (lower 32 bits)
                 let val = f32::from_bits(ptr as u32);
-                format!("{}", val)
+                format_float(val)
             }
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
@@ -2351,7 +2435,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Char: stored as u32 via int-to-ptr
                 let c = ptr as u32;
                 if let Some(ch) = char::from_u32(c) {
-                    format!("'{}'", ch.escape_default())
+                    hs_show_char(ch)
                 } else {
                     format!("'\\x{:x}'", c)
                 }
@@ -2359,13 +2443,17 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             5 => {
                 // String: [Char] linked list, show with quotes
                 let s = read_char_list(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
             }
             6 => "()".to_string(),
             8 => {
                 // Text: an opaque handle, shown like the String it holds.
                 let s = bhc_text_show_str(ptr);
-                format!("\"{}\"", s.escape_default())
+                hs_show_string(&s)
+            }
+            9 => {
+                // Integer: a boxed BigInt.
+                (*(ptr as *const BigInt)).to_string()
             }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
@@ -2393,6 +2481,18 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Either: recurse with child1=left, child2=right descriptors
                 show_either_recursive(ptr, &*desc.child1, &*desc.child2)
             }
+            15 => {
+                // N-tuple: fields at 8, 16, … after the tag word.
+                let count = desc.child2 as usize;
+                let descs = desc.child1 as *const *const ShowTypeDesc;
+                let parts: Vec<String> = (0..count)
+                    .map(|i| {
+                        let field = *(ptr.add(8 * (i + 1)) as *const *const u8);
+                        show_any(field, &**descs.add(i))
+                    })
+                    .collect();
+                format!("({})", parts.join(","))
+            }
             14 => {
                 // User-defined ADT: child1 is repurposed to hold the value's
                 // derived `Show` function pointer (not a child descriptor).
@@ -2403,6 +2503,25 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                     std::mem::transmute(raw);
                 let result = show_fn(std::ptr::null(), ptr);
                 read_char_list(result)
+            }
+            18 => format!("{}", ptr as i64),
+            19 => {
+                let raw = desc.child1 as *const ();
+                let show_fn: extern "C" fn(*const u8, *const u8, *const u8) -> *const u8 =
+                    std::mem::transmute(raw);
+                let result = show_fn(std::ptr::null(), desc.child2 as *const u8, ptr);
+                read_char_list(result)
+            }
+            16 | 17 => {
+                // Map / Set: child2 holds the container's to-list function
+                // (`bhc_map_to_assoc_list` / `bhc_set_to_list`), child1 the
+                // descriptor of a list element (a pair for Map).
+                let raw = desc.child2 as *const ();
+                let to_list: extern "C" fn(*const u8) -> *const u8 = std::mem::transmute(raw);
+                format!(
+                    "fromList {}",
+                    show_list_recursive(to_list(ptr), &*desc.child1)
+                )
             }
             _ => format!("<tag {}>", desc.tag),
         }
@@ -2416,7 +2535,14 @@ unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> Strin
         // For a user ADT (tag 14) the derived show yields the rendered form;
         // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
         // precedence, a nullary one ("Red") does not — detect via a space.
-        let adt_needs_parens = desc.tag == 14 && s.contains(' ') && !s.starts_with('(');
+        let adt_needs_parens =
+            (matches!(desc.tag, 14 | 19) && s.contains(' ') && !s.starts_with('('))
+                || matches!(desc.tag, 16 | 17);
+        // A negative number is shown in parentheses above precedence 6, as
+        // GHC's `showsPrec` does (`Just (-3)`, not `Just -3`).
+        if prec > 6 && matches!(desc.tag, 0..=2 | 9) && s.starts_with('-') {
+            return format!("({})", s);
+        }
         if prec > 10 && (is_constructor_app(ptr, desc) || adt_needs_parens) {
             format!("({})", s)
         } else {
@@ -2448,7 +2574,7 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
         // Special case: [Char] is shown as a String
         if elem_desc.tag == 4 {
             let s = read_char_list(list_ptr);
-            return format!("\"{}\"", s.escape_default());
+            return hs_show_string(&s);
         }
 
         let mut elems = Vec::new();
@@ -2460,7 +2586,7 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
             }
             let head = *(cur.add(8) as *const *const u8);
             elems.push(show_any(head, elem_desc));
-            cur = *(cur.add(16) as *const *const u8);
+            cur = bhc_force(*(cur.add(16) as *const *mut u8));
         }
         format!("[{}]", elems.join(","))
     }
@@ -2508,6 +2634,90 @@ unsafe fn show_either_recursive(
             format!("Right {}", show_any_prec(val, right_desc, 11))
         }
     }
+}
+
+/// A copy of `desc` with every type-argument placeholder (tag 18) replaced by
+/// the descriptor in `targs` (a null-terminated array; null means none are
+/// known, and placeholders stay). Unchanged sub-descriptors are shared;
+/// replaced ones are leaked, like every other runtime allocation.
+unsafe fn resolve_show_desc(
+    desc: *const ShowTypeDesc,
+    targs: *const *const ShowTypeDesc,
+) -> *const ShowTypeDesc {
+    unsafe fn resolve_array(
+        array: *const *const ShowTypeDesc,
+        len: usize,
+        targs: *const *const ShowTypeDesc,
+        terminate: bool,
+    ) -> *const *const ShowTypeDesc {
+        let mut out: Vec<*const ShowTypeDesc> = (0..len)
+            .map(|i| unsafe { resolve_show_desc(*array.add(i), targs) })
+            .collect();
+        if terminate {
+            out.push(std::ptr::null());
+        }
+        Box::leak(out.into_boxed_slice()).as_ptr()
+    }
+    unsafe {
+        if desc.is_null() || targs.is_null() {
+            return desc;
+        }
+        let d = &*desc;
+        let (child1, child2) = match d.tag {
+            18 => {
+                let index = d.child1 as usize;
+                let mut n = 0;
+                while !(*targs.add(n)).is_null() {
+                    n += 1;
+                }
+                return if index < n { *targs.add(index) } else { desc };
+            }
+            10 | 11 => (resolve_show_desc(d.child1, targs), d.child2),
+            12 | 13 => (
+                resolve_show_desc(d.child1, targs),
+                resolve_show_desc(d.child2, targs),
+            ),
+            15 => {
+                let count = d.child2 as usize;
+                let comps = d.child1 as *const *const ShowTypeDesc;
+                (
+                    resolve_array(comps, count, targs, false) as *const ShowTypeDesc,
+                    d.child2,
+                )
+            }
+            16 | 17 => (resolve_show_desc(d.child1, targs), d.child2),
+            19 => {
+                let args = d.child2 as *const *const ShowTypeDesc;
+                let mut n = 0;
+                while !args.is_null() && !(*args.add(n)).is_null() {
+                    n += 1;
+                }
+                (
+                    d.child1,
+                    resolve_array(args, n, targs, true) as *const ShowTypeDesc,
+                )
+            }
+            _ => return desc,
+        };
+        Box::leak(Box::new(ShowTypeDesc {
+            tag: d.tag,
+            child1,
+            child2,
+        }))
+    }
+}
+
+/// Show `ptr` by a descriptor TEMPLATE whose type-argument placeholders are
+/// filled from `targs`: a field of a derived show whose type mentions the
+/// type's parameters (`data D a = D a`; `$derived_showt_D`'s `targs`).
+#[no_mangle]
+pub extern "C" fn bhc_show_with_targs(
+    ptr: *const u8,
+    template: *const ShowTypeDesc,
+    targs: *const *const ShowTypeDesc,
+) -> *mut c_char {
+    let desc = unsafe { resolve_show_desc(template, targs) };
+    bhc_show_with_desc(ptr, desc)
 }
 
 /// Show any value using a recursive type descriptor.
@@ -2585,7 +2795,11 @@ pub extern "C" fn bhc_signum_double(a: f64) -> f64 {
 pub extern "C" fn bhc_getLine() -> *mut c_char {
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(0) => ptr::null_mut(), // EOF
+        Ok(0) => {
+            // Like GHC: reading past the end of stdin is an IO error.
+            eprintln!("Prelude.getLine: end of file");
+            std::process::exit(1);
+        }
         Ok(_) => {
             // Remove trailing newline
             if line.ends_with('\n') {
@@ -4126,13 +4340,13 @@ pub unsafe extern "C" fn bhc_is_directory(path: *const c_char) -> c_int {
     }
 }
 
-/// Get an environment variable. Returns heap-allocated C string, or null if not set.
+/// Look up an environment variable as a heap-allocated C string, or null if
+/// it is not set.
 ///
 /// # Safety
 ///
 /// `name` must be either null or a pointer to a valid, NUL-terminated C string.
-#[no_mangle]
-pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
+unsafe fn env_var_cstring(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return ptr::null_mut();
     }
@@ -4146,6 +4360,29 @@ pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
     }
 }
 
+/// `getEnv`: the variable's value as a heap-allocated C string. An unset
+/// variable is an IO error, as in GHC.
+///
+/// # Safety
+///
+/// `name` must be either null or a pointer to a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
+    let value = unsafe { env_var_cstring(name) };
+    if value.is_null() {
+        let shown = if name.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        eprintln!("{shown}: getEnv: does not exist (no environment variable)");
+        std::process::exit(1);
+    }
+    value
+}
+
 /// Lookup an environment variable. Returns heap-allocated C string, or null for Nothing.
 ///
 /// # Safety
@@ -4153,8 +4390,8 @@ pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
 /// `name` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_lookupEnv(name: *const c_char) -> *mut c_char {
-    // Same as bhc_get_env; null encodes Nothing
-    unsafe { bhc_get_env(name) }
+    // null encodes Nothing
+    unsafe { env_var_cstring(name) }
 }
 
 /// Get command line arguments as a cons-cell list of C strings.
@@ -4238,7 +4475,7 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
             let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
             parts.push(s.to_string());
         }
-        cur = unsafe { *(cur.add(16) as *const *const u8) };
+        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
     }
     parts
 }
@@ -5035,6 +5272,176 @@ pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
     }
 }
 
+/// 1 if the BigInt is even, else 0 (`even`/`odd` at `Integer`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_is_even(a: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    use num_integer::Integer;
+    i64::from(a.is_even())
+}
+
+/// A thunk for the rest of an unbounded `Integer` range: `[tag -1,
+/// eval_fn, env_size 2, next, step]`, forced by `bhc_force` into
+/// `next : <thunk for next + step>`.
+fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
+    extern "C" fn resume(env: *mut u8) -> *mut u8 {
+        unsafe {
+            let cur = *(env as *const *const u8);
+            let step = *(env.add(8) as *const *const u8);
+            let next = &*(cur as *const BigInt) + &*(step as *const BigInt);
+            alloc_cons(cur as *mut u8, integer_enum_thunk(next, step))
+        }
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
+        let obj = std::alloc::alloc(layout);
+        *(obj as *mut i64) = BHC_TAG_THUNK;
+        *(obj.add(8) as *mut *const u8) = resume as *const u8;
+        *(obj.add(16) as *mut i64) = 2;
+        *(obj.add(24) as *mut *mut u8) = Box::into_raw(Box::new(next)) as *mut u8;
+        *(obj.add(32) as *mut *const u8) = step;
+        obj
+    }
+}
+
+/// `[from, from + step ..]` at `Integer`, produced lazily.
+fn integer_enum_unbounded(from: BigInt, step: BigInt) -> *mut u8 {
+    let step = Box::into_raw(Box::new(step)) as *const u8;
+    let next = &from + unsafe { &*(step as *const BigInt) };
+    let head = Box::into_raw(Box::new(from)) as *mut u8;
+    unsafe { alloc_cons(head, integer_enum_thunk(next, step)) }
+}
+
+/// `[from, from + step .. to]` at `Integer`, Haskell's `enumFromThenTo`:
+/// counts up to `to` for a positive step, down to it for a negative one,
+/// and repeats `from` forever for a zero step when `from <= to`.
+fn integer_enum_bounded(from: &BigInt, step: BigInt, to: &BigInt) -> *mut u8 {
+    use num_traits::{Signed, Zero};
+    if step.is_zero() {
+        if from <= to {
+            return integer_enum_unbounded(from.clone(), step);
+        }
+        return unsafe { alloc_nil() };
+    }
+    let mut elems = Vec::new();
+    let mut x = from.clone();
+    while if step.is_positive() {
+        &x <= to
+    } else {
+        &x >= to
+    } {
+        let next = &x + &step;
+        elems.push(Box::into_raw(Box::new(x)) as *mut u8);
+        x = next;
+    }
+    let mut list = unsafe { alloc_nil() };
+    for e in elems.into_iter().rev() {
+        list = unsafe { alloc_cons(e, list) };
+    }
+    list
+}
+
+/// A thunk for the rest of an unbounded `Int` range: `[tag -1, eval_fn,
+/// env_size 2, next, step]`, forced into `next : <thunk for next + step>`.
+/// Elements are machine ints carried in pointer bits, as codegen boxes them.
+fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
+    extern "C" fn resume(env: *mut u8) -> *mut u8 {
+        unsafe {
+            let cur = *(env as *const i64);
+            let step = *(env.add(8) as *const i64);
+            alloc_cons(
+                cur as usize as *mut u8,
+                int_enum_thunk(cur.wrapping_add(step), step),
+            )
+        }
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
+        let obj = std::alloc::alloc(layout);
+        *(obj as *mut i64) = BHC_TAG_THUNK;
+        *(obj.add(8) as *mut *const u8) = resume as *const u8;
+        *(obj.add(16) as *mut i64) = 2;
+        *(obj.add(24) as *mut i64) = next;
+        *(obj.add(32) as *mut i64) = step;
+        obj
+    }
+}
+
+/// `enumFrom`/`enumFromThen` at `Int` (and the other types codegen carries
+/// as machine ints): `[from, from + step ..]`, produced lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_step_int(from: i64, step: i64) -> *mut u8 {
+    unsafe {
+        alloc_cons(
+            from as usize as *mut u8,
+            int_enum_thunk(from.wrapping_add(step), step),
+        )
+    }
+}
+
+/// `enumFrom` at `Integer`: `[from ..]`, lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_integer(from: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    integer_enum_unbounded(from.clone(), BigInt::from(1))
+}
+
+/// `enumFromThen` at `Integer`: `[from, then ..]`, lazily.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_then_integer(from: *const u8, then: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let then = unsafe { &*(then as *const BigInt) };
+    integer_enum_unbounded(from.clone(), then - from)
+}
+
+/// `enumFromTo` at `Integer`: `[from .. to]`.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_to_integer(from: *const u8, to: *const u8) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let to = unsafe { &*(to as *const BigInt) };
+    integer_enum_bounded(from, BigInt::from(1), to)
+}
+
+/// `enumFromThenTo` at `Integer`: `[from, then .. to]`.
+#[no_mangle]
+pub extern "C" fn bhc_enum_from_then_to_integer(
+    from: *const u8,
+    then: *const u8,
+    to: *const u8,
+) -> *mut u8 {
+    let from = unsafe { &*(from as *const BigInt) };
+    let then = unsafe { &*(then as *const BigInt) };
+    let to = unsafe { &*(to as *const BigInt) };
+    integer_enum_bounded(from, then - from, to)
+}
+
+/// `maximum` (`want_max` 1) or `minimum` (0) of a `[Integer]`.
+#[no_mangle]
+pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut u8 {
+    let mut best: *mut u8 = std::ptr::null_mut();
+    let mut cur = unsafe { bhc_force(list) };
+    while !cur.is_null() && unsafe { *(cur as *const i64) } == 1 {
+        let head = unsafe { *(cur.add(8) as *const *mut u8) };
+        let better = best.is_null() || {
+            let (h, b) = unsafe { (&*(head as *const BigInt), &*(best as *const BigInt)) };
+            if want_max != 0 {
+                h > b
+            } else {
+                h < b
+            }
+        };
+        if better {
+            best = head;
+        }
+        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+    }
+    if best.is_null() {
+        let which = if want_max != 0 { "maximum" } else { "minimum" };
+        rts_abort(&format!("Prelude.{which}: empty list"));
+    }
+    best
+}
+
 /// Show a BigInt as a C string.
 #[no_mangle]
 pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
@@ -5046,6 +5453,23 @@ pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn haskell_show_escaping() {
+        use super::{hs_show_char, hs_show_string};
+        // Expected values are GHC's `show` output.
+        assert_eq!(hs_show_string("it's"), r#""it's""#);
+        assert_eq!(hs_show_string("say \"hi\"\n"), r#""say \"hi\"\n""#);
+        assert_eq!(hs_show_string("a\\b\tc"), r#""a\\b\tc""#);
+        assert_eq!(hs_show_string("caf\u{e9}"), r#""caf\233""#);
+        assert_eq!(hs_show_string("\u{e9}1"), r#""\233\&1""#);
+        assert_eq!(hs_show_string("\u{e}H"), r#""\SO\&H""#);
+        assert_eq!(hs_show_string("\u{7f}\u{0}"), r#""\DEL\NUL""#);
+        assert_eq!(hs_show_char('a'), "'a'");
+        assert_eq!(hs_show_char('\''), r"'\''");
+        assert_eq!(hs_show_char('"'), "'\"'");
+        assert_eq!(hs_show_char('\n'), r"'\n'");
+    }
+
     use super::*;
 
     fn strs(parts: &[&str]) -> Vec<String> {

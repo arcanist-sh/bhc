@@ -137,7 +137,7 @@ bhc Main.hs -o main
 # Check without generating code
 bhc check Main.hs
 
-# Run directly (via interpreter)
+# Compile to a temporary executable and run it
 bhc run Main.hs
 
 # Emit intermediate representations

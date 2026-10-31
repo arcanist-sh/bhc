@@ -126,6 +126,8 @@ pub struct Evaluator {
     /// When the REPL evaluates `let x = 5`, it stores `("x", Value::Int(5))`.
     /// Subsequent evaluations can reference `x` even though they have different `VarIds`.
     named_bindings: RefCell<HashMap<Symbol, Value>>,
+    /// Arguments returned by `getArgs`; `None` falls back to the process args.
+    program_args: RefCell<Option<Vec<String>>>,
 }
 
 impl Evaluator {
@@ -144,6 +146,7 @@ impl Evaluator {
             rec_env_stack: RefCell::new(Vec::new()),
             io_output: RefCell::new(String::new()),
             named_bindings: RefCell::new(HashMap::new()),
+            program_args: RefCell::new(None),
         }
     }
 
@@ -223,6 +226,11 @@ impl Evaluator {
         }
     }
 
+    /// Sets the arguments `getArgs` returns, instead of the host process's.
+    pub fn set_program_args(&self, args: Vec<String>) {
+        *self.program_args.borrow_mut() = Some(args);
+    }
+
     /// Returns the captured IO output from print/putStrLn/putStr operations.
     #[must_use]
     pub fn take_io_output(&self) -> String {
@@ -242,6 +250,8 @@ impl Evaluator {
             ("-.", PrimOp::SubDouble),
             ("*.", PrimOp::MulDouble),
             ("/.", PrimOp::DivDouble),
+            // Fractional division: the interpreter's numbers are Doubles.
+            ("/", PrimOp::DivDouble),
             ("==", PrimOp::EqInt),
             ("/=", PrimOp::NeqInt),
             ("<", PrimOp::LtInt),
@@ -1199,7 +1209,7 @@ impl Evaluator {
         match expr {
             Expr::Var(var, _) => self.eval_var(var, env),
 
-            Expr::Lit(lit, _, _) => Ok(self.eval_lit(lit)),
+            Expr::Lit(lit, ty, _) => Ok(self.eval_lit_at(lit, ty)),
 
             Expr::App(fun, arg, _) => self.eval_app(fun, arg, env),
 
@@ -1329,6 +1339,19 @@ impl Evaluator {
         }
 
         Err(EvalError::UnboundVariable(var.name.to_string()))
+    }
+
+    /// A literal at its type: a floating literal is a `Double` (Haskell's
+    /// default, and the precision Core carries) unless typed `Float`.
+    /// Evaluating every one as `f32` printed `1.3333334` for a Double
+    /// computation the compiled program prints as `1.3333333333333335`.
+    fn eval_lit_at(&self, lit: &Literal, ty: &bhc_types::Ty) -> Value {
+        match lit {
+            Literal::Float(n) if !matches!(ty, bhc_types::Ty::Con(c) if c.name.as_str() == "Float") => {
+                Value::Double(*n)
+            }
+            _ => self.eval_lit(lit),
+        }
     }
 
     fn eval_lit(&self, lit: &Literal) -> Value {
@@ -4040,7 +4063,10 @@ impl Evaluator {
                 let pair = self.force(args[0].clone())?;
                 if let Value::Data(ref d) = pair {
                     if d.args.len() >= 2 {
-                        return Ok(d.args[0].clone());
+                        // Evaluating `fst p` evaluates the component;
+                        // returned as a thunk, it reached arithmetic
+                        // unforced ("expected Num, got <thunk>", #17).
+                        return self.force(d.args[0].clone());
                     }
                 }
                 Err(EvalError::TypeError {
@@ -4053,7 +4079,10 @@ impl Evaluator {
                 let pair = self.force(args[0].clone())?;
                 if let Value::Data(ref d) = pair {
                     if d.args.len() >= 2 {
-                        return Ok(d.args[1].clone());
+                        // Evaluating `snd p` evaluates the component;
+                        // returned as a thunk, it reached arithmetic
+                        // unforced ("expected Num, got <thunk>", #17).
+                        return self.force(d.args[1].clone());
                     }
                 }
                 Err(EvalError::TypeError {
@@ -6408,8 +6437,12 @@ impl Evaluator {
 
             // === System.Environment PrimOps ===
             PrimOp::GetArgs => {
-                let args_list: Vec<Value> = std::env::args()
-                    .skip(1)
+                let args: Vec<String> = match &*self.program_args.borrow() {
+                    Some(args) => args.clone(),
+                    None => std::env::args().skip(1).collect(),
+                };
+                let args_list: Vec<Value> = args
+                    .iter()
                     .map(|s| Value::String(Arc::from(s.as_str())))
                     .collect();
                 Ok(Value::from_list(args_list))
@@ -7947,6 +7980,7 @@ impl Evaluator {
                     (Literal::Float(a), Value::Float(b)) => {
                         (*a - f64::from(*b)).abs() < f64::from(f32::EPSILON)
                     }
+                    (Literal::Float(a), Value::Double(b)) => (*a - *b).abs() < f64::EPSILON,
                     (Literal::Double(a), Value::Double(b)) => (*a - *b).abs() < f64::EPSILON,
                     (Literal::Char(a), Value::Char(b)) => *a == *b,
                     (Literal::String(a), Value::String(b)) => a.as_str() == b.as_ref(),
@@ -8265,8 +8299,8 @@ impl Evaluator {
         match &forced {
             Value::Int(n) => Ok(n.to_string()),
             Value::Integer(n) => Ok(n.to_string()),
-            Value::Float(n) => Ok(format!("{n}")),
-            Value::Double(n) => Ok(format!("{n}")),
+            Value::Float(n) => Ok(haskell_show_float(f64::from(*n), format!("{n}"))),
+            Value::Double(n) => Ok(haskell_show_float(*n, format!("{n}"))),
             Value::Char(c) => Ok(format!("{c:?}")),
             Value::String(s) => Ok(format!("{s:?}")),
             Value::Closure(c) => Ok(format!("<function {}>", c.var.name)),
@@ -8429,6 +8463,36 @@ fn next_permutation(indices: &mut [usize]) -> bool {
     true
 }
 
+/// Show a floating value as Haskell does: a trailing `.0` on whole numbers
+/// (`5.0`, not `5`), scientific notation outside `[0.1, 10^7)` with a
+/// fractional mantissa (`1.0e-3`), and `Infinity`/`NaN`. `shortest` is the
+/// value's own shortest decimal form (an `f32`'s, for a `Float`); the RTS
+/// formats compiled programs the same way.
+fn haskell_show_float(n: f64, shortest: String) -> String {
+    if n.is_infinite() {
+        return if n > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if n.is_nan() {
+        return "NaN".to_string();
+    }
+    if n == 0.0 {
+        return if n.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    if n.abs() >= 0.1 && n.abs() < 1e7 {
+        if shortest.contains('.') {
+            shortest
+        } else {
+            shortest + ".0"
+        }
+    } else {
+        let s = format!("{n:e}");
+        match s.split_once('e') {
+            Some((mantissa, exp)) if !mantissa.contains('.') => format!("{mantissa}.0e{exp}"),
+            _ => s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8442,6 +8506,31 @@ mod tests {
 
     fn make_int(n: i64) -> Expr {
         Expr::Lit(Literal::Int(n), Ty::Error, Span::default())
+    }
+
+    #[test]
+    fn test_haskell_show_float() {
+        assert_eq!(haskell_show_float(5.0, "5".into()), "5.0");
+        assert_eq!(haskell_show_float(0.001, "0.001".into()), "1.0e-3");
+        assert_eq!(haskell_show_float(1.5, "1.5".into()), "1.5");
+        assert_eq!(haskell_show_float(f64::INFINITY, String::new()), "Infinity");
+    }
+
+    #[test]
+    fn test_get_args_uses_program_args() {
+        let eval = Evaluator::new(EvalMode::Strict);
+        eval.set_program_args(vec!["one".into(), "two".into()]);
+        let args = eval.apply_primop(PrimOp::GetArgs, vec![]).unwrap();
+        let args: Vec<String> = args
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.to_string(),
+                other => panic!("expected a String, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(args, ["one", "two"]);
     }
 
     #[test]

@@ -1,0 +1,4 @@
+Node Leaf 3 (Node Leaf 4 Leaf)
+P (-1) 2
+W (Just 1) [1] "a b" 'x' (1,True)
+Just (Node Leaf 1 Leaf)

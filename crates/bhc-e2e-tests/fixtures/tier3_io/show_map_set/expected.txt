@@ -1,0 +1,9 @@
+fromList [(1,"a"),(2,"b"),(3,"c")]
+fromList [(1,"a"),(2,"b"),(3,"c")]
+fromList []
+fromList "ehlo"
+fromList [1,2,3]
+fromList [("a",Nothing),("x",Just True)]
+Just (fromList [Red,Blue])
+fromList [(4,[3]),(5,[1,2])]
+m = fromList [(1,1),(2,1),(3,1)]

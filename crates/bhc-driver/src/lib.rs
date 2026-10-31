@@ -613,7 +613,15 @@ impl Compiler {
             // and under the id it was bound with at load time: a qualified-only
             // import (`A.Done`) binds no bare name, and its patterns then got
             // a made-up tag and never matched.
+            //
+            // Recorded ids go in first and win: the bare name may belong to a
+            // DIFFERENT constructor. With `import Text.Pandoc.Definition` and
+            // `import qualified Text.Pandoc.Writers.AnnotatedTable as Ann`,
+            // `Ann.Table`'s bare name resolves to `Block`'s `Table`, and
+            // registering it there gave `Block`'s `Table` tag 0 — a table
+            // then matched no alternative of the HTML writer's case.
             let mut map = bhc_hir_to_core::ConstructorInfoMap::default();
+            let mut by_name_ids = Vec::new();
             for (i, (name, tag, arity, type_name, is_newtype, field_types)) in
                 lower_ctx.interface_constructors.iter().enumerate()
             {
@@ -623,28 +631,28 @@ impl Compiler {
                 let sym = Symbol::intern(name);
                 let by_name = lower_ctx.lookup_constructor(sym);
                 let recorded = lower_ctx.interface_constructor_ids.get(i).copied();
-                for def_id in [by_name, recorded.filter(|r| Some(*r) != by_name)]
-                    .into_iter()
-                    .flatten()
-                {
-                    let field_names = lower_ctx
+                let info = |def_id| bhc_hir_to_core::ConstructorInfo {
+                    name: sym,
+                    type_name: type_name.as_ref().map_or(sym, |t| Symbol::intern(t)),
+                    tag: *tag,
+                    arity: *arity,
+                    field_names: lower_ctx
                         .get_constructor_field_names(def_id)
-                        .unwrap_or_default();
-                    map.insert(
-                        def_id,
-                        bhc_hir_to_core::ConstructorInfo {
-                            name: sym,
-                            type_name: type_name.as_ref().map_or(sym, |t| Symbol::intern(t)),
-                            tag: *tag,
-                            arity: *arity,
-                            field_names,
-                            is_newtype: *is_newtype,
-                            existential_dict_count: 0,
-                            existential_classes: vec![],
-                            field_types: field_types.clone(),
-                        },
-                    );
+                        .unwrap_or_default(),
+                    is_newtype: *is_newtype,
+                    existential_dict_count: 0,
+                    existential_classes: vec![],
+                    field_types: field_types.clone(),
+                };
+                if let Some(def_id) = recorded {
+                    map.insert(def_id, info(def_id));
                 }
+                if let Some(def_id) = by_name.filter(|b| Some(*b) != recorded) {
+                    by_name_ids.push((def_id, info(def_id)));
+                }
+            }
+            for (def_id, info) in by_name_ids {
+                map.entry(def_id).or_insert(info);
             }
             map
         };
@@ -1216,8 +1224,22 @@ impl Compiler {
             debug!("parse diagnostic: {:?}", diag);
         }
 
+        // The parser recovers from an error by dropping what it could not
+        // parse, so a module could come back with declarations missing and
+        // compile "successfully" without them (#4, #36). A recovered error is
+        // a parse error. `BHC_LENIENT_PARSE=1` restores the old behaviour
+        // (keep the partial module) for code with constructs the parser does
+        // not support yet.
+        let strict = std::env::var_os("BHC_LENIENT_PARSE").is_none()
+            && diagnostics.iter().any(|d| d.is_error());
+        let maybe_module = if strict { None } else { maybe_module };
         match maybe_module {
-            Some(module) => Ok(module),
+            Some(module) => {
+                if self.session.options.dump_ir.dump_ast {
+                    Self::print_dump("AST", &unit.module_name, &format!("{module:#?}"));
+                }
+                Ok(module)
+            }
             None => {
                 // Surface each parse error's message and location — otherwise
                 // callers only see "parse error: N errors" with no clue what or
@@ -1236,6 +1258,76 @@ impl Compiler {
                 }
                 Err(CompileError::ParseError(diagnostics.len()))
             }
+        }
+    }
+
+    /// Whether anything could provide a module bhc does not know: import
+    /// paths, package databases, an interface directory, a stdlib path or
+    /// Hackage packages. Without any, an unknown import cannot resolve.
+    fn module_sources_configured(&self) -> bool {
+        let o = &self.session.options;
+        !o.import_paths.is_empty()
+            || !o.package_dbs.is_empty()
+            || o.output_interface_dir.is_some()
+            || o.stdlib_path.is_some()
+            || !o.hackage_packages.is_empty()
+            || std::env::var_os("BHC_STDLIB_PATH").is_some()
+    }
+
+    /// An import of a module nothing can provide is an error, as in GHC
+    /// (#45). With import paths or package databases configured it stays a
+    /// warning: a package build relies on unknown modules falling back to
+    /// stubs.
+    fn check_missing_modules(&self, ctx: &LowerContext) -> CompileResult<()> {
+        if self.module_sources_configured() {
+            return Ok(());
+        }
+        let missing: Vec<String> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::ModuleNotFound { name, .. } => Some(format!("`{name}`")),
+                _ => None,
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(CompileError::Other(format!(
+            "could not find module {} (add its source directory with -I or its package with \
+             --package-db)",
+            missing.join(", ")
+        )))
+    }
+
+    /// Print one IR dump (`--dump-ir`) to stdout under a banner.
+    ///
+    /// Each stage of a module is printed once, even when a compile path
+    /// parses or lowers it twice (dependency scan, then compilation). Write
+    /// errors are ignored, so piping a dump into `head` does not panic.
+    fn print_dump(stage: &str, module_name: &str, body: &str) {
+        use std::io::Write;
+        static PRINTED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+            std::sync::Mutex::new(None);
+        let key = format!("{stage}\0{module_name}");
+        let mut printed = PRINTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !printed.get_or_insert_with(Default::default).insert(key) {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(
+            out,
+            "==================== {stage}: {module_name} ====================\n{}\n",
+            body.trim_end()
+        );
+    }
+
+    /// Dump the HIR of a module when `--dump-ir=hir` is set.
+    fn maybe_dump_hir(&self, hir: &HirModule) {
+        if self.session.options.dump_ir.dump_hir {
+            Self::print_dump("HIR", hir.name.as_str(), &format!("{hir:#?}"));
         }
     }
 
@@ -1281,6 +1373,7 @@ impl Compiler {
         let package_paths = self.resolve_hackage_packages()?;
         search_paths.extend(package_paths);
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         let config = bhc_lower::LowerConfig {
             include_builtins: true,
@@ -1288,7 +1381,21 @@ impl Compiler {
             search_paths,
         };
 
-        let hir = bhc_lower::lower_module(&mut ctx, ast, &config)?;
+        let hir = match bhc_lower::lower_module(&mut ctx, ast, &config) {
+            Ok(hir) => hir,
+            Err(e) => {
+                for warning in &ctx.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                return Err(e.into());
+            }
+        };
+
+        // Display lowering warnings first: a missing module explains the
+        // unbound-name errors that follow it.
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
+        }
 
         // Check for lowering errors
         if ctx.has_errors() {
@@ -1296,11 +1403,8 @@ impl Compiler {
             return Err(bhc_lower::LowerError::Multiple(errors).into());
         }
 
-        // Display lowering warnings
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
-        }
-
+        self.maybe_dump_hir(&hir);
+        self.check_missing_modules(&ctx)?;
         Ok((hir, ctx))
     }
 
@@ -1688,6 +1792,9 @@ impl Compiler {
             }
         }
 
+        if self.session.options.dump_ir.dump_core {
+            Self::print_dump("Core", core.name.as_str(), &core.to_string());
+        }
         Ok(core)
     }
 
@@ -2044,6 +2151,10 @@ impl Compiler {
         module
             .optimize(&ctx, self.session.options.opt_level)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
+
+        if self.session.options.dump_ir.dump_llvm {
+            Self::print_dump("LLVM IR", module_name, &module.as_llvm_ir());
+        }
 
         // Write output
         match output_type {
@@ -3192,8 +3303,38 @@ impl Compiler {
                     continue;
                 }
 
-                // Find the remapped DefId for this constructor in the lower context
-                if let Some(def_id) = lower_ctx.lookup_constructor(con_name) {
+                // Find the remapped DefId for this constructor in the lower context.
+                // The bare name can belong to ANOTHER type's constructor (a
+                // `qualified` import's `Ann.Table` next to `Block`'s `Table`);
+                // registering there gave `Block`'s `Table` the wrong tag.
+                let unqualified = |n: Symbol| -> Symbol {
+                    let s = n.as_str();
+                    Symbol::intern(s.rsplit('.').next().unwrap_or(s))
+                };
+                // Type name AND arity: two types may share a name too
+                // (Definition's `Cell` and AnnotatedTable's `Cell`).
+                let same_type = |def_id: bhc_hir::DefId| {
+                    lower_ctx.defs.get(&def_id).is_none_or(|d| {
+                        d.type_con_name
+                            .is_none_or(|t| unqualified(t) == unqualified(con_info.type_con_name))
+                            && d.arity.is_none_or(|a| a == con_info.arity)
+                    })
+                };
+                // Also every qualified spelling bound to a constructor of THIS
+                // type: a qualified-only import binds no bare name.
+                let mut ids: Vec<bhc_hir::DefId> = lower_ctx
+                    .lookup_constructor(con_name)
+                    .filter(|d| same_type(*d))
+                    .into_iter()
+                    .collect();
+                for q in lower_ctx.qualified_spellings_of(con_name) {
+                    if let Some(d) = lower_ctx.lookup_constructor(q).filter(|d| same_type(*d)) {
+                        if !ids.contains(&d) {
+                            ids.push(d);
+                        }
+                    }
+                }
+                for def_id in ids {
                     result.insert(
                         def_id,
                         bhc_hir_to_core::ConstructorInfo {
@@ -3268,6 +3409,7 @@ impl Compiler {
         // registry path resolves the same imports the single-module path does.
         search_paths.extend(self.resolve_hackage_packages()?);
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         // Pre-seed module cache with already-compiled modules.
         // IMPORTANT: We must remap DefIds from the exporting module to fresh IDs
@@ -3450,18 +3592,29 @@ impl Compiler {
             search_paths,
         };
 
-        let hir = bhc_lower::lower_module_with_cache(&mut ctx, ast, &config, cache)?;
+        let hir = match bhc_lower::lower_module_with_cache(&mut ctx, ast, &config, cache) {
+            Ok(hir) => hir,
+            Err(e) => {
+                for warning in &ctx.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                return Err(e.into());
+            }
+        };
+
+        // Display lowering warnings first: a missing module explains the
+        // unbound-name errors that follow it.
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
+        }
 
         if ctx.has_errors() {
             let errors = ctx.take_errors();
             return Err(bhc_lower::LowerError::Multiple(errors).into());
         }
 
-        // Display lowering warnings
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
-        }
-
+        self.maybe_dump_hir(&hir);
+        self.check_missing_modules(&ctx)?;
         Ok((hir, ctx))
     }
 
@@ -4644,7 +4797,7 @@ impl Compiler {
                 Box::new(Self::interface_pat_to_ast(inner)),
                 span,
             ),
-            P::Int(n) => bhc_ast::Pat::Lit(bhc_ast::Lit::Int(*n), span),
+            P::Int(n) => bhc_ast::Pat::Lit(bhc_ast::Lit::Int(i128::from(*n)), span),
             P::Str(t) => bhc_ast::Pat::Lit(bhc_ast::Lit::String(t.clone()), span),
         }
     }
@@ -4735,6 +4888,10 @@ impl Compiler {
         module
             .optimize(&ctx, self.session.options.opt_level)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
+
+        if self.session.options.dump_ir.dump_llvm {
+            Self::print_dump("LLVM IR", module_name, &module.as_llvm_ir());
+        }
 
         match output_type {
             CodegenOutputType::Object => {
@@ -4868,7 +5025,8 @@ impl Compiler {
         source: impl Into<String>,
     ) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_source(module_name, source);
-        self.run_unit(unit)
+        let outcome = self.run_unit(unit, None)?;
+        Ok((outcome.value, outcome.display))
     }
 
     /// Run a file and return the result value and display string.
@@ -4878,12 +5036,35 @@ impl Compiler {
     /// Returns an error if compilation or execution fails.
     pub fn run_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
-        self.run_unit(unit)
+        let outcome = self.run_unit(unit, None)?;
+        Ok((outcome.value, outcome.display))
+    }
+
+    /// Run a file with the given program arguments (what `getArgs` returns).
+    ///
+    /// Unlike [`Self::run_file`], the outcome records whether the program
+    /// wrote IO output: the interpreter prints that output as it runs, so a
+    /// caller must not print [`RunOutcome::display`] again in that case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compilation or execution fails.
+    pub fn run_file_with_args(
+        &self,
+        path: impl AsRef<Utf8Path>,
+        args: &[String],
+    ) -> CompileResult<RunOutcome> {
+        let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
+        self.run_unit(unit, Some(args))
     }
 
     /// Compile and run a compilation unit.
-    #[instrument(skip(self, unit), fields(module = %unit.module_name))]
-    fn run_unit(&self, unit: CompilationUnit) -> CompileResult<(Value, String)> {
+    #[instrument(skip(self, unit, args), fields(module = %unit.module_name))]
+    fn run_unit(
+        &self,
+        unit: CompilationUnit,
+        args: Option<&[String]>,
+    ) -> CompileResult<RunOutcome> {
         info!(module = %unit.module_name, "compiling for execution");
 
         // Allocate a file ID for diagnostics
@@ -4916,12 +5097,12 @@ impl Compiler {
         // Phase 4: Execute
         self.callbacks
             .on_phase_start(CompilePhase::Execute, &unit.module_name);
-        let (result, display) = self.run_module_with_display(&core)?;
+        let outcome = self.run_module_outcome(&core, args)?;
         self.callbacks
             .on_phase_complete(CompilePhase::Execute, &unit.module_name);
 
         info!(module = %unit.module_name, "execution complete");
-        Ok((result, display))
+        Ok(outcome)
     }
 
     /// Execute a Core module by finding and evaluating the `main` function.
@@ -4943,10 +5124,23 @@ impl Compiler {
     ///
     /// Returns an error if `main` is not found or evaluation fails.
     pub fn run_module_with_display(&self, module: &CoreModule) -> CompileResult<(Value, String)> {
+        let outcome = self.run_module_outcome(module, None)?;
+        Ok((outcome.value, outcome.display))
+    }
+
+    /// Execute a Core module, optionally overriding the program arguments.
+    fn run_module_outcome(
+        &self,
+        module: &CoreModule,
+        args: Option<&[String]>,
+    ) -> CompileResult<RunOutcome> {
         debug!("executing module: {}", module.name);
 
         // Create evaluator with the session's profile
         let evaluator = Evaluator::with_profile(self.session.profile());
+        if let Some(args) = args {
+            evaluator.set_program_args(args.to_vec());
+        }
 
         // Build environment from module bindings
         let env = self.build_module_env(module, &evaluator)?;
@@ -4967,13 +5161,18 @@ impl Compiler {
 
         // If there was IO output, use that as the display string;
         // otherwise fall back to the value's display representation
-        let display = if io_output.is_empty() {
-            value_display
-        } else {
+        let produced_io = !io_output.is_empty();
+        let display = if produced_io {
             io_output
+        } else {
+            value_display
         };
 
-        Ok((forced, display))
+        Ok(RunOutcome {
+            value: forced,
+            display,
+            produced_io,
+        })
     }
 
     /// Build an environment from the module's top-level bindings.
@@ -5737,6 +5936,7 @@ impl Compiler {
         }
 
         push_transformer_library(&mut search_paths);
+        self.push_bundled_library(&mut search_paths)?;
 
         // Discover all modules recursively
         let all_paths = self.discover_modules(&entry_path, &search_paths)?;
@@ -5776,7 +5976,7 @@ impl Compiler {
 
         let file_id = FileId::new(0);
 
-        let builtin_modules = Self::builtin_module_set();
+        let builtin_modules = self.effective_builtin_modules();
 
         while let Some(path) = queue.pop_front() {
             let unit = CompilationUnit::from_path(path.clone())?;
@@ -5878,6 +6078,39 @@ impl Compiler {
         }
 
         Ok((result, cyclic_indices))
+    }
+
+    /// [`Self::builtin_module_set`] without the modules the bundled library
+    /// provides as source, when it is on.
+    fn effective_builtin_modules(&self) -> rustc_hash::FxHashSet<&'static str> {
+        let mut set = Self::builtin_module_set();
+        if self.bundled_library_active() {
+            for (module, _, _) in BUNDLED_LIBRARY {
+                set.remove(module);
+            }
+        }
+        set
+    }
+
+    /// Whether this compilation compiles the bundled library from source.
+    fn bundled_library_active(&self) -> bool {
+        self.session.options.bundled_library && !self.session.options.compile_only
+    }
+
+    /// Append the bundled library's directory to `search_paths` (after the
+    /// user's, so a user module of the same name still wins), writing the
+    /// embedded sources out on first use.
+    fn push_bundled_library(&self, search_paths: &mut Vec<Utf8PathBuf>) -> CompileResult<()> {
+        if !self.bundled_library_active() {
+            return Ok(());
+        }
+        let dir = bundled_library_dir().map_err(|e| {
+            CompileError::Other(format!("cannot write the bundled library sources: {e}"))
+        })?;
+        if !search_paths.contains(&dir) {
+            search_paths.push(dir);
+        }
+        Ok(())
     }
 
     /// Set of module names treated as builtins (stdlib / Prelude).
@@ -6376,7 +6609,7 @@ impl Compiler {
         }
 
         // Phase 2: Build name set for filtering and topological sort
-        let builtins = Self::builtin_module_set();
+        let builtins = self.effective_builtin_modules();
         let local_names: rustc_hash::FxHashSet<&str> = module_info
             .iter()
             .map(|(_, name, _)| name.as_str())
@@ -6807,6 +7040,17 @@ fn qualify_expr_mut(
     }
 }
 
+/// The result of interpreting a program with [`Compiler::run_file_with_args`].
+#[derive(Debug)]
+pub struct RunOutcome {
+    /// The value `main` evaluated to.
+    pub value: Value,
+    /// The IO output when the program wrote any, else the value's display form.
+    pub display: String,
+    /// Whether the program wrote IO output (already printed while running).
+    pub produced_io: bool,
+}
+
 /// Builder for configuring and creating a compiler.
 #[derive(Default)]
 pub struct CompilerBuilder {
@@ -6876,10 +7120,25 @@ impl CompilerBuilder {
         self
     }
 
+    /// Select which intermediate representations to print (`--dump-ir`).
+    #[must_use]
+    pub fn dump_ir(mut self, options: bhc_session::IrDumpOptions) -> Self {
+        self.options.dump_ir = options;
+        self
+    }
+
     /// Explicitly enable the tensor fusion pipeline (regardless of profile).
     #[must_use]
     pub fn tensor_fusion(mut self, enable: bool) -> Self {
         self.options.tensor_fusion = enable;
+        self
+    }
+
+    /// Compile the bundled library modules (`Data.Monoid`, `Data.Semigroup`)
+    /// with the program. Whole-program builds only.
+    #[must_use]
+    pub fn bundled_library(mut self, enable: bool) -> Self {
+        self.options.bundled_library = enable;
         self
     }
 
@@ -7101,6 +7360,59 @@ const TRANSFORMER_LIBRARY_MODULES: &[&str] = &[
     "Control.Monad.RWS",
     "Control.Monad.RWS.Strict",
 ];
+
+/// Library modules bundled into the compiler as Haskell source:
+/// `(module, relative path, source)`. Compiled with the program in
+/// whole-program builds instead of being builtins (#52).
+const BUNDLED_LIBRARY: &[(&str, &str, &str)] = &[
+    (
+        "Data.Semigroup.Internal",
+        "Data/Semigroup/Internal.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Semigroup/Internal.hs"),
+    ),
+    (
+        "Data.Monoid",
+        "Data/Monoid.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Monoid.hs"),
+    ),
+    (
+        "Data.Semigroup",
+        "Data/Semigroup.hs",
+        include_str!("../../../stdlib/bhc-base/hs/Data/Semigroup.hs"),
+    ),
+];
+
+/// A directory holding the bundled library sources, written on first use.
+///
+/// Named after a hash of the sources, so a compiler with different sources
+/// never reads stale files, and installed compilers need no source tree.
+fn bundled_library_dir() -> std::io::Result<Utf8PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for entry in BUNDLED_LIBRARY {
+        entry.hash(&mut hasher);
+    }
+    let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .map_err(|p| std::io::Error::other(format!("non-UTF-8 temp dir {}", p.display())))?;
+    let dir = temp.join(format!("bhc-lib-{:016x}", hasher.finish()));
+    for (_, rel, source) in BUNDLED_LIBRARY {
+        let path = dir.join(rel);
+        if std::fs::read_to_string(&path).is_ok_and(|s| s == *source) {
+            continue;
+        }
+        let parent = path.parent().unwrap_or(&dir);
+        std::fs::create_dir_all(parent)?;
+        // Write then rename, so a concurrent compile never reads a half file.
+        let tmp = parent.join(format!(
+            ".{}.{}",
+            std::process::id(),
+            path.file_name().unwrap_or("m")
+        ));
+        std::fs::write(&tmp, source)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(dir)
+}
 
 /// The directory holding the transformers library sources, when the closure
 /// IO model is on.
@@ -7472,6 +7784,69 @@ exposed-modules: Data.Text Data.Text.Internal
             CompileError::NoMainFunction => {}
             other => panic!("Expected NoMainFunction, got: {other:?}"),
         }
+    }
+
+    /// An import bhc cannot find anywhere is an error when nothing could
+    /// provide it, and a warning when import paths are configured (#45); a
+    /// module bhc provides is neither.
+    #[test]
+    fn test_unknown_import() {
+        let src =
+            "import qualified Foo.Bar.Baz\nimport qualified Data.Map as M\nmain = putStrLn \"x\"\n";
+        let unit = CompilationUnit::from_source("Main", src);
+
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        match compiler.lower(&ast) {
+            Err(CompileError::Other(msg)) => assert!(msg.contains("`Foo.Bar.Baz`"), "{msg}"),
+            other => panic!(
+                "expected a missing-module error, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let compiler = CompilerBuilder::new()
+            .import_path(Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap())
+            .build()
+            .unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let missing: Vec<&str> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::ModuleNotFound { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(missing, ["Foo.Bar.Baz"]);
+    }
+
+    /// The interpreter forces `fst`/`snd` components and evaluates floating
+    /// literals as Double (#17): this printed `expected Num, got <thunk>`,
+    /// then `1.3333334`.
+    #[test]
+    fn test_run_fst_snd_double() {
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let src = "main :: IO ()\n\
+                   main = let p = (4.0 / 3.0, 2.0 :: Double) in print (fst p * snd p / 2.0)\n";
+        let (_value, display) = compiler.run_source("Main", src).unwrap();
+        assert_eq!(display, "1.3333333333333333\n");
+    }
+
+    /// `run_file_with_args` reports that IO output was produced (#44), so
+    /// `bhc run` does not print it a second time.
+    #[test]
+    fn test_run_file_with_args_reports_io() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("Main.hs");
+        std::fs::write(&path, "main = putStrLn \"hi\"\n").unwrap();
+        let path = Utf8PathBuf::from_path_buf(path).unwrap();
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let outcome = compiler.run_file_with_args(&path, &[]).unwrap();
+        assert!(outcome.produced_io);
+        assert_eq!(outcome.display, "hi\n");
     }
 
     /// Test compiling to a standalone executable and running it

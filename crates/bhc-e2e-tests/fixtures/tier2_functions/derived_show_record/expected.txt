@@ -1,0 +1,4 @@
+P {name = "Ada", age = 36}
+Q {inner = P {name = "Bo", age = 1}, delta = -2}
+Just (P {name = "C", age = 3})
+[V 1,W {w = 2.5}]

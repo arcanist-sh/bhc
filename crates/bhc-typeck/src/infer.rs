@@ -254,6 +254,10 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 // For pattern bindings, check_pattern has already set the correct types.
                 // We need to look up each variable's actual type and generalize it,
                 // rather than using the whole binding type.
+                ctx.generalizing = group
+                    .iter()
+                    .flat_map(|&i| binding_types[i].0.iter().map(|(name, _)| *name))
+                    .collect();
                 for &i in group {
                     let binding = &bindings[i];
                     let var_ids = &binding_types[i].0;
@@ -340,6 +344,7 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         }
                     }
                 }
+                ctx.generalizing.clear();
             }
 
             // Infer body type
@@ -355,8 +360,19 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             // Infer scrutinee type
             let scrut_ty = infer_expr(ctx, scrutinee);
 
-            // Check if the scrutinee type involves a GADT
-            let is_gadt_case = is_gadt_scrutinee(ctx, &scrut_ty);
+            // Check if the scrutinee type involves a GADT. When its type is
+            // not known yet (a function's argument, before its signature is
+            // applied), an alternative's constructor still says so: give the
+            // scrutinee the GADT's general type `T t1 .. tn` first, so each
+            // branch refines only its own copy of the indices (#33).
+            let mut is_gadt_case = is_gadt_scrutinee(ctx, &scrut_ty);
+            if !is_gadt_case {
+                if let Some(general) = alts.iter().find_map(|alt| gadt_general_type(ctx, &alt.pat))
+                {
+                    ctx.unify(&scrut_ty, &general, *span);
+                    is_gadt_case = true;
+                }
+            }
 
             // All alternatives must produce the same type
             let result_ty = ctx.fresh_ty();
@@ -897,6 +913,43 @@ fn is_gadt_scrutinee(ctx: &TyCtxt, scrut_ty: &Ty) -> bool {
     } else {
         false
     }
+}
+
+/// The general type `T t1 .. tn` (fresh indices) of a GADT whose constructor
+/// `pat` matches, or `None` when `pat` is not a GADT constructor pattern.
+pub(crate) fn gadt_general_type(ctx: &mut TyCtxt, pat: &bhc_hir::Pat) -> Option<Ty> {
+    use bhc_hir::Pat;
+    if ctx.gadt_types.is_empty() {
+        return None;
+    }
+    let def_ref = match pat {
+        Pat::Con(def_ref, _, _) | Pat::RecordCon(def_ref, _, _) => def_ref,
+        Pat::As(_, _, inner, _) | Pat::Ann(inner, _, _) => return gadt_general_type(ctx, inner),
+        _ => return None,
+    };
+    let scheme = ctx
+        .env
+        .lookup_data_con_by_id(def_ref.def_id)?
+        .scheme
+        .clone();
+    let mut result = &scheme.ty;
+    while let Ty::Fun(_, r) = result {
+        result = r;
+    }
+    let mut n_args = 0;
+    let mut head = result;
+    while let Ty::App(f, _) = head {
+        n_args += 1;
+        head = f;
+    }
+    let Ty::Con(tc) = head else { return None };
+    if !ctx.gadt_types.contains(&tc.name) {
+        return None;
+    }
+    let head = head.clone();
+    Some((0..n_args).fold(head, |acc, _| {
+        Ty::App(Box::new(acc), Box::new(ctx.fresh_ty()))
+    }))
 }
 
 /// Extract the head type constructor from a type.

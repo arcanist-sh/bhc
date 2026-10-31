@@ -83,10 +83,10 @@ pub fn lower_pat_to_alt_with_fallthrough(
             })
         }
 
-        Pat::Lit(lit, _) => {
+        Pat::Lit(lit, span) => {
             // Literal pattern
             Ok(Alt {
-                con: AltCon::Lit(hir_lit_to_core(lit)),
+                con: AltCon::Lit(lit_pattern_to_core(ctx, lit, *span)),
                 binders: vec![],
                 rhs,
             })
@@ -98,11 +98,27 @@ pub fn lower_pat_to_alt_with_fallthrough(
             let mut binders = Vec::with_capacity(sub_pats.len());
             let mut inner_rhs = rhs;
 
+            // A field's declared type, when it is concrete, types the binder
+            // that a nested pattern then scrutinizes. Codegen reads the
+            // scrutinee's type to compare string literals as `Text` or as a
+            // list; erased (in a local function without a signature),
+            // pandoc's `fromMd (Str "[" : …)` compared a Text field against a
+            // list literal and never matched, so task lists were not found.
+            let field_tys: Vec<Ty> = ctx
+                .lookup_constructor_or_by_name(def_ref.def_id)
+                .map(|info| info.field_types.clone())
+                .unwrap_or_default();
+
             // Process sub-patterns from right to left
             // For complex sub-patterns, we need to wrap the RHS in nested cases
             for (i, sub_pat) in sub_pats.iter().enumerate().rev() {
                 let binder_name = format!("pat_{i}");
-                let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
+                let binder_ty = field_tys
+                    .get(i)
+                    .filter(|t| !crate::context::has_type_variables(t))
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                let binder = ctx.fresh_var(&binder_name, binder_ty, span);
 
                 match sub_pat {
                     Pat::Var(name, def_id, _) => {
@@ -477,6 +493,23 @@ enum PatHead {
     Lit(String),
     /// Wildcard/variable — matches anything.
     Wild,
+}
+
+/// The Core literal of a literal PATTERN: an integer literal typeck resolved
+/// at `Integer` is a bignum, matched by value; as a machine `Int` it was
+/// compared with the bignum's address and never matched (#57).
+fn lit_pattern_to_core(ctx: &LowerContext, lit: &hir::Lit, span: Span) -> Literal {
+    if let hir::Lit::Int(n) = lit {
+        match ctx.resolved_expr_ty_opt(span) {
+            Some(Ty::Con(c)) if c.name.as_str() == "Integer" => return Literal::Integer(*n),
+            // `f 0 = ..` at `Double`: the pattern is the float `0.0`.
+            Some(Ty::Con(c)) if matches!(c.name.as_str(), "Double" | "Float") => {
+                return Literal::Double(*n as f64)
+            }
+            _ => {}
+        }
+    }
+    hir_lit_to_core(lit)
 }
 
 /// Convert a HIR literal to a Core literal.
@@ -992,8 +1025,8 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                     .iter()
                     .find_map(|row| {
                         if col < row.pats.len() {
-                            if let Pat::Lit(lit, _) = &row.pats[col] {
-                                Some(hir_lit_to_core(lit))
+                            if let Pat::Lit(lit, span) = &row.pats[col] {
+                                Some(lit_pattern_to_core(ctx, lit, *span))
                             } else {
                                 None
                             }
@@ -2022,6 +2055,9 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         // List constructors
         "[]" => 0,
         ":" => 1,
+        // `NonEmpty`'s `x :| xs` is a cons cell: typeck models `NonEmpty a`
+        // as `[a]`, so its values come from (and go to) list code.
+        ":|" => 1,
 
         // Unit constructor
         "()" => 0,

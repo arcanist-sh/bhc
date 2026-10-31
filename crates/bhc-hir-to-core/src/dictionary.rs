@@ -448,6 +448,18 @@ impl ClassRegistry {
         self.instances.entry(info.class).or_default().push(info);
     }
 
+    /// Rewrite the method `DefId`s of every registered instance through `f`
+    /// (given the method name and its current `DefId`).
+    pub fn remap_instance_methods(&mut self, mut f: impl FnMut(Symbol, DefId) -> DefId) {
+        for instances in self.instances.values_mut() {
+            for inst in instances {
+                for (name, def_id) in inst.methods.iter_mut() {
+                    *def_id = f(*name, *def_id);
+                }
+            }
+        }
+    }
+
     /// Look up a class by name.
     #[must_use]
     pub fn lookup_class(&self, name: Symbol) -> Option<&ClassInfo> {

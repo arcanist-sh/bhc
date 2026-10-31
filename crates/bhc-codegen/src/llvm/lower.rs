@@ -99,6 +99,18 @@ enum FfiType {
     Void,
 }
 
+/// Whether a type mentions a type variable anywhere.
+fn has_type_vars(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::App(f, a) | Ty::Fun(f, a) => has_type_vars(f) || has_type_vars(a),
+        Ty::List(e) => has_type_vars(e),
+        Ty::Tuple(ts) => ts.iter().any(has_type_vars),
+        Ty::Forall(..) => true,
+        _ => false,
+    }
+}
+
 /// Metadata about a data constructor, used for code generation.
 #[derive(Clone, Debug)]
 pub struct ConstructorMeta {
@@ -434,6 +446,9 @@ pub struct Lowering<'ctx, 'm> {
     writer_t_functions: FxHashSet<String>,
     /// Map from type name → VarId of the $derived_show_TypeName function.
     derived_show_fns: FxHashMap<String, VarId>,
+    /// Type name -> its `$derived_showt_<T>` (a parameterized type's show,
+    /// taking the type arguments' descriptors first; #59).
+    derived_showt_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_read_TypeName function.
     derived_read_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_eq_TypeName function.
@@ -556,6 +571,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_showt_fns: FxHashMap::default(),
             derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
@@ -617,6 +633,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_showt_fns: FxHashMap::default(),
             derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
@@ -1902,6 +1919,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if self.builtin_info(sym.name.as_str()).is_none() {
                 self.external_functions.insert(sym.name, fn_val);
             }
+            // An imported type's derived `show`: `print`/`show` of a value of
+            // that type dispatch through `derived_show_fns`, which otherwise
+            // only learns this module's own instances, so an imported type
+            // printed its payload or its address. A local instance of the
+            // same type name is registered later and wins.
+            let showt = sym.name.as_str().strip_prefix("$derived_showt_");
+            let show = sym.name.as_str().strip_prefix("$derived_show_");
+            let (rest, table_is_showt, arity) = match (showt, show) {
+                (Some(rest), _) => (Some(rest), true, 2),
+                (None, Some(rest)) => (Some(rest), false, 1),
+                _ => (None, false, 0),
+            };
+            if let Some(rest) = rest {
+                let type_name = Self::strip_deriving_counter_suffix(rest);
+                let known = if table_is_showt {
+                    self.derived_showt_fns.contains_key(&type_name)
+                } else {
+                    self.derived_show_fns.contains_key(&type_name)
+                };
+                if sym.param_count == arity && !known {
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 5_000_000);
+                    let id = VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed));
+                    self.functions.insert(id, fn_val);
+                    if table_is_showt {
+                        self.derived_showt_fns.insert(type_name, id);
+                    } else {
+                        self.derived_show_fns.insert(type_name, id);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1926,6 +1974,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 },
             );
         }
+    }
+
+    /// Also register constructor `name` of `type_name` under the
+    /// type-qualified key `Type::Con#arity`, a copy of its metadata.
+    ///
+    /// Constructor references in Core are bare names, so two imported
+    /// constructors of one name (pandoc's `Block`/`Cell` and the HTML writer's
+    /// `qualified AnnotatedTable as Ann` `Table`/`Cell`) shared one entry: the
+    /// later import's arity and tag won, and building the other ended in a
+    /// `stub: Cell` call. hir-to-core spells an AMBIGUOUS constructor
+    /// reference `Type::Con#arity` (the arity too: both of those `Cell`s
+    /// belong to a type named `Cell`); this is the entry that spelling finds.
+    fn register_typed_constructor_alias(
+        &mut self,
+        name: &str,
+        type_name: &str,
+        meta: ConstructorMeta,
+    ) {
+        let type_name = type_name.rsplit('.').next().unwrap_or(type_name);
+        let arity = meta.arity;
+        self.constructor_metadata
+            .insert(format!("{type_name}::{name}#{arity}"), meta);
     }
 
     /// Check if a constructor is a newtype constructor (identity at runtime).
@@ -3214,6 +3284,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000164), set_elem_at);
+        // bhc_map_to_assoc_list(map_ptr) -> ptr / bhc_set_to_list(set_ptr) -> ptr
+        // (referenced from Map/Set show descriptors)
+        let map_to_assoc_list = self.module.llvm_module().add_function(
+            "bhc_map_to_assoc_list",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions
+            .insert(VarId::new(1000165), map_to_assoc_list);
+        let set_to_list = self.module.llvm_module().add_function(
+            "bhc_set_to_list",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000166), set_to_list);
 
         // ---- List RTS functions (VarId 1170-1175) ----
         // bhc_list_sort(list_ptr) -> ptr
@@ -3486,6 +3571,52 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000618), int_show);
+        // Ranges and parity at `Integer` (#51): bhc_enum_from_integer(ptr),
+        // bhc_enum_from_then_integer(ptr, ptr), bhc_enum_from_to_integer(ptr,
+        // ptr), bhc_enum_from_then_to_integer(ptr, ptr, ptr) -> list;
+        // bhc_integer_is_even(ptr) -> i64.
+        for (id, name, n_args) in [
+            (1000505, "bhc_enum_from_integer", 1),
+            (1000506, "bhc_enum_from_then_integer", 2),
+            (1000507, "bhc_enum_from_to_integer", 2),
+            (1000508, "bhc_enum_from_then_to_integer", 3),
+        ] {
+            let params = vec![ptr_type.into(); n_args];
+            let f = self.module.llvm_module().add_function(
+                name,
+                ptr_type.fn_type(&params, false),
+                None,
+            );
+            self.functions.insert(VarId::new(id), f);
+        }
+        let int_is_even = self.module.llvm_module().add_function(
+            "bhc_integer_is_even",
+            i64_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000509), int_is_even);
+        // bhc_integer_list_extreme(list, want_max) -> ptr
+        let int_list_extreme = self.module.llvm_module().add_function(
+            "bhc_integer_list_extreme",
+            ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000510), int_list_extreme);
+        // bhc_enum_from_step_int(from, step) -> lazy list (#58)
+        let enum_from_step_int = self.module.llvm_module().add_function(
+            "bhc_enum_from_step_int",
+            ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions
+            .insert(VarId::new(1000511), enum_from_step_int);
+        // bhc_show_with_targs(value, template, targs) -> C string (#59)
+        let show_with_targs = self.module.llvm_module().add_function(
+            "bhc_show_with_targs",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000512), show_with_targs);
 
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
@@ -5134,6 +5265,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .llvm_module()
             .add_function("bhc_reads_int", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000542), reads_int);
+        // bhc_read_double(ptr) -> i64 (the Double's bits), bhc_read_int_list
+        // and bhc_read_double_list(ptr) -> ptr (a cons list)
+        let read_double =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_double", ptr_to_i64, None);
+        self.functions.insert(VarId::new(1000543), read_double);
+        let read_int_list =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_int_list", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000544), read_int_list);
+        let read_double_list =
+            self.module
+                .llvm_module()
+                .add_function("bhc_read_double_list", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000545), read_double_list);
+        // bhc_enum_from_to_double(f64, f64) -> ptr (a list of Doubles)
+        let enum_double = self.module.llvm_module().add_function(
+            "bhc_enum_from_to_double",
+            i8_ptr_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000546), enum_double);
 
         // ---- Rational RTS functions (VarId 1000900-1000915) ----
         // bhc_rational_make(i64, i64) -> ptr
@@ -6406,6 +6561,195 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Read the tail of a cons cell and force it to WHNF.
+    ///
+    /// A cons tail may be a thunk (a corecursive producer such as
+    /// `nats n = n : nats (n + 1)`), so every list traversal must go through
+    /// here rather than `extract_adt_field(cell, 2, 1)`. Unlike an arbitrary
+    /// constructor field, a tail is always a heap pointer (a list), so
+    /// `bhc_force` is safe on it and a cheap passthrough when it is already
+    /// evaluated.
+    fn extract_list_tail(&self, cell_ptr: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        let tail = self.extract_adt_field(cell_ptr, 2, 1)?;
+        Ok(self.build_force(tail.into())?.into_pointer_value())
+    }
+
+    /// In a list transformer's loop, read the tails of the current cells and
+    /// split on laziness (#54).
+    ///
+    /// When any tail is an unevaluated thunk the input may be infinite, and
+    /// the eager loop must not walk on. The returned `lazy_block` allocates a
+    /// thunk that resumes `builtin` on the rest — `fn_args` (closures and other
+    /// non-list arguments, passed as is) followed by the raw tails — and
+    /// branches to `exit_block`; the caller ends its result with that thunk.
+    /// Otherwise the builder is left in `cont_block` with the forced tails.
+    /// A `gate` that is false keeps the loop eager: a builtin that may drop
+    /// elements (`filter`) passes "a result element exists", because its
+    /// value must be a cons or `[]`, never the bare resume thunk.
+    /// Fully evaluated input never takes the lazy path, so the loop stays an
+    /// eager loop there.
+    fn split_lazy_tails(
+        &mut self,
+        builtin: &str,
+        fn_args: &[PointerValue<'ctx>],
+        cells: &[PointerValue<'ctx>],
+        gate: Option<IntValue<'ctx>>,
+        exit_block: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> CodegenResult<LazyTails<'ctx>> {
+        let i64_type = self.type_mapper().i64_type();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let mut raw_tails = Vec::with_capacity(cells.len());
+        let mut any_thunk = None;
+        for cell in cells {
+            let raw = self.extract_adt_field(*cell, 2, 1)?;
+            let tag = self
+                .builder()
+                .build_load(i64_type, raw, "tail_tag")
+                .map_err(|e| CodegenError::Internal(format!("load tail tag: {:?}", e)))?
+                .into_int_value();
+            let is_thunk = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    i64_type.const_int(-1i64 as u64, true),
+                    "tail_is_thunk",
+                )
+                .map_err(|e| CodegenError::Internal(format!("compare tail tag: {:?}", e)))?;
+            any_thunk = Some(match any_thunk {
+                None => is_thunk,
+                Some(prev) => self
+                    .builder()
+                    .build_or(prev, is_thunk, "any_tail_thunk")
+                    .map_err(|e| CodegenError::Internal(format!("or: {:?}", e)))?,
+            });
+            raw_tails.push(raw);
+        }
+        let mut any_thunk =
+            any_thunk.ok_or_else(|| CodegenError::Internal("no list cells".to_string()))?;
+        if let Some(gate) = gate {
+            any_thunk = self
+                .builder()
+                .build_and(any_thunk, gate, "lazy_exit_gated")
+                .map_err(|e| CodegenError::Internal(format!("and: {:?}", e)))?;
+        }
+        let lazy_block = self.llvm_ctx.append_basic_block(current_fn, "lazy_rest");
+        let cont_block = self.llvm_ctx.append_basic_block(current_fn, "eager_rest");
+        self.builder()
+            .build_conditional_branch(any_thunk, lazy_block, cont_block)
+            .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+        let resume = self.get_or_create_lazy_resume_fn(builtin, fn_args.len(), cells.len())?;
+        self.builder().position_at_end(lazy_block);
+        let captured: Vec<(VarId, BasicValueEnum<'ctx>)> = fn_args
+            .iter()
+            .chain(raw_tails.iter())
+            .map(|p| (VarId::new(0), (*p).into()))
+            .collect();
+        let thunk = self.alloc_thunk(resume.as_global_value().as_pointer_value(), &captured)?;
+        self.builder()
+            .build_unconditional_branch(exit_block)
+            .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+        self.builder().position_at_end(cont_block);
+        let mut tails = Vec::with_capacity(raw_tails.len());
+        for raw in raw_tails {
+            tails.push(self.build_force(raw.into())?.into_pointer_value());
+        }
+        Ok(LazyTails {
+            tails,
+            cont_block,
+            lazy_block,
+            thunk,
+        })
+    }
+
+    /// The thunk evaluation function that resumes list builtin `builtin` on
+    /// the rest of its input (see `split_lazy_tails`): its environment holds
+    /// `n_fn_args` arguments passed as is, then `n_lists` list tails, which it
+    /// forces. One per builtin and module; the body is the builtin itself, so
+    /// it stops again at the next unevaluated tail.
+    fn get_or_create_lazy_resume_fn(
+        &mut self,
+        builtin: &str,
+        n_fn_args: usize,
+        n_lists: usize,
+    ) -> CodegenResult<FunctionValue<'ctx>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 2_000_000);
+
+        let fn_name = format!(
+            "bhc_lazy_resume_{}",
+            builtin.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        );
+        if let Some(existing) = self.module.llvm_module().get_function(&fn_name) {
+            return Ok(existing);
+        }
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let n = n_fn_args + n_lists;
+        let env_array_type = ptr_type.array_type(n as u32);
+        let func = self
+            .module
+            .add_internal_function(&fn_name, ptr_type.fn_type(&[ptr_type.into()], false));
+
+        let saved_block = self.builder().get_insert_block();
+        let old_env = std::mem::take(&mut self.env);
+        let entry = self.llvm_ctx.append_basic_block(func, "entry");
+        self.builder().position_at_end(entry);
+        let env_ptr = func
+            .get_first_param()
+            .ok_or_else(|| CodegenError::Internal("missing env param".to_string()))?
+            .into_pointer_value();
+        let span = bhc_span::Span::default();
+        let mut args = Vec::with_capacity(n);
+        for i in 0..n {
+            let slot = unsafe {
+                self.builder()
+                    .build_in_bounds_gep(
+                        env_array_type,
+                        env_ptr,
+                        &[i64_type.const_zero(), i64_type.const_int(i as u64, false)],
+                        "resume_env_slot",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("env gep: {:?}", e)))?
+            };
+            let mut val = self
+                .builder()
+                .build_load(ptr_type, slot, "resume_env_val")
+                .map_err(|e| CodegenError::Internal(format!("env load: {:?}", e)))?;
+            if i >= n_fn_args {
+                val = self.build_force(val)?;
+            }
+            let var = Var {
+                name: Symbol::intern("$lazy_resume_arg"),
+                id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                ty: Ty::Error,
+            };
+            self.env.insert(var.id, val);
+            args.push(Expr::Var(var, span));
+        }
+        let arg_refs: Vec<&Expr> = args.iter().collect();
+        let result = self.lower_builtin(builtin, &arg_refs)?;
+        let ret = match result {
+            Some(v) => self.value_to_ptr(v)?,
+            None => ptr_type.const_null(),
+        };
+        self.builder()
+            .build_return(Some(&ret))
+            .map_err(|e| CodegenError::Internal(format!("return: {:?}", e)))?;
+
+        self.env = old_env;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        Ok(func)
+    }
+
     /// Extract a field from an ADT value.
     fn extract_adt_field(
         &self,
@@ -6493,9 +6837,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // parsec's `try` (backtracking) must not be intercepted by the
             // exception `try`, pandoc's `count`/`many` likewise. A name bound
             // to a compiled definition (local or interface-imported) takes the
-            // ordinary call path.
+            // ordinary call path. So does a local binding (`where repeat n =
+            // …`, a lambda parameter): its value is in the environment.
             if self.functions.contains_key(&var.id)
                 || self.external_functions.contains_key(&var.name)
+                || self.env.contains_key(&var.id)
             {
                 return None;
             }
@@ -6656,6 +7002,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "putChar" => self.lower_builtin_put_char(args[0]),
             "print" => self.lower_builtin_print(args[0]),
             "getLine" => self.lower_builtin_get_line(),
+            "readLn" => self.lower_builtin_read_ln(),
 
             // Monadic operations — dispatch based on transformer stack.
             // Detects the operation's native layer and inserts lifts if needed.
@@ -7269,12 +7616,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "and" => self.lower_builtin_and(args[0]),
             "or" => self.lower_builtin_or(args[0]),
             "maximum" => self.lower_builtin_maximum(args[0]),
+            "$null_targs" => Ok(Some(self.type_mapper().ptr_type().const_null().into())),
+            "$show_field" => self.lower_show_field(args[0], args[1]),
             "minimum" => self.lower_builtin_minimum(args[0]),
             "elem" => self.lower_builtin_elem(args[0], args[1]),
             "notElem" => self.lower_builtin_not_elem(args[0], args[1]),
-            "iterate" => self.lower_builtin_iterate(args[0], args[1]),
-            "repeat" => self.lower_builtin_repeat(args[0]),
-            "cycle" => self.lower_builtin_cycle(args[0]),
+            "iterate" | "repeat" | "cycle" => self.lower_lazy_list_producer(name, &args),
             "takeWhile" => self.lower_builtin_take_while(args[0], args[1]),
             "dropWhile" => self.lower_builtin_drop_while(args[0], args[1]),
             "span" => self.lower_builtin_span(args[0], args[1]),
@@ -7586,6 +7933,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.List.append" => self.lower_builtin_append(args[0], args[1]),
             "Data.Maybe.append" => self.lower_builtin_maybe_append(args[0], args[1]),
             "Data.List.concat" => self.lower_builtin_concat(args[0]),
+            // The builtin `Semigroup ()` / `Monoid ()`: every method is `()`,
+            // and none forces its arguments (`_ <> _ = ()`).
+            "Data.Unit.append" | "Data.Unit.empty" | "Data.Unit.concat" => {
+                self.lower_constructor_application(0, 0, &[])
+            }
             "Data.Text.singleton" => {
                 self.lower_builtin_text_unary_int_to_ptr(args[0], 1000201, "text_singleton")
             }
@@ -8470,7 +8822,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Cons case: extract tail (field 1)
         self.builder().position_at_end(cons_block);
-        let tail_ptr = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_ptr)?;
         Ok(Some(tail_ptr.into()))
     }
 
@@ -8620,7 +8972,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ---- Cons-cell path: iterative loop ----
         self.builder().position_at_end(is_cons_block);
         let init_count = tm.i64_type().const_int(1, false); // already know first cell is cons
-        let first_tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let first_tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -8662,7 +9014,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "new_count",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to add: {:?}", e)))?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -8808,7 +9160,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Collect loop body: cons head onto accumulator (in reverse), advance
         self.builder().position_at_end(collect_body);
         let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         let new_acc = self.build_cons(head_ptr.into(), acc_phi.as_basic_value())?;
         let new_count = self
             .builder()
@@ -8860,7 +9212,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let new_rev_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -9165,7 +9517,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head and tail (actual_src is guaranteed non-empty since original list is non-empty)
         let cyc_head = self.extract_adt_field(actual_src, 2, 0)?;
-        let cyc_tail = self.extract_adt_field(actual_src, 2, 1)?;
+        let cyc_tail = self.extract_list_tail(actual_src)?;
 
         let cyc_cons = self.build_cons(cyc_head.into(), c_result.as_basic_value())?;
         let cyc_new_count = self
@@ -9288,7 +9640,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "new_count",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to sub: {:?}", e)))?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -9376,7 +9728,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: cons head onto accumulator, advance to tail
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(current_list)?;
         let new_acc = self.build_cons(head_ptr.into(), acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -9494,7 +9846,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let rev_new_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -9538,7 +9890,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Fold loop body: cons head of reversed list onto accumulator
         self.builder().position_at_end(fold_body);
         let fold_head = self.extract_adt_field(fold_current, 2, 0)?;
-        let fold_tail = self.extract_adt_field(fold_current, 2, 1)?;
+        let fold_tail = self.extract_list_tail(fold_current)?;
         let fold_new_acc = self.build_cons(fold_head.into(), fold_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(fold_header)
@@ -9569,6 +9921,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 return self.lower_enum_from_to_user_enum(from_expr, to_expr, &type_name);
             }
         }
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(1000507, &[from_expr, to_expr], "enum_from_to_integer");
+        }
 
         let from_val = self
             .lower_expr(from_expr)?
@@ -9576,6 +9931,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let to_val = self
             .lower_expr(to_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFromTo: to has no value".to_string()))?;
+
+        // `[1.0 .. 3.0]`: Double bounds count in Doubles (the RTS builds it),
+        // as does a range the type checker typed `[Double]` (stamped on this
+        // `enumFromTo`) whose bounds are integer literals.
+        let stamped_double = matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_double_type(a) || self.is_float_type(a));
+        if stamped_double || from_val.is_float_value() || to_val.is_float_value() {
+            let as_f64 = |this: &Self,
+                          v: BasicValueEnum<'ctx>|
+             -> CodegenResult<FloatValue<'ctx>> {
+                match v {
+                    BasicValueEnum::FloatValue(f) => Ok(f),
+                    other => {
+                        let i = this.to_int_value(other)?;
+                        this.builder()
+                            .build_signed_int_to_float(i, this.type_mapper().f64_type(), "enum_f64")
+                            .map_err(|e| CodegenError::Internal(format!("sitofp: {:?}", e)))
+                    }
+                }
+            };
+            let from_f = as_f64(self, from_val)?;
+            let to_f = as_f64(self, to_val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000546)).ok_or_else(|| {
+                CodegenError::Internal("bhc_enum_from_to_double not declared".to_string())
+            })?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[from_f.into(), to_f.into()], "enum_double")
+                .map_err(|e| CodegenError::Internal(format!("enumFromTo call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic());
+        }
 
         let from = self.to_int_value(from_val)?;
         let to = self.to_int_value(to_val)?;
@@ -10373,7 +10759,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "l2c_inc",
             )
             .map_err(|e| CodegenError::Internal(format!("l2c add: {:?}", e)))?;
-        let tail = self.extract_adt_field(len_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(len_node.as_basic_value().into_pointer_value())?;
         len_node.add_incoming(&[(&tail, len_body)]);
         len_count.add_incoming(&[(&next_count, len_body)]);
         self.builder()
@@ -10474,8 +10860,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "l2c_fnext",
             )
             .map_err(|e| CodegenError::Internal(format!("l2c add: {:?}", e)))?;
-        let ftail =
-            self.extract_adt_field(fill_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let ftail = self.extract_list_tail(fill_node.as_basic_value().into_pointer_value())?;
         fill_node.add_incoming(&[(&ftail, fill_body)]);
         fill_idx.add_incoming(&[(&next_fidx, fill_body)]);
         self.builder()
@@ -10561,7 +10946,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 0)?;
         let char_list = self.cstring_to_char_list(cstr_head)?;
         let new_acc = self.build_cons(char_list.into(), w_acc.as_basic_value())?;
-        let w_tail = self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let w_tail = self.extract_list_tail(w_node.as_basic_value().into_pointer_value())?;
 
         let walk_body_end = self.builder().get_insert_block().unwrap();
         w_node.add_incoming(&[(&w_tail, walk_body_end)]);
@@ -10633,7 +11018,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(rev_body);
         let head = self.extract_adt_field(r_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(r_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(r_node.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head.into(), r_acc.as_basic_value())?;
         let rev_body_end = self.builder().get_insert_block().unwrap();
         r_node.add_incoming(&[(&tail, rev_body_end)]);
@@ -10706,7 +11091,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 0)?;
         let cstr = self.char_list_to_cstring(char_list_head)?;
         let new_acc = self.build_cons(cstr.into(), w_acc.as_basic_value())?;
-        let w_tail = self.extract_adt_field(w_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let w_tail = self.extract_list_tail(w_node.as_basic_value().into_pointer_value())?;
         let walk_body_end = self.builder().get_insert_block().unwrap();
         w_node.add_incoming(&[(&w_tail, walk_body_end)]);
         w_acc.add_incoming(&[(&new_acc, walk_body_end)]);
@@ -10753,6 +11138,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(fold) = self.typed_numeric_fold("+", list_expr) {
+            return self.lower_expr(&fold);
+        }
         // Check for fusion opportunity: sum (map f xs)
         // This fuses into a single loop that applies f to each element and sums
         if let Some((map_fn, inner_list)) = Self::try_extract_map_app(list_expr) {
@@ -10823,8 +11211,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
             .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
             .builder()
@@ -10866,6 +11253,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(fold) = self.typed_numeric_fold("*", list_expr) {
+            return self.lower_expr(&fold);
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("product: list has no value".to_string()))?;
@@ -10934,8 +11324,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
             .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
             .builder()
@@ -11043,7 +11432,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11054,10 +11443,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: apply function to head, cons result onto accumulator
         self.builder().position_at_end(loop_body);
-        let head_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
 
         // Call the function closure: fn_ptr(fn_ptr, head)
         let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
@@ -11077,26 +11464,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Build new cons cell
         let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails("map", &[fn_ptr], &[cell], None, loop_exit)?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values (nil was built in entry block before branching)
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Exit: reverse the result (we built it in reverse order)
+        // Exit: reverse the result (we built it in reverse order) onto the
+        // end of the list: `[]`, or the thunk mapping the unevaluated rest.
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "map_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "map_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Call builtin reverse - but we need to do it inline to avoid recursion issues
         // For simplicity, we'll use an iterative reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        // Build nil2 before branching
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11118,7 +11517,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11130,8 +11529,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11139,9 +11537,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // nil2 was built in loop_exit before branching
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -11225,7 +11626,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11236,10 +11637,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: check predicate
         self.builder().position_at_end(loop_body);
-        let head_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
 
         // Call predicate: pred_ptr(pred_ptr, head)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -11265,7 +11664,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::NE,
                 pred_bool,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_true",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
@@ -11275,14 +11674,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Keep: cons head onto result
+        let loop_advance = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "filter_advance");
         self.builder().position_at_end(loop_keep);
         let new_cons = self.build_cons(head_ptr.into(), result_phi.as_basic_value())?;
         self.builder()
-            .build_unconditional_branch(loop_header)
+            .build_unconditional_branch(loop_advance)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Skip: just continue
         self.builder().position_at_end(loop_skip);
+        self.builder()
+            .build_unconditional_branch(loop_advance)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Advance to the tail, or stop at an unevaluated one once the result
+        // has an element.
+        self.builder().position_at_end(loop_advance);
+        let acc_next = self
+            .builder()
+            .build_phi(ptr_type, "filter_acc_next")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        acc_next.add_incoming(&[
+            (&new_cons, loop_keep),
+            (&result_phi.as_basic_value(), loop_skip),
+        ]);
+        let has_elem = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                acc_next.as_basic_value().into_pointer_value(),
+                nil,
+                "filter_has_elem",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        let lazy =
+            self.split_lazy_tails("filter", &[pred_ptr], &[cell], Some(has_elem), loop_exit)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -11290,25 +11718,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Add phi incoming values (nil was built in entry block)
         result_phi.add_incoming(&[
             (&nil, entry_block),
-            (&new_cons, loop_keep),
-            (&result_phi.as_basic_value(), loop_skip),
+            (&acc_next.as_basic_value(), lazy.cont_block),
         ]);
-        list_phi.add_incoming(&[
-            (&list_ptr, entry_block),
-            (&tail_ptr, loop_keep),
-            (&tail_ptr, loop_skip),
-        ]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Exit: reverse the result
+        // Exit: reverse the result onto `[]`, or onto the thunk filtering the
+        // unevaluated rest.
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "filter_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "filter_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&acc_next.as_basic_value(), lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        // Build nil2 before branching
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11330,7 +11764,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11342,8 +11776,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11351,9 +11784,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // nil2 was built in loop_exit before branching
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -11453,8 +11889,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f acc head - function takes (closure_ptr, acc, head) and returns new acc
         // The closure stores the function pointer which expects all args at once
@@ -11597,8 +12032,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -11654,8 +12088,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(fold_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f head acc - function takes (closure_ptr, elem, acc) and returns new acc
         // Note: for foldr, the function signature is (a -> b -> b), so elem comes first, then acc
@@ -11796,7 +12229,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag1,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty1",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11805,7 +12238,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag2,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty2",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11822,12 +12255,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
 
         // Call the function: f x y
         // For binary functions (most common case with zipWith), we call with both args at once.
@@ -11849,25 +12278,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Build cons cell
         let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails(
+            "zipWith",
+            &[func_ptr],
+            &[
+                list1_phi.as_basic_value().into_pointer_value(),
+                list2_phi.as_basic_value().into_pointer_value(),
+            ],
+            None,
+            loop_exit,
+        )?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&tail1_ptr, loop_body)]);
-        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&tail2_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
+        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&lazy.tails[1], lazy.cont_block)]);
 
         // Exit: reverse the result
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "zipwith_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "zipwith_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -11889,7 +12339,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -11901,17 +12351,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -11992,7 +12444,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag1,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty1",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12001,7 +12453,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag2,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "is_empty2",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12018,37 +12470,54 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1_ptr =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1_ptr =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
         let head2_ptr =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2_ptr =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
 
         // Build tuple (x, y) - represented as ADT with tag 0 and 2 fields
         let pair_ptr = self.build_pair(head1_ptr.into(), head2_ptr.into())?;
 
         // Build cons cell
         let new_cons = self.build_cons(pair_ptr.into(), result_phi.as_basic_value())?;
+        let lazy = self.split_lazy_tails(
+            "zip",
+            &[],
+            &[
+                list1_phi.as_basic_value().into_pointer_value(),
+                list2_phi.as_basic_value().into_pointer_value(),
+            ],
+            None,
+            loop_exit,
+        )?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
-        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&tail1_ptr, loop_body)]);
-        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&tail2_ptr, loop_body)]);
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, lazy.cont_block)]);
+        list1_phi.add_incoming(&[(&list1_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
+        list2_phi.add_incoming(&[(&list2_ptr, entry_block), (&lazy.tails[1], lazy.cont_block)]);
 
         // Exit: reverse the result
         self.builder().position_at_end(loop_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "zip_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, loop_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "zip_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), loop_header),
+            (&new_cons, lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -12070,7 +12539,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12082,17 +12551,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), loop_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), loop_exit),
+            (&rev_from.as_basic_value(), loop_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -12255,8 +12726,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head and tail
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if tail is empty (this element is the last)
         let tail_tag = self.extract_adt_tag(tail_ptr)?;
@@ -12372,8 +12842,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head and tail
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if tail is empty (this element is the last - don't include it)
         let tail_tag = self.extract_adt_tag(tail_ptr)?;
@@ -12444,8 +12913,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -12580,8 +13048,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: decrement index, continue with tail
         self.builder().position_at_end(loop_body);
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_idx = self
             .builder()
             .build_int_sub(
@@ -12711,7 +13178,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let inner_list_ptr =
             self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let outer_tail_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(outer_list_phi.as_basic_value().into_pointer_value())?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -12750,7 +13217,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let head_ptr =
             self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr =
-            self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(inner_list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head_ptr.into(), inner_result_phi.as_basic_value())?;
 
         self.builder()
@@ -12819,8 +13286,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -12932,7 +13398,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 outer_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "outer_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -12943,10 +13409,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Outer loop body: apply f to head, process result
         self.builder().position_at_end(outer_body);
-        let head_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let outer_tail_ptr =
-            self.extract_adt_field(outer_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let outer_cell = outer_list_phi.as_basic_value().into_pointer_value();
+        let head_ptr = self.extract_adt_field(outer_cell, 2, 0)?;
 
         // Call f on head
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -12989,7 +13453,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 inner_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "inner_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -13003,7 +13467,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let inner_head_ptr =
             self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let inner_tail_ptr =
-            self.extract_adt_field(inner_list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+            self.extract_list_tail(inner_list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(inner_head_ptr.into(), inner_result_phi.as_basic_value())?;
 
         self.builder()
@@ -13018,8 +13482,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         inner_list_phi
             .add_incoming(&[(&inner_list_ptr, outer_body), (&inner_tail_ptr, inner_body)]);
 
-        // Inner loop exit: continue with outer loop
+        // Inner loop exit: continue with the outer tail, or stop at an
+        // unevaluated one once the result has an element (`f` may return
+        // `[]`, as a comprehension's guard does).
         self.builder().position_at_end(inner_exit);
+        let has_elem = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                inner_result_phi.as_basic_value().into_pointer_value(),
+                nil,
+                "concatmap_has_elem",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        let lazy = self.split_lazy_tails(
+            "concatMap",
+            &[func_ptr],
+            &[outer_cell],
+            Some(has_elem),
+            outer_exit,
+        )?;
         self.builder()
             .build_unconditional_branch(outer_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -13027,19 +13509,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Outer phi incoming values
         result_phi.add_incoming(&[
             (&nil, entry_block),
-            (&inner_result_phi.as_basic_value(), inner_exit),
+            (&inner_result_phi.as_basic_value(), lazy.cont_block),
         ]);
-        outer_list_phi.add_incoming(&[(&list_ptr, entry_block), (&outer_tail_ptr, inner_exit)]);
+        outer_list_phi.add_incoming(&[(&list_ptr, entry_block), (&lazy.tails[0], lazy.cont_block)]);
 
-        // Outer exit: reverse the result
+        // Outer exit: reverse the result onto `[]`, or onto the thunk that
+        // continues over the unevaluated rest.
         self.builder().position_at_end(outer_exit);
+        let rev_start = self
+            .builder()
+            .build_phi(ptr_type, "concatmap_rev_start")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_start.add_incoming(&[(&nil, outer_header), (&lazy.thunk, lazy.lazy_block)]);
+        let rev_from = self
+            .builder()
+            .build_phi(ptr_type, "concatmap_rev_from")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        rev_from.add_incoming(&[
+            (&result_phi.as_basic_value(), outer_header),
+            (&inner_result_phi.as_basic_value(), lazy.lazy_block),
+        ]);
 
         // Inline reverse
         let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
         let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
         let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
-
-        let nil2 = self.build_nil()?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -13061,7 +13555,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 rev_tag,
-                tm.i64_type().const_zero(),
+                self.type_mapper().i64_type().const_zero(),
                 "rev_is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
@@ -13073,17 +13567,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
             .build_unconditional_branch(rev_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        rev_acc.add_incoming(&[(&nil2, outer_exit), (&rev_new_cons, rev_body)]);
+        rev_acc.add_incoming(&[
+            (&rev_start.as_basic_value(), outer_exit),
+            (&rev_new_cons, rev_body),
+        ]);
         rev_list.add_incoming(&[
-            (&result_phi.as_basic_value(), outer_exit),
+            (&rev_from.as_basic_value(), outer_exit),
             (&rev_tail, rev_body),
         ]);
 
@@ -14372,7 +14868,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a Maybe) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if head is Just (tag==1) or Nothing (tag==0)
         let maybe_tag = self.extract_adt_tag(head)?;
@@ -14514,7 +15010,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (an Either) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Check if head matches target tag
         let either_tag = self.extract_adt_tag(head)?;
@@ -14644,7 +15140,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head and tail, call f(head)
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f(head) → Maybe result
         let fn_ptr = self.extract_closure_fn_ptr(f_ptr)?;
@@ -14786,7 +15282,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (Either) and tail
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let either_tag = self.extract_adt_tag(head)?;
         let is_left = self
@@ -14922,8 +15418,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -16241,7 +16736,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to call print_char: {:?}", e)))?;
 
         // Extract tail at field 1
-        let tail_ptr = self.extract_adt_field(node_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(node_ptr)?;
         current_node.add_incoming(&[(&tail_ptr, loop_body)]);
 
         self.builder()
@@ -16319,14 +16814,91 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
         // An `Integer` argument per the type checker (recorded on this `print`
         // by hir-to-core): a field selector's result carries no type here.
+        // Likewise a `Char` or `Bool` argument: `chr 66` is typed `Int` in
+        // Core and printed `66`. Both are word-sized, so only the printing
+        // changes, never the value's representation.
         let expr_ty = match &self.current_builtin_ty {
-            Ty::Fun(a, _) if self.is_integer_type(a) => a.as_ref().clone(),
+            Ty::Fun(a, _)
+                if self.is_integer_type(a)
+                    || self.is_char_type(a)
+                    || self.is_bool_type(a)
+                    || self.is_double_type(a) =>
+            {
+                a.as_ref().clone()
+            }
             _ => expr_ty,
         };
+
+        // An `Ordering` or compound argument per the type checker prints
+        // through the descriptor show, whose descriptor `print_via_show_desc`
+        // builds from that same type: a class method returning `Ordering`
+        // printed an empty line, its result untyped in Core.
+        if let Ty::Fun(a, _) = &self.current_builtin_ty {
+            let a = a.as_ref().clone();
+            let is_ordering = matches!(&a, Ty::Con(c) if c.name.as_str() == "Ordering");
+            let compound = self.is_list_type(&a) && !self.is_string_type(&a)
+                || self.is_maybe_type(&a).is_some()
+                || self.is_either_type(&a).is_some()
+                || self.is_tuple_type(&a).is_some()
+                || Self::tuple_n_types(&a).is_some();
+            // A user type with a derived Show (`print (fmap f (Pair 1 2))`:
+            // the expression's syntax does not name the type).
+            let derived_adt = {
+                let mut head = &a;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                matches!(head, Ty::Con(c) if self.derived_show_fns.contains_key(c.name.as_str()))
+            };
+            if Self::is_ground_ty(&a) && (is_ordering || compound || derived_adt) {
+                let val = self
+                    .lower_expr(val_expr)?
+                    .ok_or_else(|| CodegenError::Internal("print: no value".to_string()))?;
+                let p = self.value_to_ptr(val)?;
+                self.print_via_show_desc(p, val_expr)?;
+                return Ok(Some(self.type_mapper().ptr_type().const_null().into()));
+            }
+        }
+
+        // A Char prints as its `show` (`'B'`), not as its code point:
+        // `putStrLn (show x)` with `show` typed at Char.
+        if self.is_char_type(&expr_ty) {
+            let span = bhc_span::Span::default();
+            let string_ty = Ty::List(Box::new(expr_ty.clone()));
+            let show_var = Var {
+                name: Symbol::intern("show"),
+                id: VarId::new(usize::MAX - 31),
+                ty: Ty::fun(expr_ty.clone(), string_ty),
+            };
+            let shown = Expr::App(
+                Box::new(Expr::Var(show_var, span)),
+                Box::new(val_expr.clone()),
+                span,
+            );
+            // Print in place, like the rest of `print` (under the closure IO
+            // model a lowered `putStrLn` call would only build the action).
+            return self.lower_builtin_put_str_ln(&shown);
+        }
 
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("print: value has no result".to_string()))?;
+        // A Double that arrives boxed (a fold's result is a word holding the
+        // bits) prints as a Double, not as those bits.
+        let val = match val {
+            BasicValueEnum::IntValue(_) | BasicValueEnum::PointerValue(_)
+                if self.is_double_type(&expr_ty) =>
+            {
+                let bits = match val {
+                    BasicValueEnum::PointerValue(p) => self.ptr_to_int(p)?,
+                    other => other.into_int_value(),
+                };
+                self.builder()
+                    .build_bit_cast(bits, self.type_mapper().f64_type(), "print_double_bits")
+                    .map_err(|e| CodegenError::Internal(format!("bitcast failed: {:?}", e)))?
+            }
+            other => other,
+        };
 
         match val {
             BasicValueEnum::IntValue(i) => {
@@ -16474,7 +17046,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || self.is_string_type(&expr_ty)
                     || self.is_maybe_type(&expr_ty).is_some()
                     || self.is_either_type(&expr_ty).is_some()
-                    || self.is_tuple_type(&expr_ty).is_some();
+                    || self.is_tuple_type(&expr_ty).is_some()
+                    || Self::map_or_set_type_args(&expr_ty).is_some()
+                    || matches!(&self.current_builtin_ty,
+                        Ty::Fun(a, _) if Self::map_or_set_type_args(a).is_some());
                 if compound_show {
                     self.print_via_show_desc(p, val_expr)?;
                 } else if let Some(adt_type) = self
@@ -16491,7 +17066,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // value whose type survived codegen (a `let`-bound var, a
                     // function result), from the expression's type — otherwise
                     // the boxed-int branch below would print its pointer.
-                    self.print_adt_via_derived_show(p, &adt_type)?;
+                    if matches!(&expr_ty, Ty::App(..))
+                        && self.derived_showt_fns.contains_key(&adt_type)
+                    {
+                        self.print_via_show_desc(p, val_expr)?;
+                    } else {
+                        self.print_adt_via_derived_show(p, &adt_type)?;
+                    }
                 } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
                     // Bool value - use extract_bool_tag which handles both Bool ADT
                     // (heap-allocated from any/all/even/odd/char predicates) and
@@ -16590,7 +17171,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         p: inkwell::values::PointerValue<'ctx>,
         val_expr: &Expr,
     ) -> CodegenResult<()> {
-        let desc = self.build_show_descriptor(val_expr);
+        // The type checker's ground argument type, when hir-to-core stamped one
+        // on this `print`, describes values the expression's syntax cannot:
+        // `print (map (\x -> (x, True)) xs)` showed the Bools as addresses.
+        let stamped = match &self.current_builtin_ty {
+            Ty::Fun(a, _) if Self::is_ground_ty(a) => Some(a.as_ref().clone()),
+            _ => None,
+        };
+        let desc = match stamped.and_then(|t| self.descriptor_from_ty(&t)) {
+            Some(d) => d,
+            None => self.build_show_descriptor(val_expr),
+        };
         let show_fn = *self
             .functions
             .get(&VarId::new(1000099))
@@ -16862,6 +17453,213 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
         self.is_maybe_type(result_of(&self.current_builtin_ty))
             .is_some()
+    }
+
+    fn functor_result_is_either(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Fun(_, r) = t {
+            t = r;
+        }
+        self.is_either_type(t).is_some()
+    }
+
+    /// Whether `expr` is an `Either` value: by its type, or as a `Left`/
+    /// `Right` constructor application.
+    fn container_looks_like_either(&self, expr: &Expr) -> bool {
+        if self.is_either_type(&expr.ty()).is_some() {
+            return true;
+        }
+        let mut head = expr;
+        while let Expr::App(f, _, _) = head {
+            head = f.as_ref();
+        }
+        matches!(head, Expr::Var(v, _) if matches!(v.name.as_str(), "Left" | "Right"))
+    }
+
+    /// `fmap f x` at `Either e`: `case x of Left e -> Left e; Right v -> Right (f v)`.
+    fn lower_fmap_either(
+        &mut self,
+        func_expr: &Expr,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let span = bhc_span::Span::default();
+        let either_con = bhc_types::TyCon::new(
+            Symbol::intern("Either"),
+            bhc_types::Kind::Arrow(
+                Box::new(bhc_types::Kind::Star),
+                Box::new(bhc_types::Kind::Arrow(
+                    Box::new(bhc_types::Kind::Star),
+                    Box::new(bhc_types::Kind::Star),
+                )),
+            ),
+        );
+        let con = |name: &str, tag: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: either_con.clone(),
+            tag,
+            arity: 1,
+        };
+        let con_var = |name: &str, id: usize| {
+            Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(id),
+                    ty: Ty::Error,
+                },
+                span,
+            )
+        };
+        let left_payload = Var {
+            name: Symbol::intern("$either_left"),
+            id: VarId::new(usize::MAX - 40),
+            ty: Ty::Error,
+        };
+        let right_payload = Var {
+            name: Symbol::intern("$either_right"),
+            id: VarId::new(usize::MAX - 41),
+            ty: Ty::Error,
+        };
+        // The function as a closure VALUE, applied inside the case: applying
+        // the expression itself there would make `(+)` a one-argument
+        // builtin call, which is a stub.
+        let func_val = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("fmap: function has no value".to_string()))?;
+        let func_var = Var {
+            name: Symbol::intern("$either_fn"),
+            id: VarId::new(usize::MAX - 44),
+            ty: Ty::Error,
+        };
+        let saved_fn = self.env.insert(func_var.id, func_val);
+        let func_expr = &Expr::Var(func_var.clone(), span);
+        let case = Expr::Case(
+            Box::new(action_expr.clone()),
+            vec![
+                Alt {
+                    con: AltCon::DataCon(con("Left", 0)),
+                    binders: vec![left_payload.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_var("Left", usize::MAX - 42)),
+                        Box::new(Expr::Var(left_payload, span)),
+                        span,
+                    ),
+                },
+                Alt {
+                    con: AltCon::DataCon(con("Right", 1)),
+                    binders: vec![right_payload.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_var("Right", usize::MAX - 43)),
+                        Box::new(Expr::App(
+                            Box::new(func_expr.clone()),
+                            Box::new(Expr::Var(right_payload, span)),
+                            span,
+                        )),
+                        span,
+                    ),
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        let result = self.lower_expr(&case);
+        match saved_fn {
+            Some(v) => {
+                self.env.insert(func_var.id, v);
+            }
+            None => {
+                self.env.remove(&func_var.id);
+            }
+        }
+        result
+    }
+
+    /// `f <*> x` at `Maybe` (`either` false) or `Either e` (`either` true):
+    /// `case f of fail -> fail; ok g -> case x of fail -> fail; ok v -> ok (g v)`,
+    /// where a `Left` carries its payload through.
+    fn lower_ap_wrapped(
+        &mut self,
+        func_expr: &Expr,
+        val_expr: &Expr,
+        either: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let span = bhc_span::Span::default();
+        let (ty_name, fail_name, ok_name, fail_arity) = if either {
+            ("Either", "Left", "Right", 1)
+        } else {
+            ("Maybe", "Nothing", "Just", 0)
+        };
+        let ty_con = bhc_types::TyCon::new(Symbol::intern(ty_name), bhc_types::Kind::Star);
+        let data_con = |name: &str, tag: u32, arity: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: ty_con.clone(),
+            tag,
+            arity,
+        };
+        let var = |name: &str, id: usize| Var {
+            name: Symbol::intern(name),
+            id: VarId::new(id),
+            ty: Ty::Error,
+        };
+        let con_expr = |name: &str, id: usize| Expr::Var(var(name, id), span);
+        // The failing alternative rebuilds `Nothing` / `Left e`.
+        let fail_alt = |payload_id: usize, con_id: usize| {
+            if fail_arity == 0 {
+                Alt {
+                    con: AltCon::DataCon(data_con(fail_name, 0, 0)),
+                    binders: vec![],
+                    rhs: con_expr(fail_name, con_id),
+                }
+            } else {
+                let e = var("$ap_fail", payload_id);
+                Alt {
+                    con: AltCon::DataCon(data_con(fail_name, 0, 1)),
+                    binders: vec![e.clone()],
+                    rhs: Expr::App(
+                        Box::new(con_expr(fail_name, con_id)),
+                        Box::new(Expr::Var(e, span)),
+                        span,
+                    ),
+                }
+            }
+        };
+        let g = var("$ap_fn", usize::MAX - 50);
+        let v = var("$ap_val", usize::MAX - 51);
+        let applied = Expr::App(
+            Box::new(con_expr(ok_name, usize::MAX - 52)),
+            Box::new(Expr::App(
+                Box::new(Expr::Var(g.clone(), span)),
+                Box::new(Expr::Var(v.clone(), span)),
+                span,
+            )),
+            span,
+        );
+        let inner = Expr::Case(
+            Box::new(val_expr.clone()),
+            vec![
+                fail_alt(usize::MAX - 53, usize::MAX - 54),
+                Alt {
+                    con: AltCon::DataCon(data_con(ok_name, 1, 1)),
+                    binders: vec![v],
+                    rhs: applied,
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        let outer = Expr::Case(
+            Box::new(func_expr.clone()),
+            vec![
+                fail_alt(usize::MAX - 55, usize::MAX - 56),
+                Alt {
+                    con: AltCon::DataCon(data_con(ok_name, 1, 1)),
+                    binders: vec![g],
+                    rhs: inner,
+                },
+            ],
+            Ty::Error,
+            span,
+        );
+        self.lower_expr(&outer)
     }
 
     fn functor_result_is_list(&self) -> bool {
@@ -17547,6 +18345,72 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Whether a type is fully concrete (no type variables or unknowns).
+    fn is_ground_ty(t: &Ty) -> bool {
+        match t {
+            Ty::Var(_) | Ty::Error | Ty::Forall(..) => false,
+            Ty::Con(_) => true,
+            Ty::App(f, a) | Ty::Fun(f, a) => Self::is_ground_ty(f) && Self::is_ground_ty(a),
+            Ty::List(a) => Self::is_ground_ty(a),
+            Ty::Tuple(ts) => ts.iter().all(Self::is_ground_ty),
+            _ => false,
+        }
+    }
+
+    /// The component types of a tuple type of 3 or more components.
+    fn tuple_n_types(ty: &Ty) -> Option<Vec<Ty>> {
+        match ty {
+            Ty::Tuple(elems) if elems.len() >= 3 => Some(elems.clone()),
+            Ty::Forall(_, body) => Self::tuple_n_types(body),
+            Ty::App(..) => {
+                let mut args = Vec::new();
+                let mut head = ty;
+                while let Ty::App(f, a) = head {
+                    args.push(a.as_ref().clone());
+                    head = f.as_ref();
+                }
+                args.reverse();
+                match head {
+                    Ty::Con(c)
+                        if Self::tuple_con_arity(c.name.as_str()) == Some(args.len())
+                            && args.len() >= 3 =>
+                    {
+                        Some(args)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The arity of a tuple constructor name (`(,,)` is 3), if it is one.
+    fn tuple_con_arity(name: &str) -> Option<usize> {
+        let commas = name.strip_prefix('(')?.strip_suffix(')')?;
+        (!commas.is_empty() && commas.chars().all(|c| c == ',')).then(|| commas.len() + 1)
+    }
+
+    /// The components of a saturated tuple constructor application of 3 or
+    /// more components (`(,,) a b c`).
+    fn tuple_n_con_args(expr: &Expr) -> Option<Vec<Expr>> {
+        let mut args = Vec::new();
+        let mut head = expr;
+        while let Expr::App(f, a, _) = head {
+            args.push(a.as_ref().clone());
+            head = f.as_ref();
+        }
+        args.reverse();
+        match head {
+            Expr::Var(v, _)
+                if args.len() >= 3
+                    && Self::tuple_con_arity(v.name.as_str()) == Some(args.len()) =>
+            {
+                Some(args)
+            }
+            _ => None,
+        }
+    }
+
     /// Check if a type is unit ().
     fn is_unit_type(&self, ty: &Ty) -> bool {
         match ty {
@@ -17730,6 +18594,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         }
                         if name == "read" && !self.derived_read_fns.is_empty() {
                             return false; // read returns ADT, not Int
+                        }
+                        if name == "read" {
+                            // `read` at a resolved non-Int type (Double, [Int]).
+                            let mut r = &var.ty;
+                            while let Ty::Fun(_, next) = r {
+                                r = next;
+                            }
+                            if matches!(r, Ty::Con(_) | Ty::List(_) | Ty::App(..))
+                                && !matches!(r, Ty::Con(c) if c.name.as_str() == "Int")
+                            {
+                                return false;
+                            }
                         }
                         matches!(
                             name,
@@ -18057,7 +18933,62 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("getLine: returned void".to_string()))?;
-        Ok(Some(result))
+        // The RTS returns a C string; a Haskell String is a [Char] list.
+        let char_list = self.cstring_to_char_list(result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
+    }
+
+    /// Lower `readLn`: read a line, then `read` it at the action's result
+    /// type (from `current_builtin_ty`, `IO a`), or as an `Int` when that is
+    /// unresolved. Native code had no `readLn` at all.
+    fn lower_builtin_read_ln(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result_ty = match &self.current_builtin_ty {
+            Ty::App(io, a)
+                if matches!(io.as_ref(), Ty::Con(c) if c.name.as_str() == "IO")
+                    && Self::is_ground_ty(a) =>
+            {
+                a.as_ref().clone()
+            }
+            _ => Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Int"),
+                bhc_types::Kind::Star,
+            )),
+        };
+        let line = self
+            .lower_builtin_get_line()?
+            .ok_or_else(|| CodegenError::Internal("readLn: no line".to_string()))?;
+        let span = bhc_span::Span::default();
+        let char_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Char"),
+            bhc_types::Kind::Star,
+        ));
+        let string_ty = Ty::List(Box::new(char_ty));
+        let line_var = Var {
+            name: Symbol::intern("$readln_line"),
+            id: VarId::new(usize::MAX - 33),
+            ty: string_ty.clone(),
+        };
+        let read_var = Var {
+            name: Symbol::intern("read"),
+            id: VarId::new(usize::MAX - 34),
+            ty: Ty::fun(string_ty, result_ty),
+        };
+        let call = Expr::App(
+            Box::new(Expr::Var(read_var, span)),
+            Box::new(Expr::Var(line_var.clone(), span)),
+            span,
+        );
+        let saved = self.env.insert(line_var.id, line);
+        let result = self.lower_expr(&call);
+        match saved {
+            Some(v) => {
+                self.env.insert(line_var.id, v);
+            }
+            None => {
+                self.env.remove(&line_var.id);
+            }
+        }
+        result
     }
 
     /// Lower `>>=` (bind) for monads.
@@ -18330,7 +19261,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Reverse loop body
         self.builder().position_at_end(rev_body);
         let rev_head = self.extract_adt_field(rev_current, 2, 0)?;
-        let rev_tail = self.extract_adt_field(rev_current, 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_current)?;
         let rev_new_acc = self.build_cons(rev_head.into(), rev_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -18378,7 +19309,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Fold loop body
         self.builder().position_at_end(fold_body);
         let fold_head = self.extract_adt_field(fold_current, 2, 0)?;
-        let fold_tail = self.extract_adt_field(fold_current, 2, 1)?;
+        let fold_tail = self.extract_list_tail(fold_current)?;
         let fold_new_acc = self.build_cons(fold_head.into(), fold_acc_phi.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(fold_header)
@@ -25372,6 +26303,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000907, "negate");
         }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000608, &[expr], "integer_negate");
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
@@ -25389,6 +26324,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Rational dispatch
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000908, "abs");
+        }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000609, &[expr], "integer_abs");
         }
         // Double dispatch: a `Double` value is a boxed f64, so integer abs on its
         // bits would corrupt it (clearing the sign of `-2.5`'s bit pattern gives
@@ -25440,6 +26379,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Rational dispatch
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000909, "signum");
+        }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000610, &[expr], "integer_signum");
         }
         let val = self
             .lower_expr(expr)?
@@ -25647,6 +26590,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `even n` — returns Bool ADT (tag 0=False, 1=True).
     fn lower_builtin_even(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(expr) {
+            return self.lower_integer_parity(expr, true);
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("even: no value".to_string()))?;
@@ -25675,6 +26621,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `odd n` — returns Bool ADT (tag 0=False, 1=True).
     fn lower_builtin_odd(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(expr) {
+            return self.lower_integer_parity(expr, false);
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("odd: no value".to_string()))?;
@@ -25699,6 +26648,60 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_z_extend(is_odd, i64_type, "odd_tag")
             .map_err(|e| CodegenError::Internal(format!("odd: extend failed: {:?}", e)))?;
         self.allocate_bool_adt(tag, "odd")
+    }
+
+    /// Whether this builtin occurrence works at `Integer` (boxed BigInts):
+    /// its stamped argument type says so, or its first argument's type does.
+    fn builtin_at_integer(&self, first_arg: &Expr) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_integer_type(a))
+            || self.is_integer_type(&first_arg.ty())
+    }
+
+    /// Call an Integer RTS function on the lowered (pointer) arguments.
+    fn call_integer_rts(
+        &mut self,
+        var_id: usize,
+        args: &[&Expr],
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let mut call_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let val = self
+                .lower_expr(arg)?
+                .ok_or_else(|| CodegenError::Internal(format!("{label}: no value")))?;
+            call_args.push(self.value_to_ptr(val)?.into());
+        }
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(var_id))
+            .ok_or_else(|| CodegenError::Internal(format!("{label}: not declared")))?;
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &call_args, label)
+            .map_err(|e| CodegenError::Internal(format!("{label} call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
+    }
+
+    /// `even`/`odd` at `Integer`: ask the BigInt, not its address.
+    fn lower_integer_parity(
+        &mut self,
+        expr: &Expr,
+        want_even: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let is_even = self
+            .call_integer_rts(1000509, &[expr], "integer_is_even")?
+            .ok_or_else(|| CodegenError::Internal("integer_is_even: void".to_string()))?
+            .into_int_value();
+        let tag = if want_even {
+            is_even
+        } else {
+            let one = self.type_mapper().i64_type().const_int(1, false);
+            self.builder()
+                .build_xor(is_even, one, "is_odd")
+                .map_err(|e| CodegenError::Internal(format!("odd: xor: {:?}", e)))?
+        };
+        self.allocate_bool_adt(tag, if want_even { "even" } else { "odd" })
     }
 
     /// Allocate a Bool ADT with dynamic tag (0=False, 1=True).
@@ -27269,10 +28272,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let name_val = self
             .lower_expr(name_expr)?
             .ok_or_else(|| CodegenError::Internal("getEnv: no name".to_string()))?;
-        let name_ptr = match name_val {
+        let name_list = match name_val {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("getEnv expects string".to_string())),
         };
+        // The RTS takes and returns C strings; Haskell Strings are [Char] lists.
+        let name_ptr = self.char_list_to_cstring(name_list)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000068))
@@ -27284,7 +28289,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("getEnv: returned void".to_string()))?;
-        Ok(Some(result))
+        let char_list = self.cstring_to_char_list(result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
     }
 
     /// Lower `lookupEnv` (simplified: wraps getEnv).
@@ -27292,7 +28298,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         name_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_get_env(name_expr)
+        let name_list = self
+            .lower_expr(name_expr)?
+            .ok_or_else(|| CodegenError::Internal("lookupEnv: no name".to_string()))?
+            .into_pointer_value();
+        let name_ptr = self.char_list_to_cstring(name_list)?;
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(1000314))
+            .ok_or_else(|| CodegenError::Internal("bhc_lookupEnv not declared".to_string()))?;
+        let value = self
+            .builder()
+            .build_call(rts_fn, &[name_ptr.into()], "lookup_env")
+            .map_err(|e| CodegenError::Internal(format!("lookupEnv call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("lookupEnv: returned void".to_string()))?
+            .into_pointer_value();
+
+        // A null C string (unset variable) is Nothing; anything else is Just.
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let unset_block = self.llvm_ctx.append_basic_block(current_fn, "env_unset");
+        let set_block = self.llvm_ctx.append_basic_block(current_fn, "env_set");
+        let merge_block = self.llvm_ctx.append_basic_block(current_fn, "env_merge");
+        let is_null = self
+            .builder()
+            .build_is_null(value, "env_is_null")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_null, unset_block, set_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(unset_block);
+        let nothing = self.alloc_adt(0, 0)?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let unset_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        self.builder().position_at_end(set_block);
+        let chars = self.cstring_to_char_list(value)?;
+        let just = self.alloc_adt(1, 1)?;
+        self.store_adt_field(just, 1, 0, chars.into())?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let set_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        self.builder().position_at_end(merge_block);
+        let phi = self
+            .builder()
+            .build_phi(self.type_mapper().ptr_type(), "lookup_env_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        phi.add_incoming(&[(&nothing, unset_end), (&just, set_end)]);
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Continue building in a FRESH block after a terminator.
@@ -27799,6 +28868,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let Some(name) = head_name(ty) else {
             return Ok(None);
         };
+        // A parameterized type at known arguments: through its descriptor,
+        // so its parameter-typed fields show at their types (#59).
+        if matches!(ty, Ty::App(..)) && self.derived_showt_fns.contains_key(&name) {
+            let stand_in = Self::ty_only_expr(ty.clone());
+            if let Some(desc) = self.try_build_adt_show_desc(&stand_in) {
+                let val = self
+                    .lower_expr(expr)?
+                    .ok_or_else(|| CodegenError::Internal("show adt: no value".to_string()))?;
+                let val_ptr = self.value_to_ptr(val)?;
+                let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_show_with_desc not declared".to_string())
+                })?;
+                let cstr = self
+                    .builder()
+                    .build_call(show_fn, &[val_ptr.into(), desc.into()], "show_adt_desc")
+                    .map_err(|e| CodegenError::Internal(format!("show_with_desc: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("show_with_desc: void".to_string()))?;
+                let list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+                return Ok(Some(list.into()));
+            }
+        }
         let Some(show_var_id) = self.derived_show_fns.get(&name).copied() else {
             return Ok(None);
         };
@@ -27897,7 +28989,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::EitherOf,
                 );
             }
-            if self.is_tuple_type(&ty).is_some() {
+            if self.is_tuple_type(&ty).is_some() || Self::tuple_n_types(&ty).is_some() {
                 return self.lower_builtin_show_typed(
                     expr,
                     1000096,
@@ -27907,6 +28999,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             if self.is_unit_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000097, "show_unit", ShowCoerce::Unit);
+            }
+            // `fromList [...]`: the value is an opaque containers handle, so
+            // only a descriptor carrying its to-list function can show it.
+            if let Some(desc) = self.try_build_container_show_desc(&ty) {
+                let val = self.lower_expr(expr)?.ok_or_else(|| {
+                    CodegenError::Internal("show container: no value".to_string())
+                })?;
+                let ptr = self.value_to_ptr(val)?;
+                let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_show_with_desc not declared".to_string())
+                })?;
+                let cstr = self
+                    .builder()
+                    .build_call(show_fn, &[ptr.into(), desc.into()], "show_container")
+                    .map_err(|e| CodegenError::Internal(format!("show_with_desc call: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("show_with_desc: returned void".to_string())
+                    })?;
+                let char_list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
             }
             if self.is_rational_type(&ty) {
                 // Call bhc_rational_show (VarId 1000915) which returns a C string,
@@ -28018,6 +29132,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Infer the show coercion from the expression structure when type info is unavailable.
     fn infer_show_from_expr(&self, expr: &Expr) -> Option<(ShowCoerce, usize, &'static str)> {
+        // A tuple of 3 or more components shows through the descriptor path
+        // that 2-tuples use (`build_show_descriptor` makes it an N-tuple).
+        if Self::tuple_n_con_args(expr).is_some() || Self::tuple_n_types(&expr.ty()).is_some() {
+            return Some((ShowCoerce::Tuple2Of, 1000096, "show_tuple2"));
+        }
         match expr {
             // String literal
             Expr::Lit(Literal::String(_), _, _) => {
@@ -28359,6 +29478,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .add_global(struct_type, None, &name);
         global.set_initializer(&struct_val);
         global.set_constant(true);
+        // Module-local: every module numbers its descriptors from 0.
+        global.set_linkage(inkwell::module::Linkage::Private);
         global.as_pointer_value()
     }
 
@@ -28369,6 +29490,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Build a recursive show descriptor from a ShowCoerce + expression.
     fn build_show_descriptor(&mut self, expr: &Expr) -> PointerValue<'ctx> {
+        // `$targ<i>`: type parameter `i` of the enclosing derived show (#59).
+        if let Ty::Con(c) = expr.ty() {
+            if let Some(Ok(i)) = c.name.as_str().strip_prefix("$targ").map(str::parse::<u64>) {
+                let index = self
+                    .type_mapper()
+                    .i64_type()
+                    .const_int(i, false)
+                    .const_to_pointer(self.type_mapper().ptr_type());
+                return self.create_show_desc_global(18, Some(index), None);
+            }
+        }
+        if let Some(desc) = self.try_build_container_show_desc(&expr.ty()) {
+            return desc;
+        }
         // First determine the coerce type
         let coerce = if let Some((c, _, _)) = self.infer_show_from_expr(expr) {
             c
@@ -28394,10 +29529,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::MaybeOf
                 } else if self.is_either_type(&ty).is_some() {
                     ShowCoerce::EitherOf
-                } else if self.is_tuple_type(&ty).is_some() {
+                } else if self.is_tuple_type(&ty).is_some() || Self::tuple_n_types(&ty).is_some() {
                     ShowCoerce::Tuple2Of
                 } else if self.is_unit_type(&ty) {
                     ShowCoerce::Unit
+                } else if matches!(&ty, Ty::Con(c) if c.name.as_str() == "Ordering") {
+                    ShowCoerce::Ordering
+                } else if matches!(&ty, Ty::Con(c) if c.name.as_str() == "Integer") {
+                    ShowCoerce::Integer
                 } else {
                     ShowCoerce::Int
                 }
@@ -28427,7 +29566,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ShowCoerce::Text => self.get_primitive_show_desc(8),
             ShowCoerce::Unit => self.get_primitive_show_desc(6),
             ShowCoerce::Ordering => self.get_primitive_show_desc(7),
-            ShowCoerce::Integer => self.get_primitive_show_desc(0), // Use Int tag (0) — Integer show is handled separately
+            ShowCoerce::Integer => self.get_primitive_show_desc(9),
             ShowCoerce::List => {
                 let elem_desc = self.build_list_elem_descriptor(expr);
                 self.create_show_desc_global(10, Some(elem_desc), None)
@@ -28437,6 +29576,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.create_show_desc_global(11, Some(elem_desc), None)
             }
             ShowCoerce::Tuple2Of => {
+                if let Some(descs) = self.build_tuple_n_elem_descriptors(expr) {
+                    return self.create_tuple_n_show_desc(&descs);
+                }
                 let (fst_d, snd_d) = self.build_tuple_elem_descriptors(expr);
                 self.create_show_desc_global(12, Some(fst_d), Some(snd_d))
             }
@@ -28447,15 +29589,160 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// The key and (for a Map) value types of a `Map k v` / `Set a` /
+    /// `IntMap a` / `IntSet`. A `None` key is `Int`.
+    fn map_or_set_type_args(ty: &Ty) -> Option<(Option<Ty>, Option<Ty>)> {
+        let is_named = |t: &Ty, want: &str| match t {
+            Ty::Con(c) => c.name.as_str().rsplit('.').next() == Some(want),
+            _ => false,
+        };
+        match ty {
+            Ty::App(f, v) => match f.as_ref() {
+                Ty::App(g, k) if is_named(g, "Map") => {
+                    Some((Some(k.as_ref().clone()), Some(v.as_ref().clone())))
+                }
+                g if is_named(g, "Set") => Some((Some(v.as_ref().clone()), None)),
+                g if is_named(g, "IntMap") => Some((None, Some(v.as_ref().clone()))),
+                _ => None,
+            },
+            t if is_named(t, "IntSet") => Some((None, None)),
+            _ => None,
+        }
+    }
+
+    /// A Map (tag 16) or Set (tag 17) show descriptor: `child1` describes an
+    /// element of the container's ascending list (a pair for a Map) and
+    /// `child2` is the containers-crate function producing that list.
+    /// IntMap/IntSet share the Map/Set representation.
+    fn try_build_container_show_desc(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
+        let (key_ty, val_ty) = Self::map_or_set_type_args(ty)?;
+        let key_desc = key_ty
+            .and_then(|k| self.descriptor_from_ty(&k))
+            .unwrap_or_else(|| self.get_primitive_show_desc(0));
+        let (tag, elem_desc, to_list_id) = match val_ty {
+            Some(val_ty) => {
+                let val_desc = self
+                    .descriptor_from_ty(&val_ty)
+                    .unwrap_or_else(|| self.get_primitive_show_desc(0));
+                let pair = self.create_show_desc_global(12, Some(key_desc), Some(val_desc));
+                (16, pair, 1000165)
+            }
+            None => (17, key_desc, 1000166),
+        };
+        let to_list = *self.functions.get(&VarId::new(to_list_id))?;
+        let fn_ptr = to_list.as_global_value().as_pointer_value();
+        Some(self.create_show_desc_global(tag, Some(elem_desc), Some(fn_ptr)))
+    }
+
     /// Build an `Adt` show descriptor (tag 14) for a user-defined type with
     /// derived Show, carrying its derived-show function pointer in `child1`.
     /// Returns `None` if `expr` isn't such an ADT.
     fn try_build_adt_show_desc(&mut self, expr: &Expr) -> Option<PointerValue<'ctx>> {
-        let type_name = self.infer_adt_type_from_expr(expr)?;
+        // From the expression, or else from its type's head (`Pair Int`, a
+        // type-only stand-in for an element of `Maybe (Pair Int)`).
+        let type_name = self.infer_adt_type_from_expr(expr).or_else(|| {
+            let ty = expr.ty();
+            let mut head = &ty;
+            while let Ty::App(f, _) = head {
+                head = f;
+            }
+            match head {
+                Ty::Con(c) if self.derived_show_fns.contains_key(c.name.as_str()) => {
+                    Some(c.name.as_str().to_string())
+                }
+                _ => None,
+            }
+        })?;
+        // A parameterized type at known arguments shows its parameter-typed
+        // fields by their descriptors (tag 19, #59).
+        let ty_args = {
+            let mut args = Vec::new();
+            let mut head = expr.ty();
+            while let Ty::App(f, a) = head {
+                args.push(*a);
+                head = *f;
+            }
+            args.reverse();
+            args
+        };
+        if !ty_args.is_empty() {
+            if let Some(showt) = self
+                .derived_showt_fns
+                .get(&type_name)
+                .and_then(|id| self.functions.get(id))
+                .copied()
+            {
+                let descs: Vec<PointerValue<'ctx>> = ty_args
+                    .iter()
+                    .map(|t| {
+                        self.descriptor_from_ty(t)
+                            .unwrap_or_else(|| self.get_primitive_show_desc(0))
+                    })
+                    .collect();
+                let args = self.create_show_desc_array(&descs);
+                let fn_ptr = showt.as_global_value().as_pointer_value();
+                return Some(self.create_show_desc_global(19, Some(fn_ptr), Some(args)));
+            }
+        }
         let show_var_id = *self.derived_show_fns.get(&type_name)?;
         let show_fn = *self.functions.get(&show_var_id)?;
         let fn_ptr = show_fn.as_global_value().as_pointer_value();
         Some(self.create_show_desc_global(14, Some(fn_ptr), None))
+    }
+
+    /// A null-terminated global array of descriptor pointers (tag 19's
+    /// type arguments).
+    fn create_show_desc_array(&mut self, descs: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let mut items = descs.to_vec();
+        items.push(ptr_type.const_null());
+        let array_type = ptr_type.array_type(items.len() as u32);
+        let array_val = ptr_type.const_array(&items);
+        let name = format!("show_desc_targs_{}", self.show_desc_counter);
+        self.show_desc_counter += 1;
+        let global = self
+            .module
+            .llvm_module()
+            .add_global(array_type, None, &name);
+        global.set_initializer(&array_val);
+        global.set_constant(true);
+        global.set_linkage(inkwell::module::Linkage::Private);
+        global.as_pointer_value()
+    }
+
+    /// `$show_field targs f`: show a field of a parameterized type's derived
+    /// show whose type mentions the type's parameters (`$targ<i>`, #59), by a
+    /// descriptor template the RTS fills from `targs`.
+    fn lower_show_field(
+        &mut self,
+        targs_expr: &Expr,
+        field: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let targs = self
+            .lower_expr(targs_expr)?
+            .ok_or_else(|| CodegenError::Internal("$show_field: no targs".to_string()))?;
+        let targs = self.value_to_ptr(targs)?;
+        let val = self
+            .lower_expr(field)?
+            .ok_or_else(|| CodegenError::Internal("$show_field: no value".to_string()))?;
+        let val = self.value_to_ptr(val)?;
+        let template = self.build_show_descriptor(field);
+        let rts_fn = *self.functions.get(&VarId::new(1000512)).ok_or_else(|| {
+            CodegenError::Internal("bhc_show_with_targs not declared".to_string())
+        })?;
+        let cstr = self
+            .builder()
+            .build_call(
+                rts_fn,
+                &[val.into(), template.into(), targs.into()],
+                "show_field",
+            )
+            .map_err(|e| CodegenError::Internal(format!("show_with_targs call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("show_with_targs: void".to_string()))?;
+        let list = self.cstring_to_char_list(cstr.into_pointer_value())?;
+        Ok(Some(list.into()))
     }
 
     /// Build a descriptor for the element type of a list expression.
@@ -28541,6 +29828,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Ty::Var(_) | Ty::Error => None,
             _ => Some(self.build_show_descriptor(&Self::ty_only_expr(ty.clone()))),
         }
+    }
+
+    /// Component descriptors of a tuple of 3 or more components, from its
+    /// constructor application or else its type.
+    fn build_tuple_n_elem_descriptors(&mut self, expr: &Expr) -> Option<Vec<PointerValue<'ctx>>> {
+        if let Some(args) = Self::tuple_n_con_args(expr) {
+            return Some(args.iter().map(|a| self.build_show_descriptor(a)).collect());
+        }
+        let tys = Self::tuple_n_types(&expr.ty())?;
+        Some(
+            tys.iter()
+                .map(|t| {
+                    self.descriptor_from_ty(t)
+                        .unwrap_or_else(|| self.get_primitive_show_desc(0))
+                })
+                .collect(),
+        )
+    }
+
+    /// A tuple descriptor (tag 15): `child1` points to an array of the
+    /// component descriptors and `child2` holds their count.
+    fn create_tuple_n_show_desc(&mut self, descs: &[PointerValue<'ctx>]) -> PointerValue<'ctx> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let array_type = ptr_type.array_type(descs.len() as u32);
+        let array_val = ptr_type.const_array(descs);
+        let name = format!("show_desc_tuple_{}", self.show_desc_counter);
+        self.show_desc_counter += 1;
+        let global = self
+            .module
+            .llvm_module()
+            .add_global(array_type, None, &name);
+        global.set_initializer(&array_val);
+        global.set_constant(true);
+        // Module-local: every module numbers its descriptors from 0.
+        global.set_linkage(inkwell::module::Linkage::Private);
+        let count = self
+            .type_mapper()
+            .i64_type()
+            .const_int(descs.len() as u64, false)
+            .const_to_pointer(ptr_type);
+        self.create_show_desc_global(15, Some(global.as_pointer_value()), Some(count))
     }
 
     /// Build descriptors for the fst/snd types of a tuple expression.
@@ -28871,6 +30199,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // the container's own type and structure. Maybe is checked before List.
         if self.functor_result_is_maybe() || self.container_looks_like_maybe(action_expr) {
             return self.lower_fmap_maybe(func_expr, action_expr);
+        }
+
+        // `Either e`: map the `Right` payload, pass a `Left` through. With no
+        // case for it, `fmap f (Right x)` ran the IO path and crashed.
+        if self.functor_result_is_either() || self.container_looks_like_either(action_expr) {
+            return self.lower_fmap_either(func_expr, action_expr);
         }
 
         // Check if action_expr looks like a List value.
@@ -29259,6 +30593,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // When neither operand carries a type at all — a GND instance method
         // `$instance_<*>_App = \f x -> f <*> x` over untyped lambda parameters
         // — the ambient layer is the instance's own, so it decides.
+        // `Maybe` / `Either e`: apply inside the success constructor, pass a
+        // `Nothing`/`Left` through. Without these `(+) <$> Just 1 <*> Just 2`
+        // called the `Just` as a closure.
+        if self.functor_result_is_maybe()
+            || self.container_looks_like_maybe(val_expr)
+            || self.container_looks_like_maybe(func_expr)
+        {
+            return self.lower_ap_wrapped(func_expr, val_expr, false);
+        }
+        if self.functor_result_is_either()
+            || self.container_looks_like_either(val_expr)
+            || self.container_looks_like_either(func_expr)
+        {
+            return self.lower_ap_wrapped(func_expr, val_expr, true);
+        }
         let untyped = matches!(val_expr.ty(), Ty::Error) && matches!(func_expr.ty(), Ty::Error);
         let layer = self
             .transformer_layer_of_ty(&val_expr.ty())
@@ -29579,11 +30928,227 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check if container is a user ADT with derived Traversable
         if let Some(type_name) = self.infer_adt_type_from_expr(container_expr) {
             if self.derived_traversable_fns.contains_key(&type_name) {
+                if let Some(spec) = self.specialized_traverse(func_expr, container_expr, &type_name)
+                {
+                    return self.lower_expr(&spec);
+                }
                 return self.lower_traverse_derived(func_expr, container_expr, &type_name);
             }
         }
         // Fall back to list traverse (= mapM = map for BHC's eager IO)
         self.lower_builtin_mapm(func_expr, container_expr)
+    }
+
+    /// `traverse f x` for a derived Traversable at `Maybe` or `Either` (per the
+    /// stamped `traverse` type), as Core:
+    /// `case x of Con a0 a1 -> (\\r0 r1 -> Con r0 r1) <$> f a0 <*> f a1`
+    /// with `<$>`/`<*>` typed at that applicative, and `Just`/`Right (Con …)`
+    /// for a constructor without parameter fields. The derived traversal is
+    /// generic and has no applicative to dispatch on (#32).
+    ///
+    /// `None` (keep the derived function) for any other applicative, or when
+    /// a field holds the parameter inside another type (a recursive or nested
+    /// field), which this does not traverse.
+    fn specialized_traverse(
+        &mut self,
+        func_expr: &Expr,
+        container_expr: &Expr,
+        type_name: &str,
+    ) -> Option<Expr> {
+        let mut result = &self.current_builtin_ty;
+        while let Ty::Fun(_, r) = result {
+            result = r;
+        }
+        let either = if self.is_maybe_type(result).is_some() {
+            false
+        } else if self.is_either_type(result).is_some() {
+            true
+        } else {
+            return None;
+        };
+        let mut cons: Vec<(String, ConstructorMeta)> = self
+            .constructor_metadata
+            .iter()
+            .filter(|(name, meta)| {
+                meta.type_name.as_deref() == Some(type_name) && !name.contains('#')
+            })
+            .map(|(n, m)| (n.clone(), m.clone()))
+            .collect();
+        // The metadata can carry aliases under another constructor's tag
+        // (`True`/`False` filed under a two-constructor type), so for each
+        // tag keep the type's own constructor: one with recorded field
+        // types, else one that is not a builtin constructor's name.
+        let builtin = |n: &str| {
+            matches!(
+                n,
+                "True" | "False" | "Nothing" | "Just" | "Left" | "Right" | "[]" | ":"
+            )
+        };
+        // A builtin constructor is never one of a user type's own: an
+        // alternative named `True` made the case dispatch as a Bool.
+        cons.retain(|(n, _)| !builtin(n.as_str()));
+        cons.sort_by_key(|(n, m)| {
+            (
+                m.tag,
+                !self.con_field_types.contains_key(n.as_str()),
+                builtin(n.as_str()),
+            )
+        });
+        cons.dedup_by_key(|(_, m)| m.tag);
+        if cons.is_empty() {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let applicative_ty = if either {
+            Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Either"),
+                        bhc_types::Kind::Star,
+                    ))),
+                    Box::new(Ty::Error),
+                )),
+                Box::new(Ty::Error),
+            )
+        } else {
+            Ty::App(
+                Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Maybe"),
+                    bhc_types::Kind::Star,
+                ))),
+                Box::new(Ty::Error),
+            )
+        };
+        let op = |name: &str, id: usize| {
+            Expr::Var(
+                Var {
+                    name: Symbol::intern(name),
+                    id: VarId::new(id),
+                    ty: Ty::fun(Ty::Error, Ty::fun(Ty::Error, applicative_ty.clone())),
+                },
+                span,
+            )
+        };
+        let mut next_id = usize::MAX - 3000;
+        let mut fresh = |name: &str| {
+            next_id -= 1;
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(next_id),
+                ty: Ty::Error,
+            }
+        };
+        let ty_con = bhc_types::TyCon::new(Symbol::intern(type_name), bhc_types::Kind::Star);
+        let mut alts = Vec::new();
+        for (con_name, meta) in &cons {
+            let field_tys = self
+                .con_field_types
+                .get(con_name)
+                .cloned()
+                .unwrap_or_default();
+            if field_tys.len() != meta.arity as usize {
+                return None;
+            }
+            let binders: Vec<Var> = (0..meta.arity).map(|i| fresh(&format!("$tf{i}"))).collect();
+            let mut results: Vec<Var> = Vec::new();
+            let mut con_args: Vec<Expr> = Vec::new();
+            for (b, ty) in binders.iter().zip(&field_tys) {
+                match ty {
+                    Ty::Var(_) => {
+                        let r = fresh("$tr");
+                        con_args.push(Expr::Var(r.clone(), span));
+                        results.push(r);
+                    }
+                    t if has_type_vars(t) => return None,
+                    _ => con_args.push(Expr::Var(b.clone(), span)),
+                }
+            }
+            // Fresh ids, unbound anywhere, so codegen resolves these
+            // constructors by name.
+            let con_var = Expr::Var(
+                Var {
+                    name: Symbol::intern(con_name),
+                    id: fresh("$tcon").id,
+                    ty: Ty::Error,
+                },
+                span,
+            );
+            let built = con_args.into_iter().fold(con_var, |acc, a| {
+                Expr::App(Box::new(acc), Box::new(a), span)
+            });
+            let rhs = if results.is_empty() {
+                let wrap = Expr::Var(
+                    Var {
+                        name: Symbol::intern(if either { "Right" } else { "Just" }),
+                        id: fresh("$twrap").id,
+                        ty: Ty::Error,
+                    },
+                    span,
+                );
+                Expr::App(Box::new(wrap), Box::new(built), span)
+            } else {
+                let lam = results
+                    .iter()
+                    .rev()
+                    .fold(built, |acc, r| Expr::Lam(r.clone(), Box::new(acc), span));
+                let field_of = |r: &Var| -> Expr {
+                    // the binder whose position `r` fills
+                    let idx = results.iter().position(|x| x.id == r.id).unwrap_or(0);
+                    let mut seen = 0;
+                    let mut pos = 0;
+                    for (i, ty) in field_tys.iter().enumerate() {
+                        if matches!(ty, Ty::Var(_)) {
+                            if seen == idx {
+                                pos = i;
+                                break;
+                            }
+                            seen += 1;
+                        }
+                    }
+                    Expr::App(
+                        Box::new(func_expr.clone()),
+                        Box::new(Expr::Var(binders[pos].clone(), span)),
+                        span,
+                    )
+                };
+                let first = Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(op("<$>", usize::MAX - 2990)),
+                        Box::new(lam),
+                        span,
+                    )),
+                    Box::new(field_of(&results[0])),
+                    span,
+                );
+                results[1..].iter().fold(first, |acc, r| {
+                    Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(op("<*>", usize::MAX - 2991)),
+                            Box::new(acc),
+                            span,
+                        )),
+                        Box::new(field_of(r)),
+                        span,
+                    )
+                })
+            };
+            alts.push(Alt {
+                con: AltCon::DataCon(DataCon {
+                    name: Symbol::intern(con_name),
+                    ty_con: ty_con.clone(),
+                    tag: meta.tag,
+                    arity: meta.arity,
+                }),
+                binders,
+                rhs,
+            });
+        }
+        Some(Expr::Case(
+            Box::new(container_expr.clone()),
+            alts,
+            Ty::Error,
+            span,
+        ))
     }
 
     /// Lower traverse for a user-defined ADT with derived Traversable.
@@ -29790,8 +31355,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate: pred_ptr(pred_ptr, head) -> IO Bool (in strict codegen = Bool)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -29949,8 +31513,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, acc, head) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -30319,12 +31882,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1 =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1 =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2 =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2 =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2 = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, head1, head2) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -30470,12 +32031,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head1 =
             self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail1 =
-            self.extract_adt_field(list1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_phi.as_basic_value().into_pointer_value())?;
         let head2 =
             self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail2 =
-            self.extract_adt_field(list2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail2 = self.extract_list_tail(list2_phi.as_basic_value().into_pointer_value())?;
 
         // Flat 2-arg closure call: fn_ptr(closure_ptr, head1, head2) -> result (discarded)
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -31253,81 +32812,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         from_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Build a finite list of 10000 elements as fallback
-        // Real programs use `take n (enumFrom x)` which the optimizer can handle
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(1000505, &[from_expr], "enum_from_integer");
+        }
         let from_val = self
             .lower_expr(from_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFrom: from has no value".to_string()))?;
         let from = self.to_int_value(from_val)?;
-
-        let tm = self.type_mapper();
-        let i64_type = tm.i64_type();
-        let current_fn = self
-            .builder()
-            .get_insert_block()
-            .and_then(|b| b.get_parent())
-            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-
-        // to = from + 9999
-        let limit = self
-            .builder()
-            .build_int_add(from, i64_type.const_int(9999, false), "enum_limit")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: add: {:?}", e)))?;
-
-        // Build list backwards from limit down to from (same pattern as enumFromTo)
-        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "enumf_header");
-        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "enumf_body");
-        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "enumf_exit");
-
-        let nil = self.build_nil()?;
-        let entry_block = self.builder().get_insert_block().unwrap();
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_header);
-        let acc_phi = self
-            .builder()
-            .build_phi(tm.ptr_type(), "acc")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: phi: {:?}", e)))?;
-        let current_phi = self
-            .builder()
-            .build_phi(i64_type, "current")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: phi: {:?}", e)))?;
-
-        let current = current_phi.as_basic_value().into_int_value();
-        let done = self
-            .builder()
-            .build_int_compare(inkwell::IntPredicate::SLT, current, from, "done")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: cmp: {:?}", e)))?;
-        self.builder()
-            .build_conditional_branch(done, loop_exit, loop_body)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_body);
-        let boxed = self.box_int(current)?;
-        let new_acc = self.build_cons(boxed.into(), acc_phi.as_basic_value())?;
-        let prev = self
-            .builder()
-            .build_int_sub(current, i64_type.const_int(1, false), "prev")
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: sub: {:?}", e)))?;
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFrom: branch: {:?}", e)))?;
-
-        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
-        current_phi.add_incoming(&[(&limit, entry_block), (&prev, loop_body)]);
-
-        self.builder().position_at_end(loop_exit);
-        Ok(Some(acc_phi.as_basic_value()))
+        let one = self.type_mapper().i64_type().const_int(1, false);
+        self.call_enum_from_step_int(from, one)
     }
 
-    /// Lower `enumFromThen` - [n, m..] (infinite list with step, capped at 10000).
+    /// `[from, from + step ..]` at `Int`: a lazy list from the RTS (#58).
+    fn call_enum_from_step_int(
+        &mut self,
+        from: IntValue<'ctx>,
+        step: IntValue<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let rts_fn = *self.functions.get(&VarId::new(1000511)).ok_or_else(|| {
+            CodegenError::Internal("bhc_enum_from_step_int not declared".to_string())
+        })?;
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &[from.into(), step.into()], "enum_from_step")
+            .map_err(|e| CodegenError::Internal(format!("enum_from_step call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
+    }
+
+    /// Lower `enumFromThen` - [n, m..], a lazy infinite list.
     fn lower_builtin_enum_from_then(
         &mut self,
         from_expr: &Expr,
         then_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(
+                1000506,
+                &[from_expr, then_expr],
+                "enum_from_then_integer",
+            );
+        }
         let from_val = self
             .lower_expr(from_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFromThen: from has no value".to_string()))?;
@@ -31337,88 +32862,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let from = self.to_int_value(from_val)?;
         let then_v = self.to_int_value(then_val)?;
 
-        let tm = self.type_mapper();
-        let i64_type = tm.i64_type();
-        let current_fn = self
-            .builder()
-            .get_insert_block()
-            .and_then(|b| b.get_parent())
-            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-
-        // step = then - from
         let step = self
             .builder()
             .build_int_sub(then_v, from, "step")
             .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-
-        // Build 10000 elements: last_val = from + step * 9999
-        // Build backwards from element 9999 down to 0
-        let loop_header = self
-            .llvm_ctx
-            .append_basic_block(current_fn, "enumft_header");
-        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "enumft_body");
-        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "enumft_exit");
-
-        let nil = self.build_nil()?;
-        let count_limit = i64_type.const_int(10000, false);
-        let entry_block = self.builder().get_insert_block().unwrap();
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_header);
-        let acc_phi = self
-            .builder()
-            .build_phi(tm.ptr_type(), "acc")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: phi: {:?}", e)))?;
-        let idx_phi = self
-            .builder()
-            .build_phi(i64_type, "idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: phi: {:?}", e)))?;
-
-        let idx = idx_phi.as_basic_value().into_int_value();
-        let done = self
-            .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::SLT,
-                idx,
-                i64_type.const_zero(),
-                "done",
-            )
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: cmp: {:?}", e)))?;
-        self.builder()
-            .build_conditional_branch(done, loop_exit, loop_body)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        self.builder().position_at_end(loop_body);
-        // current_val = from + step * idx
-        let step_times_idx = self
-            .builder()
-            .build_int_mul(step, idx, "step_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: mul: {:?}", e)))?;
-        let current_val = self
-            .builder()
-            .build_int_add(from, step_times_idx, "cur_val")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: add: {:?}", e)))?;
-        let boxed = self.box_int(current_val)?;
-        let new_acc = self.build_cons(boxed.into(), acc_phi.as_basic_value())?;
-        let prev_idx = self
-            .builder()
-            .build_int_sub(idx, i64_type.const_int(1, false), "prev_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: branch: {:?}", e)))?;
-
-        let start_idx = self
-            .builder()
-            .build_int_sub(count_limit, i64_type.const_int(1, false), "start_idx")
-            .map_err(|e| CodegenError::Internal(format!("enumFromThen: sub: {:?}", e)))?;
-        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
-        idx_phi.add_incoming(&[(&start_idx, entry_block), (&prev_idx, loop_body)]);
-
-        self.builder().position_at_end(loop_exit);
-        Ok(Some(acc_phi.as_basic_value()))
+        self.call_enum_from_step_int(from, step)
     }
 
     /// Lower `enumFromThenTo` - [n, m..p] (finite list with step).
@@ -31428,6 +32876,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         then_expr: &Expr,
         to_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.builtin_at_integer(from_expr) {
+            return self.call_integer_rts(
+                1000508,
+                &[from_expr, then_expr, to_expr],
+                "enum_from_then_to_integer",
+            );
+        }
         let from_val = self.lower_expr(from_expr)?.ok_or_else(|| {
             CodegenError::Internal("enumFromThenTo: from has no value".to_string())
         })?;
@@ -31573,7 +33028,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head as initial accumulator, tail as list to fold
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
 
         // Now do standard foldl loop on tail with head as init
         let entry_block = self.builder().get_insert_block().unwrap();
@@ -31614,8 +33069,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f acc head - flat 3-arg call: fn_ptr(closure_ptr, acc, head)
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -31690,7 +33144,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Extract head of reversed list as init, tail as list to fold
         let head = self.extract_adt_field(reversed_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(reversed_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(reversed_ptr)?;
 
         // foldl on reversed list with flipped function args
         let entry_block = self.builder().get_insert_block().unwrap();
@@ -31726,8 +33180,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // For foldr1: f elem acc (not f acc elem like foldl)
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -32146,8 +33599,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_call(*print_char_fn, &[char_i32.into()], "")
             .map_err(|e| CodegenError::Internal(format!("iprint: call: {:?}", e)))?;
-        let next =
-            self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 1)?;
+        let next = self.extract_list_tail(current_node.as_basic_value().into_pointer_value())?;
         current_node.add_incoming(&[(&next, loop_body)]);
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -32453,7 +33905,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, call predicate, check result
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call pred(head)
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -32596,7 +34048,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, call predicate, check result
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call pred(head)
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -32735,7 +34187,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head Bool, check its tag
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         // head is a Bool ADT - extract its tag (0=False, 1=True)
         let head_tag = self.extract_adt_tag(head)?;
         let is_false = self
@@ -32838,7 +34290,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head Bool, check its tag
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         // head is a Bool ADT - extract its tag (0=False, 1=True)
         let head_tag = self.extract_adt_tag(head)?;
         let is_true = self
@@ -32891,6 +34343,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.list_builtin_at_integer() {
+            return self.lower_integer_list_extreme(list_expr, true);
+        }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SGT, "maximum")
     }
 
@@ -32899,7 +34354,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.list_builtin_at_integer() {
+            return self.lower_integer_list_extreme(list_expr, false);
+        }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SLT, "minimum")
+    }
+
+    /// Whether this list builtin's stamped argument is `[Integer]`.
+    fn list_builtin_at_integer(&self) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _)
+            if matches!(a.as_ref(), Ty::List(e) if self.is_integer_type(e)))
+    }
+
+    /// `maximum`/`minimum` over `[Integer]`: compare the BigInts, not their
+    /// addresses (#51).
+    fn lower_integer_list_extreme(
+        &mut self,
+        list_expr: &Expr,
+        want_max: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("integer extreme: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list)?;
+        let rts_fn = *self.functions.get(&VarId::new(1000510)).ok_or_else(|| {
+            CodegenError::Internal("bhc_integer_list_extreme not declared".to_string())
+        })?;
+        let flag = self
+            .type_mapper()
+            .i64_type()
+            .const_int(u64::from(want_max), false);
+        Ok(self
+            .builder()
+            .build_call(rts_fn, &[list_ptr.into(), flag.into()], "integer_extreme")
+            .map_err(|e| CodegenError::Internal(format!("integer extreme call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic())
     }
 
     /// Shared implementation for `maximum` and `minimum`.
@@ -32951,7 +34441,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check non-empty: extract head as initial best, tail as rest
         self.builder().position_at_end(check_nonempty);
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("{}: branch: {:?}", label, e)))?;
@@ -32985,8 +34475,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let cur_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let cur_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -33109,7 +34598,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: compare head with val
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let head_int = self
             .builder()
             .build_ptr_to_int(head, i64_type, "head_int")
@@ -33243,7 +34732,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: call predicate on head
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -33416,12 +34905,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(compare_block);
         let p_head =
             self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let p_tail =
-            self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let p_tail = self.extract_list_tail(prefix_phi.as_basic_value().into_pointer_value())?;
         let l_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let l_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let p_int = self
             .builder()
@@ -33579,12 +35066,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(compare_block);
         let p_head =
             self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let p_tail =
-            self.extract_adt_field(prefix_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let p_tail = self.extract_list_tail(prefix_phi.as_basic_value().into_pointer_value())?;
         let l_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let l_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let p_int = self
             .builder()
@@ -33783,9 +35268,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Inner compare: compare heads
         self.builder().position_at_end(inner_compare);
         let n_head = self.extract_adt_field(n_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let n_tail = self.extract_adt_field(n_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let n_tail = self.extract_list_tail(n_phi.as_basic_value().into_pointer_value())?;
         let h_head = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let h_tail = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let h_tail = self.extract_list_tail(h_phi.as_basic_value().into_pointer_value())?;
 
         let n_int = self
             .builder()
@@ -33811,8 +35296,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Next outer: advance haystack by one
         self.builder().position_at_end(next_outer);
-        let hay_tail =
-            self.extract_adt_field(hay_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let hay_tail = self.extract_list_tail(hay_phi.as_basic_value().into_pointer_value())?;
         self.builder()
             .build_unconditional_branch(outer_header)
             .map_err(|e| CodegenError::Internal(format!("isInfixOf: branch: {:?}", e)))?;
@@ -33916,7 +35400,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Loop body: cons current list pointer onto acc, advance to tail
         self.builder().position_at_end(loop_body);
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(
             list_phi.as_basic_value().into_pointer_value().into(),
             acc_phi.as_basic_value(),
@@ -34013,7 +35497,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: add current head to reversed elements, reverse to get prefix, cons prefix onto acc
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // cons head onto reversed-elements (building reversed prefix)
         let new_elems = self.build_cons(head.into(), elems_phi.as_basic_value())?;
@@ -34121,7 +35605,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(check_block);
         let head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail = self.extract_list_tail(list_ptr)?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("{}: branch: {:?}", label, e)))?;
@@ -34155,8 +35639,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let cur_head =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let cur_tail =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call cmp(cur_head, best) - cmp is a flat 2-arg closure: (env, arg1, arg2) -> Ordering
         let cmp_fn_ptr = self.extract_closure_fn_ptr(cmp_ptr)?;
@@ -34291,8 +35774,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Comparing the ADDRESSES is only right for a scalar element. `elem
         // "output" names` on a list of strings was always False; walk the
@@ -34557,8 +36039,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -34600,38 +36081,146 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result_phi.as_basic_value()))
     }
 
-    /// Lower `iterate` (stub: single-element list).
-    fn lower_builtin_iterate(
+    /// Lower `iterate f x`, `repeat x` and `cycle xs` as lazy producers (#28):
+    /// the Core of their Prelude definitions, with a thunked cons tail.
+    ///
+    /// ```text
+    /// iterate f x = letrec go = \f x -> x : lazy (go f (f x)) in go f x
+    /// repeat x    = letrec go = \x -> x : lazy (go x) in go x
+    /// cycle xs    = case xs of
+    ///                 []    -> error "Prelude.cycle: empty list"
+    ///                 _ : _ -> letrec go = \ys -> case ys of
+    ///                                             []    -> go xs
+    ///                                             y : t -> y : lazy (go t)
+    ///                          in go xs
+    /// ```
+    ///
+    /// List traversals force a tail before reading it (`extract_list_tail`),
+    /// so these are consumed like any other list. The `take n (…)` shapes
+    /// keep their direct loops (`lower_take_iterate` and friends).
+    fn lower_lazy_list_producer(
         &mut self,
-        _func_expr: &Expr,
-        seed_expr: &Expr,
+        name: &str,
+        args: &[&Expr],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(_func_expr)?;
-        let seed_val = self
-            .lower_expr(seed_expr)?
-            .ok_or_else(|| CodegenError::Internal("iterate: no seed".to_string()))?;
-        let seed_ptr = self.value_to_ptr(seed_val)?;
-        let nil = self.alloc_adt(0, 0)?;
-        let cons = self.alloc_adt(1, 2)?;
-        self.store_adt_field(cons, 2, 0, seed_ptr.into())?;
-        self.store_adt_field(cons, 2, 1, nil.into())?;
-        Ok(Some(cons.into()))
-    }
-
-    /// Lower `repeat` (stub).
-    fn lower_builtin_repeat(
-        &mut self,
-        val_expr: &Expr,
-    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_iterate(val_expr, val_expr)
-    }
-
-    /// Lower `cycle` (stub).
-    fn lower_builtin_cycle(
-        &mut self,
-        list_expr: &Expr,
-    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_expr(list_expr)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Below the range `specialized_traverse` uses; each producer gets its
+        // own ids because a local `letrec` function is lifted by its VarId.
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 1_000_000);
+        let span = bhc_span::Span::default();
+        let fresh = |base: &str| Var {
+            name: Symbol::intern(base),
+            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+            ty: Ty::Error,
+        };
+        let var = |v: &Var| Expr::Var(v.clone(), span);
+        let app = |f: Expr, a: Expr| Expr::App(Box::new(f), Box::new(a), span);
+        let lam = |v: &Var, b: Expr| Expr::Lam(v.clone(), Box::new(b), span);
+        let cons = |h: Expr, t: Expr| {
+            let cons_var = Var {
+                name: Symbol::intern(":"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            app(
+                app(Expr::Var(cons_var, span), h),
+                Expr::Lazy(Box::new(t), span),
+            )
+        };
+        let letrec = |go: &Var, rhs: Expr, body: Expr| {
+            Expr::Let(
+                Box::new(Bind::Rec(vec![(go.clone(), Box::new(rhs))])),
+                Box::new(body),
+                span,
+            )
+        };
+        let list_alt = |tag: u32, binders: Vec<Var>, rhs: Expr| Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern(if tag == 0 { "[]" } else { ":" }),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("List"), bhc_types::Kind::Star),
+                tag,
+                arity: binders.len() as u32,
+            }),
+            binders,
+            rhs,
+        };
+        let core = match (name, args) {
+            ("iterate", [f_arg, x_arg]) => {
+                let (go, f, x) = (
+                    fresh("$iterate_go"),
+                    fresh("$iterate_f"),
+                    fresh("$iterate_x"),
+                );
+                let body = cons(var(&x), app(app(var(&go), var(&f)), app(var(&f), var(&x))));
+                let call = app(app(var(&go), (*f_arg).clone()), (*x_arg).clone());
+                letrec(&go, lam(&f, lam(&x, body)), call)
+            }
+            ("repeat", [x_arg]) => {
+                let (go, x) = (fresh("$repeat_go"), fresh("$repeat_x"));
+                let body = cons(var(&x), app(var(&go), var(&x)));
+                letrec(&go, lam(&x, body), app(var(&go), (*x_arg).clone()))
+            }
+            ("cycle", [xs_arg]) => {
+                let (xs, go, ys) = (fresh("$cycle_xs"), fresh("$cycle_go"), fresh("$cycle_ys"));
+                let (y, t, h, r) = (
+                    fresh("$cycle_y"),
+                    fresh("$cycle_t"),
+                    fresh("$cycle_h"),
+                    fresh("$cycle_r"),
+                );
+                let step = Expr::Case(
+                    Box::new(var(&ys)),
+                    vec![
+                        list_alt(0, vec![], app(var(&go), var(&xs))),
+                        list_alt(
+                            1,
+                            vec![y.clone(), t.clone()],
+                            cons(var(&y), app(var(&go), var(&t))),
+                        ),
+                    ],
+                    Ty::Error,
+                    span,
+                );
+                let error_var = Var {
+                    name: Symbol::intern("error"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                let empty = app(
+                    Expr::Var(error_var, span),
+                    Expr::Lit(
+                        Literal::String(Symbol::intern("Prelude.cycle: empty list")),
+                        Ty::Error,
+                        span,
+                    ),
+                );
+                let body = Expr::Case(
+                    Box::new(var(&xs)),
+                    vec![
+                        list_alt(0, vec![], empty),
+                        list_alt(
+                            1,
+                            vec![h, r],
+                            letrec(&go, lam(&ys, step), app(var(&go), var(&xs))),
+                        ),
+                    ],
+                    Ty::Error,
+                    span,
+                );
+                Expr::Let(
+                    Box::new(Bind::NonRec(xs, Box::new((*xs_arg).clone()))),
+                    Box::new(body),
+                    span,
+                )
+            }
+            _ => {
+                return Err(CodegenError::Internal(format!(
+                    "lazy list producer: unexpected {name}/{}",
+                    args.len()
+                )))
+            }
+        };
+        self.lower_expr(&core)
     }
 
     /// Lower `takeWhile` — take longest prefix where predicate holds.
@@ -34712,8 +36301,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -34807,8 +36395,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -34896,8 +36483,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -35035,8 +36621,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -35153,8 +36738,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -35255,8 +36839,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -35363,8 +36946,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -35481,8 +37063,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
         let new_cons = self.build_cons(head_ptr.into(), prefix_phi.as_basic_value())?;
         let next_counter = self
             .builder()
@@ -35544,8 +37125,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -35646,8 +37226,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate: pred(pred_ptr, head)
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -35798,8 +37377,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // head_ptr is a pair (tag=0, arity=2): extract field 0 (key) and field 1 (value)
         let pair_key = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -35941,8 +37519,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call predicate
         let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
@@ -36050,8 +37627,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev1_body);
         let rev1_head =
             self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev1_tail =
-            self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev1_tail = self.extract_list_tail(rev1_list.as_basic_value().into_pointer_value())?;
         let rev1_new_cons = self.build_cons(rev1_head.into(), rev1_acc.as_basic_value())?;
 
         self.builder()
@@ -36105,8 +37681,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev2_body);
         let rev2_head =
             self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev2_tail =
-            self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev2_tail = self.extract_list_tail(rev2_list.as_basic_value().into_pointer_value())?;
         let rev2_new_cons = self.build_cons(rev2_head.into(), rev2_acc.as_basic_value())?;
 
         self.builder()
@@ -36195,7 +37770,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // First element: extract head, start reversed result with just head
         self.builder().position_at_end(first_block);
         let first_head = self.extract_adt_field(list_ptr, 2, 0)?;
-        let first_tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        let first_tail = self.extract_list_tail(list_ptr)?;
 
         let nil = self.build_nil()?;
         let first_cons = self.build_cons(first_head.into(), nil.into())?;
@@ -36234,8 +37809,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Built reversed, so the separator goes on before the element: the
         // accumulator `x1 : …` becomes `x2 : sep : x1 : …`, which reverses to
@@ -36293,8 +37867,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -36874,8 +38447,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let head_int = self
             .builder()
@@ -36963,8 +38535,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let r_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let r_cons = self.build_cons(r_head.into(), rev_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev_header)
@@ -36990,7 +38561,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.lower_builtin_append(list1_expr, list2_expr)
+        // `union xs ys = xs ++ filter (\y -> not (elem y xs)) (nub ys)`: the
+        // elements of `ys` not already in `xs`, without duplicates. This was
+        // a plain append, so `union [1,2] [2,3]` kept the second `2`.
+        let xs_val = self
+            .lower_expr(list1_expr)?
+            .ok_or_else(|| CodegenError::Internal("union: no first list".to_string()))?;
+        let ys_val = self
+            .lower_expr(list2_expr)?
+            .ok_or_else(|| CodegenError::Internal("union: no second list".to_string()))?;
+        let span = bhc_span::Span::DUMMY;
+        let var = |name: &str, id: usize| Var {
+            name: bhc_intern::Symbol::intern(name),
+            id: VarId::new(id),
+            ty: Ty::Error,
+        };
+        // Ids from the top of the range: bound only while this body is
+        // lowered, and never produced by the front end.
+        let xs = var("$union_xs", usize::MAX - 20);
+        let ys = var("$union_ys", usize::MAX - 21);
+        let y = var("$union_y", usize::MAX - 22);
+        let builtin = |name: &str, id: usize| Expr::Var(var(name, id), span);
+        let ev = |v: &Var| Expr::Var(v.clone(), span);
+        let app = |f: Expr, x: Expr| Expr::App(Box::new(f), Box::new(x), span);
+        let not_in_xs = Expr::Lam(
+            y.clone(),
+            Box::new(app(
+                builtin("not", usize::MAX - 23),
+                app(app(builtin("elem", usize::MAX - 24), ev(&y)), ev(&xs)),
+            )),
+            span,
+        );
+        let new_ys = app(
+            app(builtin("filter", usize::MAX - 25), not_in_xs),
+            app(builtin("nub", usize::MAX - 26), ev(&ys)),
+        );
+        let body = app(app(builtin("++", usize::MAX - 27), ev(&xs)), new_ys);
+        let saved_xs = self.env.insert(xs.id, xs_val);
+        let saved_ys = self.env.insert(ys.id, ys_val);
+        let result = self.lower_expr(&body);
+        for (id, saved) in [(xs.id, saved_xs), (ys.id, saved_ys)] {
+            match saved {
+                Some(v) => {
+                    self.env.insert(id, v);
+                }
+                None => {
+                    self.env.remove(&id);
+                }
+            }
+        }
+        result
     }
 
     /// Lower `intersect :: Eq a => [a] -> [a] -> [a]`.
@@ -37092,7 +38712,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Outer body: get head of xs
         self.builder().position_at_end(outer_body);
         let x_head = self.extract_adt_field(xs_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let x_tail = self.extract_adt_field(xs_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let x_tail = self.extract_list_tail(xs_phi.as_basic_value().into_pointer_value())?;
 
         // Convert x_head to int for comparison (works for Int values)
         let x_int = self
@@ -37128,7 +38748,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Inner body: compare x_head with y_head
         self.builder().position_at_end(inner_body);
         let y_head = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let y_tail = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let y_tail = self.extract_list_tail(ys_phi.as_basic_value().into_pointer_value())?;
         let y_int = self
             .builder()
             .build_ptr_to_int(y_head, tm.i64_type(), "y_int")
@@ -37273,8 +38893,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // Call f(func_ptr, acc, head) - 2-arg closure call
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -37352,8 +38971,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev_body);
         let rev_head =
             self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let rev_tail =
-            self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_tail = self.extract_list_tail(rev_list.as_basic_value().into_pointer_value())?;
         let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
 
         self.builder()
@@ -37467,8 +39085,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // scanr applies f(elem, acc) — note the arg order
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -37568,7 +39185,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Non-empty case: extract head as init, scanl on tail
         self.builder().position_at_end(nonempty_block);
         let head_ptr = self.extract_adt_field(list_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(list_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_ptr)?;
 
         // Build reversed result starting with head (the init value)
         let nil2 = self.build_nil()?;
@@ -37615,7 +39232,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: new_acc = f(acc, head); cons new_acc onto result
         self.builder().position_at_end(loop_body);
         let lh = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let lt = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let lt = self.extract_list_tail(l_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
@@ -37736,7 +39353,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let reversed_ptr = reversed.into_pointer_value();
 
         let rev_head = self.extract_adt_field(reversed_ptr, 2, 0)?;
-        let rev_tail = self.extract_adt_field(reversed_ptr, 2, 1)?;
+        let rev_tail = self.extract_list_tail(reversed_ptr)?;
 
         // Build initial result: cons init_val onto nil
         let nil2 = self.build_nil()?;
@@ -37783,7 +39400,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: new_acc = f(head, acc), cons onto result
         self.builder().position_at_end(loop_body);
         let lh = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let lt = self.extract_adt_field(l_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let lt = self.extract_list_tail(l_phi.as_basic_value().into_pointer_value())?;
 
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
@@ -38116,36 +39733,85 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         str_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Check for derived Read instance on the result type
-        if let Some(type_name) = self.infer_read_target_type(str_expr) {
-            if self.derived_read_fns.contains_key(&type_name) {
-                // Collect constructor names and tags for this type
-                let constructors: Vec<(String, u32)> = self
-                    .constructor_metadata
-                    .iter()
-                    .filter_map(|(name, meta)| {
-                        if meta.type_name.as_deref() == Some(&type_name) {
-                            Some((name.clone(), meta.tag))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        // Dispatch on the instantiated result type: Double/Float and flat
+        // lists of Int or Double have RTS parsers; everything else reads as Int.
+        let mut result_ty = &self.current_builtin_ty;
+        loop {
+            match result_ty {
+                Ty::Forall(_, body) => result_ty = body,
+                Ty::Fun(_, r) => result_ty = r,
+                _ => break,
+            }
+        }
+        let is_double =
+            |t: &Ty| matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float"));
+        let is_int = |t: &Ty| matches!(t, Ty::Con(c) if c.name.as_str() == "Int");
+        let list_elem = match result_ty {
+            Ty::List(elem) => Some(elem.as_ref()),
+            Ty::App(f, elem) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                Some(elem.as_ref())
+            }
+            _ => None,
+        };
+        let list_reader = match list_elem {
+            Some(e) if is_int(e) => Some(1000544),
+            Some(e) if is_double(e) => Some(1000545),
+            _ => None,
+        };
+        if let Some(id) = list_reader {
+            let str_val = self
+                .lower_expr(str_expr)?
+                .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+            let str_ptr = self.value_to_ptr(str_val)?;
+            let rts_fn = *self
+                .functions
+                .get(&VarId::new(id))
+                .ok_or_else(|| CodegenError::Internal("list read not declared".to_string()))?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[str_ptr.into()], "read_list")
+                .map_err(|e| CodegenError::Internal(format!("read call failed: {:?}", e)))?
+                .try_as_basic_value()
+                .basic());
+        }
+        let read_fn_id = if is_double(result_ty) {
+            1000543
+        } else {
+            1000540
+        };
 
-                if !constructors.is_empty() {
-                    return self.lower_read_adt_inline(str_expr, &constructors);
+        // Check for derived Read instance on the result type
+        if read_fn_id == 1000540 && !is_int(result_ty) {
+            if let Some(type_name) = self.infer_read_target_type(str_expr) {
+                if self.derived_read_fns.contains_key(&type_name) {
+                    // Collect constructor names and tags for this type
+                    let constructors: Vec<(String, u32)> = self
+                        .constructor_metadata
+                        .iter()
+                        .filter_map(|(name, meta)| {
+                            if meta.type_name.as_deref() == Some(&type_name) {
+                                Some((name.clone(), meta.tag))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if !constructors.is_empty() {
+                        return self.lower_read_adt_inline(str_expr, &constructors);
+                    }
                 }
             }
         }
 
-        // Default: read as Int via RTS
+        // Int and Double both come back as 64 bits that box into a pointer.
         let str_val = self
             .lower_expr(str_expr)?
             .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
         let str_ptr = self.value_to_ptr(str_val)?;
         let rts_fn = self
             .functions
-            .get(&VarId::new(1000540))
+            .get(&VarId::new(read_fn_id))
             .ok_or_else(|| CodegenError::Internal("bhc_read_int not declared".to_string()))?;
         let result = self
             .builder()
@@ -38272,7 +39938,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // next_char: advance to tail
                 self.builder().position_at_end(next_char);
-                let tail = self.extract_adt_field(current_list, 2, 1)?;
+                let tail = self.extract_list_tail(current_list)?;
                 current_list = tail;
             }
 
@@ -38490,11 +40156,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract heads, build triple, cons
         self.builder().position_at_end(loop_body);
         let h1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t1 = self.extract_list_tail(l1_phi.as_basic_value().into_pointer_value())?;
         let h2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t2 = self.extract_list_tail(l2_phi.as_basic_value().into_pointer_value())?;
         let h3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t3 = self.extract_list_tail(l3_phi.as_basic_value().into_pointer_value())?;
 
         let triple = self.build_triple(h1.into(), h2.into(), h3.into())?;
         let new_cons = self.build_cons(triple.into(), result_phi.as_basic_value())?;
@@ -38654,11 +40320,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract heads, call f(h1, h2, h3), cons result
         self.builder().position_at_end(loop_body);
         let h1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t1 = self.extract_adt_field(l1_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t1 = self.extract_list_tail(l1_phi.as_basic_value().into_pointer_value())?;
         let h2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t2 = self.extract_adt_field(l2_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t2 = self.extract_list_tail(l2_phi.as_basic_value().into_pointer_value())?;
         let h3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let t3 = self.extract_adt_field(l3_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let t3 = self.extract_list_tail(l3_phi.as_basic_value().into_pointer_value())?;
 
         // Call f as 4-arg closure: fn(closure_ptr, h1, h2, h3) -> result
         let closure_fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
@@ -38771,8 +40437,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+        let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         // head is a pair ADT (tag=0, arity=2)
         let fst_val = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -38827,8 +40492,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev1_body);
         let r1_head =
             self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r1_tail =
-            self.extract_adt_field(rev1_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r1_tail = self.extract_list_tail(rev1_list.as_basic_value().into_pointer_value())?;
         let r1_cons = self.build_cons(r1_head.into(), rev1_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev1_header)
@@ -38876,8 +40540,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(rev2_body);
         let r2_head =
             self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 0)?;
-        let r2_tail =
-            self.extract_adt_field(rev2_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let r2_tail = self.extract_list_tail(rev2_list.as_basic_value().into_pointer_value())?;
         let r2_cons = self.build_cons(r2_head.into(), rev2_acc.as_basic_value())?;
         self.builder()
             .build_unconditional_branch(rev2_header)
@@ -39043,6 +40706,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.lower_builtin_map_lookup_val(key, map_val, kind)
     }
 
+    /// Whether `key` is absent from the RTS map `map_ptr`.
+    ///
+    /// `bhc_map_lookup` returns the stored word, and an `Int` 0 (or any other
+    /// value stored as the word 0) is indistinguishable from its "not found"
+    /// null, so `lookup 1 (fromList [(1, 0)])` was `Nothing` (#25). Membership
+    /// decides presence; the looked-up word is only the value.
+    fn build_map_key_absent(
+        &self,
+        key: IntValue<'ctx>,
+        map_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let member_fn = *self
+            .functions
+            .get(&VarId::new(1000104))
+            .ok_or_else(|| CodegenError::Internal("bhc_map_member not declared".to_string()))?;
+        let member = self
+            .builder()
+            .build_call(member_fn, &[key.into(), map_ptr.into()], "map_member")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bhc_map_member returned void".to_string()))?
+            .into_int_value();
+        self.builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                member,
+                self.type_mapper().i64_type().const_zero(),
+                "key_absent",
+            )
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))
+    }
+
     /// Value-level core of `Data.Map.lookup`, shared with the direct path.
     fn lower_builtin_map_lookup_val(
         &mut self,
@@ -39068,10 +40764,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Result is a pointer: null = Nothing, non-null = the value
         // Wrap in Maybe: check for null, construct Just/Nothing ADT
         let result_ptr = result.into_pointer_value();
-        let is_null = self
-            .builder()
-            .build_is_null(result_ptr, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("map_lookup is_null: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
         let nothing = self.alloc_adt(0, 0)?; // Nothing = tag 0, 0 fields
         let just = self.alloc_adt(1, 1)?; // Just = tag 1, 1 field
         self.store_adt_field(just, 1, 0, result_ptr.into())?;
@@ -41789,10 +43482,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, acc_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -42024,10 +43714,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, map2_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, skip_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -42248,10 +43935,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_i64, map2_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -42416,10 +44100,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -42555,10 +44236,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -42901,7 +44579,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract (key, value) pair from head
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         // Pair is an ADT with (key, value)
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -42920,10 +44598,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_acc_ptr)?;
         self.builder()
             .build_conditional_branch(is_null, not_found_block, found_block)
             .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
@@ -43107,7 +44782,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a map) and tail, union with accumulator
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let map_ptr_val = map_phi.as_basic_value().into_pointer_value();
         let new_map = self
@@ -43344,7 +45019,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head (a set) and tail, union with accumulator
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let set_ptr_val = set_phi.as_basic_value().into_pointer_value();
         let new_set = self
@@ -43648,10 +45323,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         let found_block = self
             .llvm_context()
@@ -43814,10 +45486,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_pointer_value();
 
-        let is_null = self
-            .builder()
-            .build_is_null(found_val, "is_null")
-            .map_err(|e| CodegenError::Internal(format!("is_null failed: {:?}", e)))?;
+        let is_null = self.build_map_key_absent(key_int, map_ptr)?;
 
         // Build input Maybe: Nothing if not found, Just(val) if found
         let nothing = self.alloc_adt(0, 0)?; // Nothing = tag 0, 0 fields
@@ -44147,7 +45816,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // head = field 0 of cons cell (a pair)
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
         // tail = field 1 of cons cell
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         // pair is an ADT with (key, value) — extract key (field 0) and value (field 1)
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
@@ -44899,7 +46568,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head element, insert into set
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
         let elem_int = self.coerce_to_int(head_ptr.into())?;
         let elem_int = self.canonical_container_key(elem_int, kind)?;
@@ -47187,6 +48856,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Unit constructor
             "()" => return Some((0, 0)), // tag=0, arity=0
 
+            // NonEmpty constructor. typeck models `NonEmpty a` as `[a]` (and
+            // `(:|) :: a -> [a] -> [a]`), so `x :| xs` IS a cons cell: the
+            // list builtins, `fmap` and every list pattern read it as one.
+            ":|" => return Some((1, 2)), // tag=1, arity=2 (Cons)
+
             // Ordering constructors
             "LT" => return Some((0, 0)), // tag=0, arity=0
             "EQ" => return Some((1, 0)), // tag=1, arity=0
@@ -48008,6 +49682,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // even if they are only used as values (not in case alternatives).
         for con in &core_module.constructors {
             self.register_constructor(&con.name, con.tag, con.arity);
+            if let Some(type_name) = &con.type_name {
+                self.register_typed_constructor_alias(
+                    &con.name,
+                    type_name,
+                    ConstructorMeta {
+                        tag: con.tag,
+                        arity: con.arity,
+                        type_name: Some(type_name.clone()),
+                        is_newtype: con.is_newtype,
+                        field_types: con.field_types.clone(),
+                    },
+                );
+            }
             if !con.field_types.is_empty() {
                 self.con_field_types
                     .insert(con.name.clone(), con.field_types.clone());
@@ -48489,8 +50176,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         for bind in bindings {
             if let Bind::NonRec(var, expr) = bind {
                 let name = var.name.as_str();
+                // `$derived_showt_T` first: `$derived_show_` is its prefix.
+                if let Some(remainder) = name.strip_prefix("$derived_showt_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_showt_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
                 // Detect auto-derived instance methods ($derived_show_TypeName_COUNTER)
-                if let Some(remainder) = name.strip_prefix("$derived_show_") {
+                else if let Some(remainder) = name.strip_prefix("$derived_show_") {
                     let type_name = Self::strip_deriving_counter_suffix(remainder);
                     self.derived_show_fns.insert(type_name.clone(), var.id);
                     // Tag constructors found in this binding with their type_name
@@ -49223,7 +50916,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(Some(closure_ptr.into()))
                     }
                 } else if let Some((primop, arity)) = self.primitive_op_info(name) {
-                    // Primop used as a value - create a wrapper closure
+                    // Primop used as a value - create a wrapper closure, unless
+                    // it is arithmetic typed at Integer/Double/Float, which the
+                    // untyped wrapper would do in machine ints.
+                    // `negate`/`abs`/`signum` at `Integer` likewise (#57).
+                    if let Some(lam) =
+                        Self::typed_arith_lambda(name, var).or_else(|| self.typed_functor_eta(var))
+                    {
+                        return self.lower_expr(&lam);
+                    }
                     self.create_primop_closure(primop, arity, name)
                 } else if self.builtin_info(name).is_some()
                     && !self.external_functions.contains_key(&var.name)
@@ -49233,6 +50934,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // (parsec's `try`) shadows the builtin — fall through to
                     // the external branch below instead.
                     let arity = self.builtin_info(name).unwrap();
+                    if let Some(lam) = self.typed_functor_eta(var) {
+                        return self.lower_expr(&lam);
+                    }
                     // A monad method passed as a VALUE keeps no record of the
                     // layer it was written at: the closure is called later,
                     // from inside a higher-order builtin, where nothing has
@@ -49269,7 +50973,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         {
                             return Ok(Some(self.build_io_action(expr)?.into()));
                         }
+                        if name == "readLn" {
+                            // `readLn` parses at the type it is used at.
+                            let saved =
+                                std::mem::replace(&mut self.current_builtin_ty, var.ty.clone());
+                            let result = self.lower_builtin(name, &[]);
+                            self.current_builtin_ty = saved;
+                            return result;
+                        }
                         self.lower_builtin(name, &[])
+                    } else if let Some(lam) = Self::typed_show_lambda(name, var)
+                        .or_else(|| Self::typed_arith_lambda(name, var))
+                    {
+                        // `map show xs`: a generic wrapper closure has no
+                        // argument type and showed every element as an Int.
+                        self.lower_expr(&lam)
                     } else {
                         self.create_builtin_closure(name, arity)
                     }
@@ -49860,6 +51578,125 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(stub_fn)
     }
 
+    /// `\x -> show x` (or `print x`) for a bare `show`/`print` whose
+    /// occurrence type has a ground argument `a`, with `x` typed `a`, so the
+    /// applied builtin dispatches on that type instead of guessing from the
+    /// value.
+    /// The element type `Integer`, `Double` or `Float` named by `t`, if any.
+    fn wide_numeric_ty(t: &Ty) -> Option<&Ty> {
+        matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            .then_some(t)
+    }
+
+    /// `\\x y -> x op y` for a bare `+`/`-`/`*` typed at `Integer`, `Double`
+    /// or `Float` (`foldr (+) 0 xs`): a generic wrapper closure has no operand
+    /// types and did machine-int arithmetic on bignums and doubles.
+    fn typed_arith_lambda(name: &str, var: &Var) -> Option<Expr> {
+        if !matches!(name, "+" | "-" | "*") {
+            return None;
+        }
+        let Ty::Fun(a, _) = &var.ty else {
+            return None;
+        };
+        let elem = Self::wide_numeric_ty(a)?.clone();
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$arith_x"),
+            id: VarId::new(usize::MAX - 35),
+            ty: elem.clone(),
+        };
+        let y = Var {
+            name: Symbol::intern("$arith_y"),
+            id: VarId::new(usize::MAX - 36),
+            ty: elem,
+        };
+        let body = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::Var(var.clone(), span)),
+                Box::new(Expr::Var(x.clone(), span)),
+                span,
+            )),
+            Box::new(Expr::Var(y.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(
+            x,
+            Box::new(Expr::Lam(y, Box::new(body), span)),
+            span,
+        ))
+    }
+
+    /// `sum`/`product` over `[Integer]`, `[Double]` or `[Float]` (per the
+    /// builtin's stamped type) as `foldl (\\a b -> a op b) unit xs` with the
+    /// operator typed at the element: the builtin loops add machine ints.
+    fn typed_numeric_fold(&self, op: &str, list_expr: &Expr) -> Option<Expr> {
+        let Ty::Fun(list_ty, _) = &self.current_builtin_ty else {
+            return None;
+        };
+        let Ty::List(elem) = list_ty.as_ref() else {
+            return None;
+        };
+        let elem = Self::wide_numeric_ty(elem)?.clone();
+        let is_integer = matches!(&elem, Ty::Con(c) if c.name.as_str() == "Integer");
+        let unit = if op == "*" { 1 } else { 0 };
+        let literal = if is_integer {
+            Literal::Integer(unit)
+        } else {
+            Literal::Double(unit as f64)
+        };
+        let span = bhc_span::Span::default();
+        let op_var = Var {
+            name: Symbol::intern(op),
+            id: VarId::new(usize::MAX - 37),
+            ty: Ty::fun(elem.clone(), Ty::fun(elem.clone(), elem.clone())),
+        };
+        let lam = Self::typed_arith_lambda(op, &op_var)?;
+        let foldl = Var {
+            name: Symbol::intern("foldl"),
+            id: VarId::new(usize::MAX - 38),
+            ty: Ty::Error,
+        };
+        let call = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Var(foldl, span)),
+                    Box::new(lam),
+                    span,
+                )),
+                Box::new(Expr::Lit(literal, elem, span)),
+                span,
+            )),
+            Box::new(list_expr.clone()),
+            span,
+        );
+        Some(call)
+    }
+
+    fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
+        // `print` as a value (`mapM_ print "hi"`) has the same problem.
+        if name != "show" && name != "print" {
+            return None;
+        }
+        let Ty::Fun(arg_ty, _) = &var.ty else {
+            return None;
+        };
+        if matches!(arg_ty.as_ref(), Ty::Var(_) | Ty::Error | Ty::Forall(..)) {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$show_arg"),
+            id: VarId::new(usize::MAX - 30),
+            ty: arg_ty.as_ref().clone(),
+        };
+        let body = Expr::App(
+            Box::new(Expr::Var(var.clone(), span)),
+            Box::new(Expr::Var(x.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(x, Box::new(body), span))
+    }
+
     fn create_builtin_closure(
         &mut self,
         name: &str,
@@ -50089,6 +51926,68 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
         let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
         Ok(Some(closure_ptr.into()))
+    }
+
+    /// An eta-expansion of a builtin occurrence whose stamped type picks its
+    /// implementation, or `None`:
+    ///
+    /// - `\f x -> fmap f x` for `fmap`/`<$>` at a `Maybe` or `Either` functor
+    ///   (`Map.alter (fmap (+ 1))`, #25);
+    /// - `\x -> even x` / `\x -> odd x` at `Integer` (`filter even`, #51),
+    ///   and `negate`/`abs`/`signum` likewise (`map negate`, #57).
+    ///
+    /// Used where the builtin is a function value or partially applied: the
+    /// generic wrapper closure runs with no `current_builtin_ty` and sees only
+    /// untyped values. In the lambda the call is saturated, and its head
+    /// keeps the occurrence type that picks the implementation.
+    fn typed_functor_eta(&self, var: &Var) -> Option<Expr> {
+        let arity = match var.name.as_str() {
+            "fmap" | "<$>" => {
+                let mut result = &var.ty;
+                while let Ty::Fun(_, r) = result {
+                    result = r;
+                }
+                if self.is_maybe_type(result).is_none() && self.is_either_type(result).is_none() {
+                    return None;
+                }
+                2
+            }
+            "even" | "odd" | "negate" | "abs" | "signum" => match &var.ty {
+                Ty::Fun(a, _) if self.is_integer_type(a) => 1,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 3_000_000);
+        let span = bhc_span::Span::default();
+        // `even`/`odd` parameters carry the occurrence's argument types; the
+        // `fmap` ones stay untyped (the head's type alone picks the functor).
+        let typed_params = arity == 1;
+        let mut params = Vec::with_capacity(arity);
+        let mut ty = &var.ty;
+        for _ in 0..arity {
+            let (param_ty, rest) = match ty {
+                Ty::Fun(a, r) if typed_params => (a.as_ref().clone(), r.as_ref()),
+                Ty::Fun(_, r) => (Ty::Error, r.as_ref()),
+                _ => (Ty::Error, ty),
+            };
+            params.push(Var {
+                name: Symbol::intern("$eta_arg"),
+                id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                ty: param_ty,
+            });
+            ty = rest;
+        }
+        let call = params.iter().fold(Expr::Var(var.clone(), span), |f, p| {
+            Expr::App(Box::new(f), Box::new(Expr::Var(p.clone(), span)), span)
+        });
+        Some(
+            params
+                .into_iter()
+                .rev()
+                .fold(call, |body, p| Expr::Lam(p, Box::new(body), span)),
+        )
     }
 
     /// Create a partially-applied builtin closure.
@@ -51787,6 +53686,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.List.append" => self.append_values(args[0], args[1]),
             "Data.List.empty" => Ok(Some(self.build_nil()?.into())),
             "Data.List.concat" => self.concat_values(args[0]),
+            "Data.Unit.append" | "Data.Unit.empty" | "Data.Unit.concat" => {
+                self.lower_constructor_application(0, 0, &[])
+            }
             "Data.Text.append" | "Data.Text.<>" => {
                 let rts_fn = self.functions.get(&VarId::new(1000210)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_append not declared".to_string())
@@ -54993,8 +56895,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Heads equal - continue with tails
         self.builder().position_at_end(heads_equal_block);
-        let tail1 = self.extract_adt_field(list1_ptr, 2, 1)?; // arity=2 (Cons), field=1 (tail)
-        let tail2 = self.extract_adt_field(list2_ptr, 2, 1)?;
+        let tail1 = self.extract_list_tail(list1_ptr)?; // arity=2 (Cons), field=1 (tail)
+        let tail2 = self.extract_list_tail(list2_ptr)?;
 
         // Update phis and loop back
         list1_phi.add_incoming(&[(&tail1, heads_equal_block)]);
@@ -55664,6 +57566,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // Nullary constructor like True, False, Nothing, ()
                         return self.lower_constructor_application(tag, 0, &[]);
                     }
+                    // An UNDER-applied constructor (`rowLen . Row "b"`) is a
+                    // function value: its closure applied to the arguments
+                    // given so far, which forms a PAP. Nothing below knows
+                    // constructors, so this used to end at the
+                    // `stub: Row not implemented` fallback (pandoc-types'
+                    // `toRow = Row nullAttr . map simpleCell`).
+                    if (args.len() as u32) < arity {
+                        if let Some(closure) = self.create_constructor_closure(name, arity)? {
+                            return self.lower_closure_call(closure, &args);
+                        }
+                    }
                 }
 
                 // Check if this is an RTS builtin
@@ -55731,6 +57644,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if let Some(arity) = self.builtin_info(name) {
                     let n_provided = args.len() as u32;
                     if n_provided < arity {
+                        if let Some(lam) = self.typed_functor_eta(var) {
+                            let span = bhc_span::Span::default();
+                            let applied = args.iter().fold(lam, |f, a| {
+                                Expr::App(Box::new(f), Box::new((*a).clone()), span)
+                            });
+                            return self.lower_expr(&applied);
+                        }
                         // Partial application: create a closure that captures the provided args
                         // and accepts the remaining args
                         return self.create_partial_builtin_closure(name, arity, &args);
@@ -57619,6 +59539,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match scrut_val {
             BasicValueEnum::IntValue(i) => self.lower_case_literal_int(i, alts),
             BasicValueEnum::FloatValue(f) => self.lower_case_literal_float(f, alts),
+            BasicValueEnum::PointerValue(p)
+                if alts
+                    .iter()
+                    .any(|alt| matches!(&alt.con, AltCon::Lit(Literal::Integer(_)))) =>
+            {
+                self.lower_case_literal_integer(p, alts)
+            }
             BasicValueEnum::PointerValue(p) => {
                 // Check if the alternatives have integer/char literals - if so, unbox the pointer
                 if has_int_lit || has_char_lit {
@@ -57780,6 +59707,113 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a case expression with float/double literal patterns.
     /// Uses chained comparisons since LLVM switch doesn't support floats.
+    /// A case on an `Integer` (a boxed BigInt) with literal alternatives:
+    /// `if x == lit1 then .. else if x == lit2 then .. else default`, where
+    /// `==` at `Integer` compares the values. Unboxing the pointer and
+    /// switching on it, as for `Int`, compared an address with the literal,
+    /// so no `Integer` literal pattern ever matched (#57).
+    fn lower_case_literal_integer(
+        &mut self,
+        scrut: PointerValue<'ctx>,
+        alts: &[Alt],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 6_000_000);
+        let span = bhc_span::Span::default();
+        let integer = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Integer"),
+            bhc_types::Kind::Star,
+        ));
+        let bool_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Bool"),
+            bhc_types::Kind::Star,
+        ));
+        let x = Var {
+            name: Symbol::intern("$integer_scrut"),
+            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+            ty: integer.clone(),
+        };
+        let eq = Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(integer.clone(), Ty::fun(integer.clone(), bool_ty)),
+        };
+        let bool_con = |name: &str, tag: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: bhc_types::TyCon::new(Symbol::intern("Bool"), bhc_types::Kind::Star),
+            tag,
+            arity: 0,
+        };
+
+        // The default alternative (or a pattern-match failure) ends the chain;
+        // its binders, like `n` in `n -> ..`, are the scrutinee itself.
+        let mut bound = Vec::new();
+        let mut chain = match alts.iter().find(|a| matches!(a.con, AltCon::Default)) {
+            Some(alt) => {
+                bound.extend(alt.binders.iter().map(|b| b.id));
+                alt.rhs.clone()
+            }
+            None => {
+                let error_var = Var {
+                    name: Symbol::intern("error"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                Expr::App(
+                    Box::new(Expr::Var(error_var, span)),
+                    Box::new(Expr::Lit(
+                        Literal::String(Symbol::intern("Non-exhaustive patterns in case")),
+                        Ty::Error,
+                        span,
+                    )),
+                    span,
+                )
+            }
+        };
+        for alt in alts.iter().rev() {
+            let AltCon::Lit(lit @ Literal::Integer(_)) = &alt.con else {
+                continue;
+            };
+            let cond = Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Var(eq.clone(), span)),
+                    Box::new(Expr::Var(x.clone(), span)),
+                    span,
+                )),
+                Box::new(Expr::Lit(lit.clone(), integer.clone(), span)),
+                span,
+            );
+            chain = Expr::Case(
+                Box::new(cond),
+                vec![
+                    Alt {
+                        con: AltCon::DataCon(bool_con("True", 1)),
+                        binders: vec![],
+                        rhs: alt.rhs.clone(),
+                    },
+                    Alt {
+                        con: AltCon::DataCon(bool_con("False", 0)),
+                        binders: vec![],
+                        rhs: chain,
+                    },
+                ],
+                Ty::Error,
+                span,
+            );
+        }
+
+        self.env.insert(x.id, scrut.into());
+        for id in &bound {
+            self.env.insert(*id, scrut.into());
+        }
+        let result = self.lower_expr(&chain);
+        self.env.remove(&x.id);
+        for id in &bound {
+            self.env.remove(id);
+        }
+        result
+    }
+
     fn lower_case_literal_float(
         &mut self,
         scrut_float: FloatValue<'ctx>,
@@ -57804,6 +59838,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             match &alt.con {
                 AltCon::Lit(Literal::Float(f)) => literal_alts.push((*f, alt)),
                 AltCon::Lit(Literal::Double(d)) => literal_alts.push((*d, alt)),
+                // An integer literal pattern at a floating type (`f 0 = ..`
+                // on a `Double`) is that number as a float.
+                AltCon::Lit(Literal::Int(n)) => literal_alts.push((*n as f64, alt)),
                 AltCon::Default => default_alt = Some(alt),
                 _ => {
                     return Err(CodegenError::Unsupported(format!(
@@ -58802,6 +60839,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // Determine if we need to unbox the field
                         let field_val = self.ptr_to_value(field_ptr, &field_ty)?;
                         self.env.insert(binder.id, field_val);
+                        // A cons tail may be an unevaluated corecursive
+                        // producer: force it where the binder is used, not
+                        // here (`(y:_) -> y` must not run the producer).
+                        if field_idx == 1 && con.name.as_str() == ":" && arity == 2 {
+                            self.thunked_vars.insert(binder.id);
+                        }
                     }
                 }
             } else {
@@ -60003,7 +62046,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Loop body: extract head, snoc onto seq, advance tail
         self.builder().position_at_end(loop_body);
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
-        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let tail_ptr = self.extract_list_tail(cur_ptr)?;
         let seq_acc = seq_phi.as_basic_value().into_pointer_value();
 
         let new_seq = self
@@ -60645,6 +62688,9 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx>(
     // constructors from other modules (e.g., Types.hs constructors used in Parser.hs).
     for (name, meta) in imported_constructors {
         lowering.register_constructor(name, meta.tag, meta.arity);
+        if let Some(type_name) = &meta.type_name {
+            lowering.register_typed_constructor_alias(name, type_name, meta.clone());
+        }
         if meta.is_newtype {
             if let Some(m) = lowering.constructor_metadata.get_mut(name.as_str()) {
                 m.is_newtype = true;
@@ -60676,6 +62722,18 @@ fn identity_based_monad_layer(name: &str) -> Option<TransformerLayer> {
     }
 }
 
+/// The result of `Lowering::split_lazy_tails`.
+struct LazyTails<'ctx> {
+    /// The forced tails, valid in `cont_block`.
+    tails: Vec<PointerValue<'ctx>>,
+    /// Where the eager loop continues.
+    cont_block: inkwell::basic_block::BasicBlock<'ctx>,
+    /// The block that allocated `thunk` and branched to the exit block.
+    lazy_block: inkwell::basic_block::BasicBlock<'ctx>,
+    /// The thunk resuming the builtin on the rest of the input.
+    thunk: PointerValue<'ctx>,
+}
+
 /// The physical arity of a codegen builtin by name, or `None` if `name`
 /// is not a codegen builtin. Free function so name resolution (the driver)
 /// can tell whether an imported name would be intercepted as a builtin.
@@ -60686,6 +62744,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         return None;
     }
     match name {
+        // Derived show of a parameterized type (#59)
+        "$null_targs" => Some(0),
+        "$show_field" => Some(2),
         // List operations
         "head" => Some(1),
         "tail" => Some(1),
@@ -60788,6 +62849,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "putChar" => Some(1),
         "print" => Some(1),
         "getLine" => Some(0),
+        "readLn" => Some(0),
 
         // Monadic operations
         ">>=" => Some(2),
@@ -61227,6 +63289,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.List.append" => Some(2),
         "Data.Maybe.append" => Some(2),
         "Data.List.concat" => Some(1),
+        "Data.Unit.append" => Some(2),
+        "Data.Unit.empty" => Some(0),
+        "Data.Unit.concat" => Some(1),
         "Data.Text.singleton" => Some(1),
         "Data.Text.pack" => Some(1),
         "Data.Text.unpack" => Some(1),

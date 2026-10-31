@@ -122,6 +122,9 @@ pub struct LowerContext {
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
+    /// Constructor names shared by more than one data type, computed on
+    /// first use and reset whenever a constructor is registered.
+    ambiguous_con_names: Option<FxHashSet<Symbol>>,
     /// Declared field types per constructor name, from user data declarations.
     /// Threaded into `CoreConstructor::field_types` for codegen `show` dispatch.
     constructor_field_types: FxHashMap<Symbol, Vec<Ty>>,
@@ -191,6 +194,11 @@ pub struct LowerContext {
     /// The class of the instance whose method bodies are being lowered
     /// (paired with `current_instance_type`).
     current_instance_class: Option<Symbol>,
+    /// The context constraints of the instance whose method is being lowered.
+    /// Their dictionaries are registered untyped (see
+    /// `lower_instance_method_with_constraints`); this keeps what each is for,
+    /// so a superclass hop can still be refused for another monad.
+    current_instance_context: Vec<Constraint>,
     /// Span of the class-method reference that IS an instance method's whole
     /// body — the alias in `mappend = (<>)` or `(<*>) = ap`. That reference
     /// means the method at the instance's own type, never the element
@@ -289,6 +297,7 @@ impl LowerContext {
             app_head_spans: FxHashSet::default(),
             allow_multi_param_hop: false,
             constructor_map: FxHashMap::default(),
+            ambiguous_con_names: None,
             constructor_field_types: FxHashMap::default(),
             pattern_binder_tys: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
@@ -309,6 +318,7 @@ impl LowerContext {
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
+            current_instance_context: Vec::new(),
             instance_alias_span: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
@@ -1296,6 +1306,44 @@ impl LowerContext {
                 });
         }
 
+        // `Semigroup ()` / `Monoid ()`. A writer of `()` — pandoc's
+        // `AnnotatedTable` runs `RWS ([ColSpec], Int) () RowNumber` — combines
+        // its output with `<>` and starts from `mempty` at `()`, and with no
+        // instance both lowered to a `<>` stub (the RWS bind segfaulted).
+        // `()` is spelled both as the empty tuple and as the `()` constructor.
+        for unit_ty in [
+            Ty::Tuple(Vec::new()),
+            Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("()"),
+                bhc_types::Kind::Star,
+            )),
+        ] {
+            let mut sg_methods = FxHashMap::default();
+            sg_methods.insert(Symbol::intern("<>"), DefId::new(790_014));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Semigroup"),
+                    instance_types: vec![unit_ty.clone()],
+                    methods: sg_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            let mut mo_methods = FxHashMap::default();
+            mo_methods.insert(Symbol::intern("mempty"), DefId::new(790_015));
+            mo_methods.insert(Symbol::intern("mappend"), DefId::new(790_014));
+            mo_methods.insert(Symbol::intern("mconcat"), DefId::new(790_016));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Monoid"),
+                    instance_types: vec![unit_ty.clone()],
+                    methods: mo_methods,
+                    superclass_instances: vec![unit_ty],
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // `Semigroup (Maybe a)`. bhc had no instance, so pandoc's option
         // parser — `optInputFiles opts <> mbArgs` — lowered `<>` to an
         // unresolved method and segfaulted. The Nothing cases are exact; two
@@ -1658,6 +1706,33 @@ impl LowerContext {
             self.var_map.insert(def_info.id, var);
         }
 
+        // The builtin Eq/Ord/Num/Show instances name their methods by small
+        // hardcoded DefIds that predate the current builtin numbering (`show`
+        // was 92, which is now `++`), so a dictionary built from them held
+        // the wrong functions: `sh = show` in `instance Sh Bool` ran `++`
+        // (#30). Point each stale slot at the builtin of the method's name.
+        const HARDCODED_METHOD_IDS: usize = 1000;
+        let mut builtin_by_name: FxHashMap<Symbol, DefId> = FxHashMap::default();
+        for def_info in defs.values() {
+            builtin_by_name
+                .entry(def_info.name)
+                .and_modify(|id| {
+                    if def_info.id.index() < id.index() {
+                        *id = def_info.id;
+                    }
+                })
+                .or_insert(def_info.id);
+        }
+        let var_map = &self.var_map;
+        self.class_registry.remap_instance_methods(|name, def_id| {
+            if def_id.index() >= HARDCODED_METHOD_IDS
+                || var_map.get(&def_id).is_some_and(|v| v.name == name)
+            {
+                return def_id;
+            }
+            builtin_by_name.get(&name).copied().unwrap_or(def_id)
+        });
+
         // The clear above wiped the synthetic method vars behind the builtin
         // `Semigroup Text` / `Monoid Text` instances (DefIds 790_000–790_002,
         // registered at context construction); restore them so dictionary
@@ -1685,6 +1760,10 @@ impl LowerContext {
             "Data.Maybe.append",
             // 790_013: list `fmap` (the builtin `Functor []` instance).
             "map",
+            // 790_014–790_016: the builtin `Semigroup ()` / `Monoid ()`.
+            "Data.Unit.append",
+            "Data.Unit.empty",
+            "Data.Unit.concat",
         ]
         .iter()
         .enumerate()
@@ -1817,6 +1896,7 @@ impl LowerContext {
 
     /// Register a data constructor with its metadata.
     pub fn register_constructor(&mut self, def_id: DefId, info: ConstructorInfo) {
+        self.ambiguous_con_names = None;
         self.constructor_map.insert(def_id, info);
     }
 
@@ -1856,6 +1936,37 @@ impl LowerContext {
         self.constructor_map.values().find(|info| info.name == name)
     }
 
+    /// Whether constructors of more than one data type are known under `name`.
+    pub fn constructor_name_is_ambiguous(&mut self, name: Symbol) -> bool {
+        if self.ambiguous_con_names.is_none() {
+            // A constructor is identified by its type's (unqualified) name
+            // AND its arity: pandoc's Definition `Cell` and AnnotatedTable's
+            // `Cell` are both constructors of a type named `Cell`.
+            let mut types_of: FxHashMap<Symbol, (Symbol, u32)> = FxHashMap::default();
+            let mut ambiguous = FxHashSet::default();
+            for info in self.constructor_map.values() {
+                let s = info.type_name.as_str();
+                let t = (
+                    Symbol::intern(s.rsplit('.').next().unwrap_or(s)),
+                    info.arity,
+                );
+                match types_of.get(&info.name) {
+                    None => {
+                        types_of.insert(info.name, t);
+                    }
+                    Some(prev) if *prev != t => {
+                        ambiguous.insert(info.name);
+                    }
+                    Some(_) => {}
+                }
+            }
+            self.ambiguous_con_names = Some(ambiguous);
+        }
+        self.ambiguous_con_names
+            .as_ref()
+            .is_some_and(|set| set.contains(&name))
+    }
+
     /// Look up constructor info by `DefId`, falling back to the constructor's
     /// name. A cross-module reference to a constructor can carry a different
     /// `DefId` than the one it was registered under (in the defining module), so
@@ -1865,8 +1976,39 @@ impl LowerContext {
     #[must_use]
     pub fn lookup_constructor_or_by_name(&self, def_id: DefId) -> Option<&ConstructorInfo> {
         self.lookup_constructor(def_id).or_else(|| {
-            self.lookup_var(def_id)
-                .and_then(|v| self.lookup_constructor_by_name(v.name))
+            let v = self.lookup_var(def_id)?;
+            // Two imported data types can both have a constructor of this
+            // name (pandoc's `Block`'s `Table` and the HTML writer's
+            // `qualified AnnotatedTable as Ann`'s `Table`). The reference's
+            // own type names its data type: prefer the candidate whose type
+            // that is. An arbitrary first match gave `Block`'s `Table`
+            // `Ann.Table`'s tag 0, so a table matched no alternative.
+            let result_head = |t: &Ty| -> Option<Symbol> {
+                let mut t = t;
+                loop {
+                    match t {
+                        Ty::Forall(_, b) => t = b,
+                        Ty::Fun(_, r) => t = r,
+                        Ty::App(f, _) => t = f,
+                        Ty::Con(tc) => return Some(tc.name),
+                        _ => return None,
+                    }
+                }
+            };
+            let unqualified = |n: Symbol| -> Symbol {
+                let s = n.as_str();
+                Symbol::intern(s.rsplit('.').next().unwrap_or(s))
+            };
+            if let Some(type_name) = result_head(&v.ty).map(unqualified) {
+                if let Some(info) = self
+                    .constructor_map
+                    .values()
+                    .find(|info| info.name == v.name && unqualified(info.type_name) == type_name)
+                {
+                    return Some(info);
+                }
+            }
+            self.lookup_constructor_by_name(v.name)
         })
     }
 
@@ -2068,6 +2210,12 @@ impl LowerContext {
         } else {
             self.superclass_constrained_ty(holder, needed)
         };
+        // An instance context's dictionary is registered untyped, but the
+        // context says what it is for: in `instance Monad m => HasQuoteContext
+        // ParserState m`, `getQuoteContext = stateQuoteContext <$> getState`
+        // maps over a ParsecT, and hopping from `Monad m` to its Functor ran
+        // `m`'s fmap on a parser (every smart-quote parse crashed).
+        let constrained = constrained.or_else(|| self.instance_context_var_arg(holder));
         if dbg {
             eprintln!(
                 "[hop] {holder} -> {needed} @ {span:?}: occ_head={occ_head:?} constrained={constrained:?}"
@@ -2435,6 +2583,19 @@ impl LowerContext {
             }
         }
         Ok(best.map(|(_, v)| v.clone()))
+    }
+
+    /// The first argument of the enclosing instance's context constraint on
+    /// `class_name`, when it is a type variable (`m` in `instance Monad m =>
+    /// HasQuoteContext ParserState m`). Those dictionaries are registered
+    /// untyped; this says which monad they are for.
+    #[must_use]
+    pub(crate) fn instance_context_var_arg(&self, class_name: Symbol) -> Option<Ty> {
+        self.current_instance_context
+            .iter()
+            .find(|c| c.class == class_name)
+            .and_then(|c| c.args.first().cloned())
+            .filter(|t| matches!(t, Ty::Var(_)))
     }
 
     /// The constraint arguments an in-scope dictionary for `class_name` is
@@ -2807,6 +2968,13 @@ impl LowerContext {
         None
     }
 
+    /// Whether the class registry has an instance of `class_name` at `ty`.
+    pub fn has_registered_instance(&self, class_name: Symbol, ty: &Ty) -> bool {
+        self.class_registry
+            .resolve_instance(class_name, &self.expand_type_aliases(ty))
+            .is_some()
+    }
+
     /// Resolve a class method call at a concrete type.
     ///
     /// When a class method (like `(+)` from `Num`) is called at a concrete type
@@ -3134,10 +3302,22 @@ impl LowerContext {
         // same variable (parsec's `Stream s m t` methods mention `Monad m`);
         // only a class outside that closure marks a homonym.
         let supers = self.superclass_closure(class);
+        // Nor do the method's OWN constraints: `getQuoteContext :: Stream s m
+        // t => ParsecT s st m QuoteContext` in `class HasQuoteContext st m`
+        // mentions the class's `m` through `Stream`, and taking that for a
+        // homonym left the method a plain constrained value — its class
+        // dictionary passed as an argument, and a stub at runtime.
+        let method_level: Vec<Symbol> = self
+            .class_registry
+            .method_level
+            .get(&(class, method_name))
+            .map(|s| s.constraints.iter().map(|c| c.class).collect())
+            .unwrap_or_default();
         let homonym = !own_vars.is_empty()
             && scheme.constraints.iter().any(|c| {
                 c.class != class
                     && !supers.contains(&c.class)
+                    && !method_level.contains(&c.class)
                     && c.args
                         .iter()
                         .any(|a| matches!(a, Ty::Var(v) if own_vars.contains(&v)))
@@ -3174,12 +3354,17 @@ impl LowerContext {
     /// Returns the class name if the symbol is a method of some class.
     #[must_use]
     pub fn is_class_method(&self, method_name: Symbol) -> Option<Symbol> {
-        for (class_name, class_info) in &self.class_registry.classes {
-            if class_info.methods.contains(&method_name) {
-                return Some(*class_name);
-            }
-        }
-        None
+        // Several classes can declare a method of the same name: a user
+        // `class Bag b where empty :: b` beside the builtin `Alternative`'s
+        // `empty` (#34). The registry is a hash map, so taking the first hit
+        // picked either at random; a class the program declares shadows a
+        // builtin homonym, and ties go by name so the answer is stable.
+        self.class_registry
+            .classes
+            .iter()
+            .filter(|(_, info)| info.methods.contains(&method_name))
+            .map(|(name, _)| *name)
+            .min_by_key(|name| (!self.is_user_class(*name), name.as_str().to_string()))
     }
 
     /// Check if a class belongs to the monad family (Functor, Applicative, Monad).
@@ -3677,10 +3862,55 @@ impl LowerContext {
         {
             return None;
         }
+        self.derive_instance_from_target(deriv_ctx, newtype_def, clause, *wrapped, init)
+    }
+
+    /// `deriving C via V` on a newtype (#35): `C`'s methods at the newtype are
+    /// `V`'s, since the newtype and `V` share a representation. Only for a
+    /// class over types of kind `*` (`Semigroup`, `Monoid`, `Num`, …): the
+    /// instance head is the newtype applied to all its parameters.
+    fn derive_newtype_via_type(
+        &mut self,
+        deriv_ctx: &mut DerivingContext,
+        newtype_def: &bhc_hir::NewtypeDef,
+        clause: &bhc_hir::DerivingClause,
+        via: &Ty,
+    ) -> Option<DerivedInstance> {
+        if matches!(
+            clause.class.as_str(),
+            "Functor"
+                | "Applicative"
+                | "Monad"
+                | "Foldable"
+                | "Traversable"
+                | "Alternative"
+                | "MonadPlus"
+        ) || has_type_variables(via)
+            || clause.args.iter().any(has_type_variables)
+        {
+            return None;
+        }
+        let via = self.expand_type_aliases(via);
+        self.derive_instance_from_target(deriv_ctx, newtype_def, clause, via, &newtype_def.params)
+    }
+
+    /// An instance of `clause`'s class at the newtype whose methods select
+    /// from the class's dictionary at `target` (the wrapped type for
+    /// `GeneralizedNewtypeDeriving`, the via type for `DerivingVia`).
+    /// `head_params` are the newtype parameters the instance head applies.
+    fn derive_instance_from_target(
+        &mut self,
+        deriv_ctx: &mut DerivingContext,
+        newtype_def: &bhc_hir::NewtypeDef,
+        clause: &bhc_hir::DerivingClause,
+        target: Ty,
+        head_params: &[TyVar],
+    ) -> Option<DerivedInstance> {
+        let init = head_params;
         let class_info = self.class_registry.lookup_class(clause.class)?.clone();
         let span = newtype_def.span;
         let mut wrapped_args = clause.args.clone();
-        wrapped_args.push(*wrapped);
+        wrapped_args.push(target);
         let dict = self.resolve_dictionary(
             &Constraint::new_multi(clause.class, wrapped_args, span),
             span,
@@ -4831,6 +5061,146 @@ impl LowerContext {
         }
     }
 
+    /// Register a local `data` declaration's constructors (vars, field
+    /// selectors, tags). Called for every data declaration BEFORE any value is
+    /// lowered: a value above its type's declaration (pandoc's HTML writer
+    /// matches `TablePart` in `tablePartToHtml`, declared further down) was
+    /// lowered with no constructor info, so its `case` switched on made-up
+    /// tags and matched nothing.
+    fn register_data_constructors(&mut self, data_def: &bhc_hir::DataDef) {
+        // Register data constructors with their metadata
+        // The tag is the 0-based position in the constructor list
+        for (tag, con) in data_def.cons.iter().enumerate() {
+            let var = self.named_var(con.name, Ty::Error);
+            self.register_var(con.id, var);
+
+            // Calculate arity and field names based on field type
+            let (arity, field_names) = match &con.fields {
+                bhc_hir::ConFields::Positional(fields) => (fields.len() as u32, vec![]),
+                bhc_hir::ConFields::Named(fields) => {
+                    // Register field selector functions
+                    for field in fields {
+                        // The accessor is emitted as a separate value
+                        // binding (id == field.id) and its var is
+                        // already registered by the pre-pass over all
+                        // items. Do NOT overwrite it with a fresh var
+                        // here: a value that forward-references the
+                        // accessor (a field used above its `data`
+                        // declaration, e.g. Text.Parsec's
+                        // `unknownError s = … statePos s` above
+                        // `data State`) is lowered before this Data
+                        // item and would then reference the pre-pass
+                        // var while the accessor binding uses the
+                        // fresh one — an undeclared, stubbed selector.
+                        if self.lookup_var(field.id).is_none() {
+                            let selector_var = self.named_var(field.name, Ty::Error);
+                            self.register_var(field.id, selector_var);
+                        }
+                        // Also register field metadata for later lookup
+                        self.register_field_selector(
+                            field.name,
+                            FieldSelectorInfo {
+                                field_name: field.name,
+                                con_id: con.id,
+                                con_name: con.name,
+                                type_name: data_def.name,
+                                field_index: fields
+                                    .iter()
+                                    .position(|f| f.id == field.id)
+                                    .unwrap_or(0),
+                                total_fields: fields.len(),
+                            },
+                        );
+                    }
+                    let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
+                    (fields.len() as u32, names)
+                }
+            };
+
+            // Record declared field types (already `bhc_types::Ty`)
+            // so codegen can recover a pattern-bound field's type for
+            // `show`/`print` dispatch (otherwise erased).
+            let field_tys: Vec<Ty> = match &con.fields {
+                bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+            };
+            self.constructor_field_types
+                .insert(con.name, field_tys.clone());
+
+            // Register constructor metadata
+            // Only count user-defined class constraints for dict fields.
+            // Builtin classes (Show, Eq, etc.) use codegen dispatch, not dicts.
+            let user_existential: Vec<Symbol> = con
+                .existential_context
+                .iter()
+                .filter(|c| self.is_user_class(c.class))
+                .map(|c| c.class)
+                .collect();
+            let existential_dict_count = user_existential.len() as u32;
+            let existential_classes = user_existential;
+            // Arity includes dict fields for existential constructors
+            let total_arity = arity + existential_dict_count;
+            self.register_constructor(
+                con.id,
+                ConstructorInfo {
+                    name: con.name,
+                    type_name: data_def.name,
+                    tag: tag as u32,
+                    arity: total_arity,
+                    field_names,
+                    is_newtype: false,
+                    existential_dict_count,
+                    existential_classes,
+                    field_types: field_tys.clone(),
+                },
+            );
+        }
+    }
+
+    /// Register a local `newtype`'s constructor; see
+    /// [`register_data_constructors`](Self::register_data_constructors).
+    fn register_newtype_constructor(&mut self, newtype_def: &bhc_hir::NewtypeDef) {
+        // Register the newtype constructor
+        let var = self.named_var(newtype_def.con.name, Ty::Error);
+        self.register_var(newtype_def.con.id, var);
+
+        // Register constructor metadata for codegen (newtype = identity)
+        let arity = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
+            bhc_hir::ConFields::Named(fields) => fields.len() as u32,
+        };
+        let field_names = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(_) => vec![],
+            bhc_hir::ConFields::Named(fields) => fields.iter().map(|f| f.name).collect(),
+        };
+        // What the newtype WRAPS. Codegen reads this to find the
+        // transformer layer of a monad defined as a newtype —
+        // pandoc's `newtype Future s a = Future (Reader s a)`
+        // derives its Monad, so `return x :: Future s a` must
+        // build the Reader closure `runF` calls. Data declarations
+        // record the same thing further down.
+        let field_tys: Vec<Ty> = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(tys) => tys.clone(),
+            bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+        };
+        self.constructor_field_types
+            .insert(newtype_def.con.name, field_tys);
+        self.register_constructor(
+            newtype_def.con.id,
+            ConstructorInfo {
+                name: newtype_def.con.name,
+                type_name: newtype_def.name,
+                tag: 0,
+                arity,
+                field_names,
+                is_newtype: true,
+                existential_dict_count: 0,
+                existential_classes: vec![],
+                field_types: Vec::new(),
+            },
+        );
+    }
+
     /// Lower a HIR module to Core.
     pub fn lower_module(&mut self, module: &HirModule) -> LowerResult<CoreModule> {
         // Propagate extension flags
@@ -4951,102 +5321,23 @@ impl LowerContext {
 
         for item in &module.items {
             match item {
+                Item::Data(data_def) => self.register_data_constructors(data_def),
+                Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
+                _ => {}
+            }
+        }
+
+        for item in &module.items {
+            match item {
                 Item::Value(value_def) => {
                     if let Some(bind) = self.lower_value_def(value_def)? {
                         bindings.push(bind);
                     }
                 }
                 Item::Data(data_def) => {
-                    // Register data constructors with their metadata
-                    // The tag is the 0-based position in the constructor list
-                    for (tag, con) in data_def.cons.iter().enumerate() {
-                        let var = self.named_var(con.name, Ty::Error);
-                        self.register_var(con.id, var);
-
-                        // Calculate arity and field names based on field type
-                        let (arity, field_names) = match &con.fields {
-                            bhc_hir::ConFields::Positional(fields) => (fields.len() as u32, vec![]),
-                            bhc_hir::ConFields::Named(fields) => {
-                                // Register field selector functions
-                                for field in fields {
-                                    // The accessor is emitted as a separate value
-                                    // binding (id == field.id) and its var is
-                                    // already registered by the pre-pass over all
-                                    // items. Do NOT overwrite it with a fresh var
-                                    // here: a value that forward-references the
-                                    // accessor (a field used above its `data`
-                                    // declaration, e.g. Text.Parsec's
-                                    // `unknownError s = … statePos s` above
-                                    // `data State`) is lowered before this Data
-                                    // item and would then reference the pre-pass
-                                    // var while the accessor binding uses the
-                                    // fresh one — an undeclared, stubbed selector.
-                                    if self.lookup_var(field.id).is_none() {
-                                        let selector_var = self.named_var(field.name, Ty::Error);
-                                        self.register_var(field.id, selector_var);
-                                    }
-                                    // Also register field metadata for later lookup
-                                    self.register_field_selector(
-                                        field.name,
-                                        FieldSelectorInfo {
-                                            field_name: field.name,
-                                            con_id: con.id,
-                                            con_name: con.name,
-                                            type_name: data_def.name,
-                                            field_index: fields
-                                                .iter()
-                                                .position(|f| f.id == field.id)
-                                                .unwrap_or(0),
-                                            total_fields: fields.len(),
-                                        },
-                                    );
-                                }
-                                let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
-                                (fields.len() as u32, names)
-                            }
-                        };
-
-                        // Record declared field types (already `bhc_types::Ty`)
-                        // so codegen can recover a pattern-bound field's type for
-                        // `show`/`print` dispatch (otherwise erased).
-                        let field_tys: Vec<Ty> = match &con.fields {
-                            bhc_hir::ConFields::Positional(tys) => tys.clone(),
-                            bhc_hir::ConFields::Named(fs) => {
-                                fs.iter().map(|f| f.ty.clone()).collect()
-                            }
-                        };
-                        self.constructor_field_types
-                            .insert(con.name, field_tys.clone());
-
-                        // Register constructor metadata
-                        // Only count user-defined class constraints for dict fields.
-                        // Builtin classes (Show, Eq, etc.) use codegen dispatch, not dicts.
-                        let user_existential: Vec<Symbol> = con
-                            .existential_context
-                            .iter()
-                            .filter(|c| self.is_user_class(c.class))
-                            .map(|c| c.class)
-                            .collect();
-                        let existential_dict_count = user_existential.len() as u32;
-                        let existential_classes = user_existential;
-                        // Arity includes dict fields for existential constructors
-                        let total_arity = arity + existential_dict_count;
-                        self.register_constructor(
-                            con.id,
-                            ConstructorInfo {
-                                name: con.name,
-                                type_name: data_def.name,
-                                tag: tag as u32,
-                                arity: total_arity,
-                                field_names,
-                                is_newtype: false,
-                                existential_dict_count,
-                                existential_classes,
-                                field_types: field_tys.clone(),
-                            },
-                        );
-                    }
-
+                    // Constructors were registered by the pre-pass
+                    // (`register_data_constructors`), before any value was
+                    // lowered.
                     // Process deriving clauses with strategy dispatch
                     if !data_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = data_def
@@ -5103,48 +5394,7 @@ impl LowerContext {
                     }
                 }
                 Item::Newtype(newtype_def) => {
-                    // Register the newtype constructor
-                    let var = self.named_var(newtype_def.con.name, Ty::Error);
-                    self.register_var(newtype_def.con.id, var);
-
-                    // Register constructor metadata for codegen (newtype = identity)
-                    let arity = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
-                        bhc_hir::ConFields::Named(fields) => fields.len() as u32,
-                    };
-                    let field_names = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(_) => vec![],
-                        bhc_hir::ConFields::Named(fields) => {
-                            fields.iter().map(|f| f.name).collect()
-                        }
-                    };
-                    // What the newtype WRAPS. Codegen reads this to find the
-                    // transformer layer of a monad defined as a newtype —
-                    // pandoc's `newtype Future s a = Future (Reader s a)`
-                    // derives its Monad, so `return x :: Future s a` must
-                    // build the Reader closure `runF` calls. Data declarations
-                    // record the same thing further down.
-                    let field_tys: Vec<Ty> = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(tys) => tys.clone(),
-                        bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
-                    };
-                    self.constructor_field_types
-                        .insert(newtype_def.con.name, field_tys);
-                    self.register_constructor(
-                        newtype_def.con.id,
-                        ConstructorInfo {
-                            name: newtype_def.con.name,
-                            type_name: newtype_def.name,
-                            tag: 0,
-                            arity,
-                            field_names,
-                            is_newtype: true,
-                            existential_dict_count: 0,
-                            existential_classes: vec![],
-                            field_types: Vec::new(),
-                        },
-                    );
-
+                    // Registered by the pre-pass (`register_newtype_constructor`).
                     // Process deriving clauses with strategy dispatch
                     if !newtype_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = newtype_def
@@ -5158,6 +5408,20 @@ impl LowerContext {
                                     clause,
                                 ) {
                                     return Some(derived);
+                                }
+                                if let bhc_hir::DerivingStrategy::Via(via) = &clause.strategy {
+                                    if class_name.as_str() == "Show" && !has_type_variables(via) {
+                                        let via = self.expand_type_aliases(via);
+                                        return deriv_ctx.derive_show_via(newtype_def, &via);
+                                    }
+                                    if let Some(derived) = self.derive_newtype_via_type(
+                                        &mut deriv_ctx,
+                                        newtype_def,
+                                        clause,
+                                        via,
+                                    ) {
+                                        return Some(derived);
+                                    }
                                 }
                                 match &clause.strategy {
                                     bhc_hir::DerivingStrategy::Stock => {
@@ -5702,6 +5966,9 @@ impl LowerContext {
             .any(|c| c.field_names.contains(&value_def.name));
         if !is_selector {
             body = self.eta_expand_point_free_method(body, value_def);
+            if let Some(sig) = self.current_binding_sig.clone() {
+                Self::type_eta_params(&mut body, &sig);
+            }
         }
 
         // If there are constraints, wrap the body in dictionary lambdas.
@@ -5830,15 +6097,26 @@ impl LowerContext {
         if let Some(sig) = self.current_binding_sig.clone() {
             self.push_sig_into_equations(method_def, &sig);
         }
+        let saved_context = std::mem::replace(
+            &mut self.current_instance_context,
+            inst_constraints.to_vec(),
+        );
 
         // Compile the method body (now with constraint dicts in scope)
         let body = self.compile_equations(method_def);
-        self.current_binding_sig = saved_binding_sig;
+        let instance_sig = std::mem::replace(&mut self.current_binding_sig, saved_binding_sig);
+        self.current_instance_context = saved_context;
         let mut body = body?;
 
         self.pop_dict_scope();
 
         body = self.eta_expand_point_free_method(body, method_def);
+        // Eta-expanded parameters of a point-free method (`sh = show`) take
+        // the instance's argument types, so a builtin applied to them is
+        // dispatched at the instance type (#30).
+        if let Some(sig) = instance_sig {
+            Self::type_eta_params(&mut body, &sig);
+        }
 
         // Wrap body with dict lambdas (outermost first)
         for (_, dict_var) in dict_vars.into_iter().rev() {
@@ -6273,14 +6551,13 @@ impl LowerContext {
                     lspan,
                 );
             }
+            // Every argument goes inside a wrapping `let` (a dictionary
+            // binding), so `(let d = … in (==) x) y` becomes a saturated
+            // `let d = … in (==) x y` rather than a partial `==` under a let.
             let mut b = body;
-            for (i, p) in params.iter().enumerate() {
+            for p in params {
                 let arg = core::Expr::Var(p.clone(), span);
-                b = if i == 0 {
-                    unroll(b, arg, span)
-                } else {
-                    core::Expr::App(Box::new(b), Box::new(arg), span)
-                };
+                b = unroll(b, arg, span);
             }
             for p in params.iter().rev() {
                 b = core::Expr::Lam(p.clone(), Box::new(b), span);
@@ -6288,6 +6565,24 @@ impl LowerContext {
             b
         }
         expand_under(body, &params, method_def.span, &apply_unrolling_composition)
+    }
+
+    /// Give untyped `$eta` parameters of a method's leading lambdas the
+    /// argument types of `sig`, at the binder and at every use.
+    fn type_eta_params(body: &mut core::Expr, sig: &Ty) {
+        let mut sig = sig;
+        while let Ty::Forall(_, inner) = sig {
+            sig = inner;
+        }
+        let mut expr = body;
+        while let (core::Expr::Lam(param, inner, _), Ty::Fun(arg_ty, rest)) = (expr, sig) {
+            if param.name.as_str().starts_with("$eta") && matches!(param.ty, Ty::Error) {
+                param.ty = (**arg_ty).clone();
+                crate::expr::retype_var_uses(inner, param.id, arg_ty);
+            }
+            expr = inner.as_mut();
+            sig = rest.as_ref();
+        }
     }
 
     /// Lower a default method implementation from a class definition.
@@ -6600,6 +6895,11 @@ fn lazify_self_recursive_monadic_args(bindings: &mut [Bind]) {
             _ => false,
         }
     }
+    fn is_saturated_cons(e: &core::Expr) -> bool {
+        matches!(e, core::Expr::App(f, _, _)
+            if matches!(f.as_ref(), core::Expr::App(c, _, _)
+                if matches!(c.as_ref(), core::Expr::Var(v, _) if v.name.as_str() == ":")))
+    }
     // Keyed by VarId, never by name: pandoc's Markdown reader defines its own
     // `str` and also calls the imported `B.str`, and a name key wrapped
     // `B.str result` as a "self-call" — the Future then held an unforced
@@ -6641,6 +6941,15 @@ fn lazify_self_recursive_monadic_args(bindings: &mut [Bind]) {
                     }
                     is_monadic_method(h)
                 };
+                // `n : go (n + 1)`: a self-call in a cons tail is a
+                // corecursive producer; evaluating it eagerly never returns.
+                // List traversals force tails (`extract_list_tail`), so a
+                // thunk there is safe.
+                if is_saturated_cons(e) {
+                    if let core::Expr::App(_, tail, _) = e {
+                        wrap_if_self_call(tail, selfs);
+                    }
+                }
                 rw_spine(e, monadic, selfs);
             }
             core::Expr::Lam(_, b, _) | core::Expr::TyLam(_, b, _) => rw(b, selfs),
@@ -7279,5 +7588,35 @@ mod tests {
         let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
         let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
         assert_ne!(v1.id, v2.id);
+    }
+}
+
+/// Spell every list type as `Ty::List`. A resolved type can carry the
+/// constructor form `[] a` (`App(Con "[]", a)`) where instance heads and
+/// declared types use `Ty::List`, and the two never match: `MonadReader
+/// ([] Int, Int) (RWST ([Int], Int) …)` found no instance, so `asks` ran
+/// without a dictionary. Only for matching a scheme to find dictionaries:
+/// monad-head dispatch recognises the list monad by its `[]` constructor.
+pub(crate) fn canonical_list_spelling(ty: &Ty) -> Ty {
+    match ty {
+        Ty::App(f, a) => {
+            if let Ty::Con(tc) = f.as_ref() {
+                if tc.name.as_str() == "[]" {
+                    return Ty::List(Box::new(canonical_list_spelling(a)));
+                }
+            }
+            Ty::App(
+                Box::new(canonical_list_spelling(f)),
+                Box::new(canonical_list_spelling(a)),
+            )
+        }
+        Ty::Fun(a, r) => Ty::Fun(
+            Box::new(canonical_list_spelling(a)),
+            Box::new(canonical_list_spelling(r)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(canonical_list_spelling(e))),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(canonical_list_spelling).collect()),
+        Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(canonical_list_spelling(b))),
+        other => other.clone(),
     }
 }

@@ -434,6 +434,26 @@ impl TypeEnv {
         vars
     }
 
+    /// The free type variables of the lexical (name-keyed) scopes only,
+    /// leaving out the innermost scope's entries for `except`.
+    ///
+    /// Unlike the DefId-keyed globals, which keep every pattern variable ever
+    /// bound, these are exactly the bindings in scope at this point.
+    #[must_use]
+    pub fn local_free_vars_except(&self, except: &[Symbol]) -> Vec<TyVar> {
+        let mut vars = Vec::new();
+        let innermost = self.locals.len().saturating_sub(1);
+        for (i, scope) in self.locals.iter().enumerate() {
+            for (name, scheme) in scope {
+                if i == innermost && except.contains(name) {
+                    continue;
+                }
+                collect_scheme_free_vars(scheme, &mut vars);
+            }
+        }
+        vars
+    }
+
     /// Look up which class defines an associated type.
     ///
     /// Returns the class info and the associated type info if found.

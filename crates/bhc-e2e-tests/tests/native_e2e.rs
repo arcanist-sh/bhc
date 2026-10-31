@@ -125,6 +125,18 @@ fn test_tier2_lazy_infinite_native() {
     run_native_test("tier2_functions/lazy_infinite", Profile::Default);
 }
 
+// Corecursive producers (`n : go (n + 1)`) and lazy iterate/repeat/cycle (#28).
+#[test]
+fn test_tier2_corecursive_lists_native() {
+    run_native_test("tier2_functions/corecursive_lists", Profile::Default);
+}
+
+// List transformers over infinite lists resume lazily (#54).
+#[test]
+fn test_tier2_lazy_list_transformers_native() {
+    run_native_test("tier2_functions/lazy_list_transformers", Profile::Default);
+}
+
 // A function with a lazy parameter that is ALSO used as a first-class value.
 // Both sides of a call must agree that a parameter is a thunk, and an indirect
 // call cannot agree — so escape analysis has to exclude this function and keep
@@ -642,6 +654,36 @@ fn test_tier3_as_pattern_order_native() {
 #[test]
 fn test_tier3_eq_parametric_field_native() {
     run_native_test("tier3_io/eq_parametric_field", Profile::Default);
+}
+
+#[test]
+fn test_tier3_multiparam_dict_inner_monad_native() {
+    run_native_test("tier3_io/multiparam_dict_inner_monad", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_context_hop_native() {
+    run_native_test("tier3_io/instance_context_hop", Profile::Default);
+}
+
+/// Closure IO model only: eager mode cannot yet run a user-defined state
+/// transformer over a polymorphic inner monad at all.
+#[test]
+fn test_tier3_fundep_reader_list_env_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/fundep_reader_list_env", Profile::Default);
+}
+
+/// Closure IO model only: eager mode cannot yet run a user-defined state
+/// transformer over a polymorphic inner monad at all.
+#[test]
+fn test_tier3_instance_context_bind_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/instance_context_bind", Profile::Default);
 }
 
 /// Closure IO model only: eager mode still generalizes local functions over
@@ -1370,6 +1412,286 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_layout_explicit_semicolons() {
+    run_native_test(
+        "tier2_functions/layout_explicit_semicolons",
+        Profile::Default,
+    );
+}
+
+/// Closure IO model only: eager mode cannot pass a constrained function as a
+/// value (`fmap sequence . mapM f`) at all.
+#[test]
+fn test_tier2_nested_sequence_future() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier2_functions/nested_sequence_future", Profile::Default);
+}
+
+/// Closure IO model only: eager mode does not record the occurrence types
+/// the rewrite keys on, so the combinators still stub there.
+#[test]
+fn test_tier2_arrow_function_combinators() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test(
+        "tier2_functions/arrow_function_combinators",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_text_literal_field_pattern() {
+    run_native_test(
+        "tier2_functions/text_literal_field_pattern",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_prelude_pi() {
+    run_native_test("tier2_functions/prelude_pi", Profile::Default);
+}
+
+#[test]
+fn test_tier3_stdin_readln() {
+    run_native_test("tier3_io/stdin_readln", Profile::Default);
+}
+
+#[test]
+fn test_tier3_getline_env() {
+    run_native_test("tier3_io/getline_env", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_builtin_alias() {
+    run_native_test("tier3_io/instance_builtin_alias", Profile::Default);
+}
+
+#[test]
+fn test_tier2_unboxed_tuples() {
+    run_native_test("tier2_functions/unboxed_tuples", Profile::Default);
+}
+
+#[test]
+fn test_tier3_derived_traverse() {
+    run_native_test("tier3_io/derived_traverse", Profile::Default);
+}
+
+// Content-ordered boxed Map keys, a stored 0, `fmap` as a value (#25).
+#[test]
+fn test_tier3_map_key_order_and_values() {
+    run_native_test("tier3_io/map_key_order_and_values", Profile::Default);
+}
+
+// `show`/`print` of a Map or Set renders `fromList [...]` (#55).
+#[test]
+fn test_tier3_show_map_set() {
+    run_native_test("tier3_io/show_map_set", Profile::Default);
+}
+
+// Data.IntMap / Data.IntSet builtins have real types; show renders them (#56).
+#[test]
+fn test_tier3_intmap_intset_types() {
+    run_native_test("tier3_io/intmap_intset_types", Profile::Default);
+}
+
+// Integer ranges, parity, min/max and show of Integer elements (#51).
+#[test]
+fn test_tier2_integer_ranges() {
+    run_native_test("tier2_functions/integer_ranges", Profile::Default);
+}
+
+// `[n ..]` / `[a, b ..]` at Int are lazy and unbounded (#58).
+#[test]
+fn test_tier2_enum_from_lazy() {
+    run_native_test("tier2_functions/enum_from_lazy", Profile::Default);
+}
+
+// zip3 / zipWith3 have their real types.
+#[test]
+fn test_tier2_zip3_types() {
+    run_native_test("tier2_functions/zip3_types", Profile::Default);
+}
+
+// Data.Monoid newtypes from the bundled library (#52).
+#[test]
+fn test_tier2_data_monoid() {
+    run_native_test("tier2_functions/data_monoid", Profile::Default);
+}
+
+// Data.Semigroup newtypes from the bundled library (#52).
+#[test]
+fn test_tier2_data_semigroup() {
+    run_native_test("tier2_functions/data_semigroup", Profile::Default);
+}
+
+// Derived Show of newtypes, and of types imported from another module (#52).
+#[test]
+fn test_tier2_newtype_show_multimodule() {
+    run_native_test("tier2_functions/newtype_show_multimodule", Profile::Default);
+}
+
+// DerivingVia through the monoid newtypes and through a user Show (#35).
+#[test]
+fn test_tier2_deriving_via_monoid() {
+    run_native_test("tier2_functions/deriving_via_monoid", Profile::Default);
+}
+
+// Associated type reduced before instance resolution; user class method
+// named like a builtin one (#34).
+#[test]
+fn test_tier2_assoc_type_literal() {
+    run_native_test("tier2_functions/assoc_type_literal", Profile::Default);
+}
+
+// A GADT indexed at several types, matched by clauses and by case (#33).
+#[test]
+fn test_tier2_gadt_multi_index() {
+    run_native_test("tier2_functions/gadt_multi_index", Profile::Default);
+}
+
+// Integer literals beyond 64 bits; Integer literal patterns (#57).
+#[test]
+fn test_tier2_integer_literals_wide() {
+    run_native_test("tier2_functions/integer_literals_wide", Profile::Default);
+}
+
+// Defaulting does not overwrite a type an annotation already fixed (#57).
+#[test]
+fn test_tier2_integer_annotation_chains() {
+    run_native_test(
+        "tier2_functions/integer_annotation_chains",
+        Profile::Default,
+    );
+}
+
+// Derived Show of fields typed by a type parameter, nested and recursive,
+// and across modules (#59).
+#[test]
+fn test_tier2_show_type_param_fields() {
+    run_native_test("tier2_functions/show_type_param_fields", Profile::Default);
+}
+
+#[test]
+fn test_tier3_deriving_via() {
+    run_native_test("tier3_io/deriving_via", Profile::Default);
+}
+
+#[test]
+fn test_tier2_derived_show_record() {
+    run_native_test("tier2_functions/derived_show_record", Profile::Default);
+}
+
+#[test]
+fn test_tier2_derived_show_parens() {
+    run_native_test("tier2_functions/derived_show_parens", Profile::Default);
+}
+
+#[test]
+fn test_tier3_derived_functor_print() {
+    run_native_test("tier3_io/derived_functor_print", Profile::Default);
+}
+
+#[test]
+fn test_tier3_maybe_either_applicative() {
+    run_native_test("tier3_io/maybe_either_applicative", Profile::Default);
+}
+
+#[test]
+fn test_tier2_numeric_folds() {
+    run_native_test("tier2_functions/numeric_folds", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_tuples_chars() {
+    run_native_test("tier2_functions/show_tuples_chars", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_as_value() {
+    run_native_test("tier2_functions/show_as_value", Profile::Default);
+}
+
+#[test]
+fn test_tier2_kind_signatures() {
+    run_native_test("tier2_functions/kind_signatures", Profile::Default);
+}
+
+#[test]
+fn test_tier2_read_double_list() {
+    run_native_test("tier2_functions/read_double_list", Profile::Default);
+}
+
+#[test]
+fn test_tier2_data_map_strict() {
+    run_native_test("tier2_functions/data_map_strict", Profile::Default);
+}
+
+#[test]
+fn test_tier2_list_union() {
+    run_native_test("tier2_functions/list_union", Profile::Default);
+}
+
+#[test]
+fn test_tier2_mapm_pointfree_import() {
+    run_native_test("tier2_functions/mapm_pointfree_import", Profile::Default);
+}
+
+#[test]
+fn test_tier2_data_declared_after_use() {
+    run_native_test("tier2_functions/data_declared_after_use", Profile::Default);
+}
+
+#[test]
+fn test_tier2_intersperse_typed() {
+    run_native_test("tier2_functions/intersperse_typed", Profile::Default);
+}
+
+#[test]
+fn test_tier2_nonempty_cons() {
+    run_native_test("tier2_functions/nonempty_cons", Profile::Default);
+}
+
+#[test]
+fn test_tier2_unit_monoid() {
+    run_native_test("tier2_functions/unit_monoid", Profile::Default);
+}
+
+#[test]
+fn test_tier2_multimodule_qualified_con_collision() {
+    run_native_test(
+        "tier2_functions/multimodule_qualified_con_collision",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_partial_constructor_value() {
+    run_native_test(
+        "tier2_functions/partial_constructor_value",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_nested_where_multiclause() {
+    run_native_test("tier2_functions/nested_where_multiclause", Profile::Default);
+}
+
+/// Closure IO model only: eager mode cannot pass a constrained function as a
+/// value (`map totalWidth cells`) at all.
+#[test]
+fn test_tier2_let_alias_class_arg() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier2_functions/let_alias_class_arg", Profile::Default);
+}
+
+#[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);
 }
@@ -1970,4 +2292,11 @@ fn test_tier4_sum_map_named_numeric() {
 #[test]
 fn test_tier4_foldl_map_lambda_numeric() {
     run_native_test("tier4_fusion/foldl_map_lambda", Profile::Numeric);
+}
+
+// writeFile/appendFile with computed strings, read back; `++` after a
+// computed String (#40).
+#[test]
+fn test_tier3_file_append_roundtrip() {
+    run_native_test("tier3_io/file_append_roundtrip", Profile::Default);
 }

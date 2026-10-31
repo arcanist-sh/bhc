@@ -57,7 +57,18 @@ pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
                 .map(|t| substitute(t, &subst))
                 .collect();
             ctx.emit_constraint_multi(constraint.class, substituted_args, constraint.span);
-        } else if crate::io_closure_mode() && !crate::infer::is_builtin_class(constraint.class) {
+        } else if crate::io_closure_mode()
+            && (!crate::infer::is_builtin_class(constraint.class)
+                || matches!(
+                    constraint.class.as_str(),
+                    "Monad" | "Applicative" | "Functor" | "MonadPlus" | "Alternative" | "MonadFail"
+                ))
+        {
+            // The monad family is builtin but dictionary-passed under the
+            // closure IO model. Without recording it, a local `go` calling
+            // `getS :: Monad m => RS r s m s` was generalized over `m` (an
+            // argument of the type, not its applied head) and `getS` ran with
+            // no dictionary (pandoc's AnnotatedTable `RWS` helpers).
             ctx.dict_constraint_args
                 .extend(constraint.args.iter().map(|t| substitute(t, &subst)));
         }

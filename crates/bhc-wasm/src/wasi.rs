@@ -1146,11 +1146,52 @@ pub fn generate_file_write_host(
     fd_write_idx: u32,
     fd_close_idx: u32,
 ) -> WasmFunc {
+    file_host_writer(
+        "file_write_host",
+        OFLAGS_CREAT | OFLAGS_TRUNC,
+        0,
+        path_open_idx,
+        fd_write_idx,
+        fd_close_idx,
+    )
+}
+
+/// Generate `file_append_host(path, content)`: like
+/// [`generate_file_write_host`], but the file is opened without truncation
+/// and in append mode, so `appendFile` extends what is on disk (#40).
+pub fn generate_file_append_host(
+    path_open_idx: u32,
+    fd_write_idx: u32,
+    fd_close_idx: u32,
+) -> WasmFunc {
+    file_host_writer(
+        "file_append_host",
+        OFLAGS_CREAT,
+        FDFLAGS_APPEND,
+        path_open_idx,
+        fd_write_idx,
+        fd_close_idx,
+    )
+}
+
+/// WASI `fdflags` bit for append mode.
+const FDFLAGS_APPEND: i32 = 1;
+
+/// A host-file writer: `path_open` with `oflags`/`fdflags`, write the whole
+/// `pstr` content, close. Best-effort: without a `--dir` preopen it returns.
+fn file_host_writer(
+    name: &str,
+    oflags: i32,
+    fdflags: i32,
+    path_open_idx: u32,
+    fd_write_idx: u32,
+    fd_close_idx: u32,
+) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // path, content
         vec![],
     ));
-    func.name = Some("file_write_host".to_string());
+    func.name = Some(name.to_string());
     func.exported = true;
     let fd = func.add_local(WasmType::I32);
 
@@ -1165,10 +1206,10 @@ pub fn generate_file_write_host(
     func.emit(WasmInstr::I32Load(2, 0));
     func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
     func.emit(WasmInstr::I32And);
-    func.emit(WasmInstr::I32Const(OFLAGS_CREAT | OFLAGS_TRUNC));
+    func.emit(WasmInstr::I32Const(oflags));
     func.emit(WasmInstr::I64Const(RIGHTS_FD_WRITE));
     func.emit(WasmInstr::I64Const(RIGHTS_FD_WRITE));
-    func.emit(WasmInstr::I32Const(0)); // fdflags
+    func.emit(WasmInstr::I32Const(fdflags));
     func.emit(WasmInstr::I32Const(FILE_FD_OUT));
     func.emit(WasmInstr::Call(path_open_idx));
     // errno != 0 -> give up (no host FS); in-memory table still has the write
@@ -1329,9 +1370,15 @@ pub fn generate_file_read(
     func
 }
 
-/// Generate `file_append(path, content)`: append `content` to an existing file's
-/// contents (via `concat_str`), or create the file if it is absent.
-pub fn generate_file_append(alloc_idx: u32, concat_str_idx: u32, file_table_idx: u32) -> WasmFunc {
+/// Generate `file_append(path, content)`: append `content` to the host file
+/// (best-effort, via `file_append_host`) AND to the in-memory file table entry
+/// (via `concat_str`), creating either if it is absent.
+pub fn generate_file_append(
+    alloc_idx: u32,
+    concat_str_idx: u32,
+    file_table_idx: u32,
+    file_append_host_idx: u32,
+) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // path, content
         vec![],
@@ -1340,6 +1387,12 @@ pub fn generate_file_append(alloc_idx: u32, concat_str_idx: u32, file_table_idx:
     func.exported = true;
     let cur = func.add_local(WasmType::I32);
     let node = func.add_local(WasmType::I32);
+
+    // Persist to the host filesystem first (no-op without a --dir preopen);
+    // it used to update only the table, so the file on disk never grew (#40).
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::Call(file_append_host_idx));
 
     func.emit(WasmInstr::GlobalGet(file_table_idx));
     func.emit(WasmInstr::LocalSet(cur));

@@ -346,7 +346,14 @@ fn process_imports(
                     module = %module_name,
                     "module not found in search paths, using standard library fallback"
                 );
-                register_standard_module_exports(ctx, &module_name, Some(import));
+                let known = register_standard_module_exports(ctx, &module_name, Some(import))
+                    || BUILTIN_ONLY_MODULES.contains(&module_name.as_str());
+                if !known {
+                    ctx.warnings.push(crate::LowerWarning::ModuleNotFound {
+                        name: module_name.clone(),
+                        span: import.span,
+                    });
+                }
             }
             Err(LoadError::CircularImport(ref cycle_module)) => {
                 // Log circular import but don't fail - allow compilation to continue
@@ -370,6 +377,10 @@ fn process_imports(
         }
     }
 }
+
+/// Modules whose exports are all builtins, so they have no export table in
+/// `register_standard_module_exports` but importing them is not an error.
+const BUILTIN_ONLY_MODULES: &[&str] = &["Data.Kind"];
 
 /// What `Prelude` exports, as far as bhc models it. An unqualified import
 /// never displaces one of these builtins (see `is_prelude_export`).
@@ -591,11 +602,13 @@ pub(crate) fn is_prelude_export(name: &str) -> bool {
 /// It registers common functions from well-known modules.
 /// When `import_decl` is provided, qualified names are also registered under the
 /// import alias (e.g., `T.pack` for `import qualified Data.Text as T`).
+///
+/// Returns whether bhc knows the module, i.e. it has an export table here.
 fn register_standard_module_exports(
     ctx: &mut LowerContext,
     module_name: &str,
     import_decl: Option<&ast::ImportDecl>,
-) {
+) -> bool {
     let exports: &[&str] = match module_name {
         "Prelude" => PRELUDE_EXPORTS,
         "Data.Map"
@@ -5990,6 +6003,7 @@ fn register_standard_module_exports(
 
         _ => &[],
     };
+    let known = !exports.is_empty();
 
     // Determine the qualifier to use for qualified access
     let qualifier = if let Some(import) = import_decl {
@@ -6211,14 +6225,25 @@ fn register_standard_module_exports(
                 // exists and runs. Bind the alias straight to the primop when one
                 // is present; only synthesize a stub when there is genuinely no
                 // builtin (e.g. `T.groupBy`), keeping it distinct from Prelude's.
+                //
+                // The strict and lazy container modules export the same
+                // functions as their base module, and the primops are
+                // registered under the base name only (`Data.Map.toList`);
+                // a `Data.Map.Strict.toList` stub ran as "not implemented".
+                let builtin_module = match module_name {
+                    "Data.Map.Strict" | "Data.Map.Lazy" => "Data.Map",
+                    "Data.IntMap.Strict" | "Data.IntMap.Lazy" => "Data.IntMap",
+                    other => other,
+                };
+                let builtin_qualified = Symbol::intern(&format!("{builtin_module}.{export}"));
                 let real_builtin = ctx
-                    .lookup_value(full_qualified)
+                    .lookup_value(builtin_qualified)
                     .filter(|d| prefer_real_builtin && !ctx.is_stub(*d));
                 if let Some(def_id) = real_builtin {
                     ctx.bind_value(aliased_qualified, def_id);
                 } else {
                     let qual_def_id = ctx.fresh_def_id();
-                    let qual_def_name = full_qualified;
+                    let qual_def_name = builtin_qualified;
                     if is_constructor {
                         ctx.define(
                             qual_def_id,
@@ -6518,6 +6543,7 @@ fn register_standard_module_exports(
             }
         }
     }
+    known
 }
 
 /// Lower a top-level declaration.
@@ -7200,79 +7226,12 @@ fn lower_clause_in(
                             let rhs_expr = if inner_clause.wheres.is_empty() {
                                 lower_rhs(ctx, &inner_clause.rhs)
                             } else {
-                                // Handle nested where bindings
-                                ctx.enter_scope();
-                                for nested_decl in &inner_clause.wheres {
-                                    if let ast::Decl::FunBind(nested_fb) = nested_decl {
-                                        // Check for pattern binding ($patbind)
-                                        if nested_fb.name.name.as_str() == "$patbind"
-                                            && nested_fb.clauses.len() == 1
-                                            && nested_fb.clauses[0].pats.len() == 1
-                                        {
-                                            bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
-                                        } else {
-                                            let nested_def_id = ctx.fresh_def_id();
-                                            ctx.define(
-                                                nested_def_id,
-                                                nested_fb.name.name,
-                                                DefKind::Value,
-                                                nested_fb.span,
-                                            );
-                                            ctx.bind_value(nested_fb.name.name, nested_def_id);
-                                        }
-                                    }
-                                }
-                                let body = lower_rhs(ctx, &inner_clause.rhs);
-                                let nested_bindings: Vec<hir::Binding> = inner_clause
-                                    .wheres
-                                    .iter()
-                                    .filter_map(|d| {
-                                        if let ast::Decl::FunBind(nested_fb) = d {
-                                            // Handle pattern bindings ($patbind)
-                                            if nested_fb.name.name.as_str() == "$patbind"
-                                                && nested_fb.clauses.len() == 1
-                                                && nested_fb.clauses[0].pats.len() == 1
-                                            {
-                                                let pat =
-                                                    lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                                                let rhs_expr = lower_clause_rhs_with_wheres(
-                                                    ctx,
-                                                    &nested_fb.clauses[0],
-                                                );
-                                                return Some(hir::Binding {
-                                                    pat,
-                                                    sig: None,
-                                                    rhs: rhs_expr,
-                                                    span: nested_fb.span,
-                                                });
-                                            }
-                                            let nested_def_id = ctx
-                                                .lookup_value(nested_fb.name.name)
-                                                .expect("nested where binding should be bound");
-                                            if nested_fb.clauses.len() == 1
-                                                && nested_fb.clauses[0].pats.is_empty()
-                                            {
-                                                let nested_rhs = lower_clause_rhs_with_wheres(
-                                                    ctx,
-                                                    &nested_fb.clauses[0],
-                                                );
-                                                return Some(hir::Binding {
-                                                    pat: hir::Pat::Var(
-                                                        nested_fb.name.name,
-                                                        nested_def_id,
-                                                        nested_fb.span,
-                                                    ),
-                                                    sig: None,
-                                                    rhs: nested_rhs,
-                                                    span: nested_fb.span,
-                                                });
-                                            }
-                                        }
-                                        None
-                                    })
-                                    .collect();
-                                ctx.exit_scope();
-                                hir::Expr::Let(nested_bindings, Box::new(body), fb.span)
+                                lower_body_with_wheres(
+                                    ctx,
+                                    &inner_clause.rhs,
+                                    &inner_clause.wheres,
+                                    fb.span,
+                                )
                             };
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
@@ -7300,80 +7259,7 @@ fn lower_clause_in(
                             let body = if clause.wheres.is_empty() {
                                 lower_rhs(ctx, &clause.rhs)
                             } else {
-                                ctx.enter_scope();
-                                // Pre-bind nested where names
-                                for nested_decl in &clause.wheres {
-                                    if let ast::Decl::FunBind(nested_fb) = nested_decl {
-                                        // Check for pattern binding ($patbind)
-                                        if nested_fb.name.name.as_str() == "$patbind"
-                                            && nested_fb.clauses.len() == 1
-                                            && nested_fb.clauses[0].pats.len() == 1
-                                        {
-                                            bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
-                                        } else {
-                                            let nested_def_id = ctx.fresh_def_id();
-                                            ctx.define(
-                                                nested_def_id,
-                                                nested_fb.name.name,
-                                                DefKind::Value,
-                                                nested_fb.span,
-                                            );
-                                            ctx.bind_value(nested_fb.name.name, nested_def_id);
-                                        }
-                                    }
-                                }
-                                let rhs_expr = lower_rhs(ctx, &clause.rhs);
-                                // Lower nested where bindings into a Let
-                                let nested_bindings: Vec<hir::Binding> = clause
-                                    .wheres
-                                    .iter()
-                                    .filter_map(|d| {
-                                        if let ast::Decl::FunBind(nested_fb) = d {
-                                            // Handle pattern bindings ($patbind)
-                                            if nested_fb.name.name.as_str() == "$patbind"
-                                                && nested_fb.clauses.len() == 1
-                                                && nested_fb.clauses[0].pats.len() == 1
-                                            {
-                                                let pat =
-                                                    lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                                                let rhs_expr = lower_clause_rhs_with_wheres(
-                                                    ctx,
-                                                    &nested_fb.clauses[0],
-                                                );
-                                                return Some(hir::Binding {
-                                                    pat,
-                                                    sig: None,
-                                                    rhs: rhs_expr,
-                                                    span: nested_fb.span,
-                                                });
-                                            }
-                                            let nested_def_id = ctx
-                                                .lookup_value(nested_fb.name.name)
-                                                .expect("nested where binding should be bound");
-                                            if nested_fb.clauses.len() == 1
-                                                && nested_fb.clauses[0].pats.is_empty()
-                                            {
-                                                let nested_rhs = lower_clause_rhs_with_wheres(
-                                                    ctx,
-                                                    &nested_fb.clauses[0],
-                                                );
-                                                return Some(hir::Binding {
-                                                    pat: hir::Pat::Var(
-                                                        nested_fb.name.name,
-                                                        nested_def_id,
-                                                        nested_fb.span,
-                                                    ),
-                                                    sig: None,
-                                                    rhs: nested_rhs,
-                                                    span: nested_fb.span,
-                                                });
-                                            }
-                                        }
-                                        None
-                                    })
-                                    .collect();
-                                ctx.exit_scope();
-                                hir::Expr::Let(nested_bindings, Box::new(rhs_expr), fb.span)
+                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
                             };
 
                             ctx.exit_scope();
@@ -7611,6 +7497,159 @@ fn lower_clause_in(
     })
 }
 
+/// Lower one local (`let`/`where`) function or pattern binding whose names
+/// are already bound in scope: a pattern binding, a simple binding, a
+/// single-clause function, or a multi-clause function (a lambda over a case).
+/// Every local binding form goes through here, so a `where` nested in another
+/// `where` binding keeps its multi-clause functions (pandoc-types'
+/// `dropAtMostWhile p n = go 0 where go acc (l:ls) | … ; go acc l = …` had its
+/// `go` dropped and ran as a stub).
+fn lower_local_fun_bind(ctx: &mut LowerContext, fb: &ast::FunBind) -> Option<hir::Binding> {
+    // Check for pattern binding (special name $patbind)
+    if fb.name.name.as_str() == "$patbind" && fb.clauses.len() == 1 && fb.clauses[0].pats.len() == 1
+    {
+        // Pattern binding: (x, y) = expr
+        let pat = lower_pat(ctx, &fb.clauses[0].pats[0]);
+        let rhs_expr = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
+        return Some(hir::Binding {
+            pat,
+            sig: None,
+            rhs: rhs_expr,
+            span: fb.span,
+        });
+    }
+
+    let def_id = ctx
+        .lookup_value(fb.name.name)
+        .expect("let binding should be bound");
+
+    // Simple binding (no parameters): let x = expr
+    if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
+        let clause = &fb.clauses[0];
+        let rhs_expr = if clause.wheres.is_empty() {
+            lower_rhs(ctx, &clause.rhs)
+        } else {
+            lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
+        };
+        return Some(hir::Binding {
+            pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
+            sig: None,
+            rhs: rhs_expr,
+            span: fb.span,
+        });
+    }
+
+    // Single-clause function: let f x y = expr => f = \x -> \y -> expr
+    if fb.clauses.len() == 1 {
+        let clause = &fb.clauses[0];
+        ctx.enter_scope();
+        for p in &clause.pats {
+            bind_pattern(ctx, p);
+        }
+        let mut pats: Vec<hir::Pat> = Vec::new();
+        for p in &clause.pats {
+            pats.push(lower_pat(ctx, p));
+        }
+        let body_expr = if clause.wheres.is_empty() {
+            lower_rhs(ctx, &clause.rhs)
+        } else {
+            lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
+        };
+        ctx.exit_scope();
+        let lam = hir::Expr::Lam(pats, Box::new(body_expr), fb.span);
+        return Some(hir::Binding {
+            pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
+            sig: None,
+            rhs: lam,
+            span: fb.span,
+        });
+    }
+
+    // Multi-clause function: let f 0 = a; f n = b => f = \x -> case x of ...
+    if !fb.clauses.is_empty() && !fb.clauses[0].pats.is_empty() {
+        let arity = fb.clauses[0].pats.len();
+        // Create fresh variables for the lambda parameters
+        let mut param_names = Vec::new();
+        let mut param_pats = Vec::new();
+        for i in 0..arity {
+            let name = Symbol::intern(&format!("_arg{i}"));
+            let param_def_id = ctx.fresh_def_id();
+            // A lambda parameter is a pattern variable: as a
+            // `Value` the type checker pre-registered it with a
+            // polymorphic placeholder scheme, so each use got a
+            // fresh type and the clauses' constructor patterns
+            // never fixed the parameter's type (pandoc's local
+            // `getLevel (Header …) = …` stayed `t -> Min Int`).
+            ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
+            ctx.bind_value(name, param_def_id);
+            param_names.push((name, param_def_id));
+            param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));
+        }
+
+        // Build case alternatives from clauses
+        let mut alts = Vec::new();
+        for clause in &fb.clauses {
+            ctx.enter_scope();
+            for p in &clause.pats {
+                bind_pattern(ctx, p);
+            }
+            let pat = if clause.pats.len() == 1 {
+                lower_pat(ctx, &clause.pats[0])
+            } else {
+                let tuple_def_id = ensure_tuple_constructor(ctx, clause.pats.len(), fb.span);
+                let tuple_ref = ctx.def_ref(tuple_def_id, fb.span);
+                hir::Pat::Con(
+                    tuple_ref,
+                    clause.pats.iter().map(|p| lower_pat(ctx, p)).collect(),
+                    fb.span,
+                )
+            };
+            let (clause_body, clause_guards) = if clause.wheres.is_empty() {
+                lower_alt_rhs_and_guards(ctx, &clause.rhs)
+            } else {
+                let body = lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span);
+                (body, Vec::new())
+            };
+            ctx.exit_scope();
+            alts.push(hir::CaseAlt {
+                pat,
+                guards: clause_guards,
+                rhs: clause_body,
+                span: clause.span,
+            });
+        }
+
+        // Create the scrutinee (tuple of params or single param)
+        let scrutinee = if param_names.len() == 1 {
+            hir::Expr::Var(hir::DefRef {
+                def_id: param_names[0].1,
+                span: fb.span,
+            })
+        } else {
+            let tuple_elems: Vec<hir::Expr> = param_names
+                .iter()
+                .map(|(_n, id)| {
+                    hir::Expr::Var(hir::DefRef {
+                        def_id: *id,
+                        span: fb.span,
+                    })
+                })
+                .collect();
+            hir::Expr::Tuple(tuple_elems, fb.span)
+        };
+
+        let case_expr = hir::Expr::Case(Box::new(scrutinee), alts, fb.span);
+        let lam = hir::Expr::Lam(param_pats, Box::new(case_expr), fb.span);
+        return Some(hir::Binding {
+            pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
+            sig: None,
+            rhs: lam,
+            span: fb.span,
+        });
+    }
+    None
+}
+
 /// Lower a right-hand side.
 /// Lower a function body that has where-clause bindings.
 /// Enters a scope, pre-binds where names, lowers the body, wraps in Let.
@@ -7647,53 +7686,10 @@ fn lower_body_with_wheres(
         .iter()
         .filter_map(|d| {
             if let ast::Decl::FunBind(nested_fb) = d {
-                // Handle pattern bindings ($patbind)
-                if nested_fb.name.name.as_str() == "$patbind"
-                    && nested_fb.clauses.len() == 1
-                    && nested_fb.clauses[0].pats.len() == 1
-                {
-                    let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                    let nested_rhs = lower_clause_rhs_with_wheres(ctx, &nested_fb.clauses[0]);
-                    return Some(hir::Binding {
-                        pat,
-                        sig: None,
-                        rhs: nested_rhs,
-                        span: nested_fb.span,
-                    });
-                }
-                let nested_def_id = ctx
-                    .lookup_value(nested_fb.name.name)
-                    .expect("nested where binding should be bound");
-                if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
-                    let nested_rhs = lower_clause_rhs_with_wheres(ctx, &nested_fb.clauses[0]);
-                    return Some(hir::Binding {
-                        pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
-                        sig: None,
-                        rhs: nested_rhs,
-                        span: nested_fb.span,
-                    });
-                }
-                // Single-clause with parameters: lower to lambda
-                if nested_fb.clauses.len() == 1 {
-                    let clause = &nested_fb.clauses[0];
-                    ctx.enter_scope();
-                    for p in &clause.pats {
-                        bind_pattern(ctx, p);
-                    }
-                    let pats: Vec<hir::Pat> =
-                        clause.pats.iter().map(|p| lower_pat(ctx, p)).collect();
-                    let body = lower_clause_rhs_with_wheres(ctx, clause);
-                    ctx.exit_scope();
-                    let lam = hir::Expr::Lam(pats, Box::new(body), nested_fb.span);
-                    return Some(hir::Binding {
-                        pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
-                        sig: None,
-                        rhs: lam,
-                        span: nested_fb.span,
-                    });
-                }
+                lower_local_fun_bind(ctx, nested_fb)
+            } else {
+                None
             }
-            None
         })
         .collect();
     let mut nested_bindings = nested_bindings;
@@ -8158,158 +8154,10 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 .iter()
                 .filter_map(|d| {
                     if let ast::Decl::FunBind(fb) = d {
-                        // Check for pattern binding (special name $patbind)
-                        if fb.name.name.as_str() == "$patbind"
-                            && fb.clauses.len() == 1
-                            && fb.clauses[0].pats.len() == 1
-                        {
-                            // Pattern binding: (x, y) = expr
-                            let pat = lower_pat(ctx, &fb.clauses[0].pats[0]);
-                            let rhs_expr = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
-                            return Some(hir::Binding {
-                                pat,
-                                sig: None,
-                                rhs: rhs_expr,
-                                span: fb.span,
-                            });
-                        }
-
-                        let def_id = ctx
-                            .lookup_value(fb.name.name)
-                            .expect("let binding should be bound");
-
-                        // Simple binding (no parameters): let x = expr
-                        if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
-                            let clause = &fb.clauses[0];
-                            let rhs_expr = if clause.wheres.is_empty() {
-                                lower_rhs(ctx, &clause.rhs)
-                            } else {
-                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
-                            };
-                            return Some(hir::Binding {
-                                pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
-                                sig: None,
-                                rhs: rhs_expr,
-                                span: fb.span,
-                            });
-                        }
-
-                        // Single-clause function: let f x y = expr => f = \x -> \y -> expr
-                        if fb.clauses.len() == 1 {
-                            let clause = &fb.clauses[0];
-                            ctx.enter_scope();
-                            for p in &clause.pats {
-                                bind_pattern(ctx, p);
-                            }
-                            let mut pats: Vec<hir::Pat> = Vec::new();
-                            for p in &clause.pats {
-                                pats.push(lower_pat(ctx, p));
-                            }
-                            let body_expr = if clause.wheres.is_empty() {
-                                lower_rhs(ctx, &clause.rhs)
-                            } else {
-                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
-                            };
-                            ctx.exit_scope();
-                            let lam = hir::Expr::Lam(pats, Box::new(body_expr), fb.span);
-                            return Some(hir::Binding {
-                                pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
-                                sig: None,
-                                rhs: lam,
-                                span: fb.span,
-                            });
-                        }
-
-                        // Multi-clause function: let f 0 = a; f n = b => f = \x -> case x of ...
-                        if !fb.clauses.is_empty() && !fb.clauses[0].pats.is_empty() {
-                            let arity = fb.clauses[0].pats.len();
-                            // Create fresh variables for the lambda parameters
-                            let mut param_names = Vec::new();
-                            let mut param_pats = Vec::new();
-                            for i in 0..arity {
-                                let name = Symbol::intern(&format!("_arg{i}"));
-                                let param_def_id = ctx.fresh_def_id();
-                                // A lambda parameter is a pattern variable: as a
-                                // `Value` the type checker pre-registered it with a
-                                // polymorphic placeholder scheme, so each use got a
-                                // fresh type and the clauses' constructor patterns
-                                // never fixed the parameter's type (pandoc's local
-                                // `getLevel (Header …) = …` stayed `t -> Min Int`).
-                                ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
-                                ctx.bind_value(name, param_def_id);
-                                param_names.push((name, param_def_id));
-                                param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));
-                            }
-
-                            // Build case alternatives from clauses
-                            let mut alts = Vec::new();
-                            for clause in &fb.clauses {
-                                ctx.enter_scope();
-                                for p in &clause.pats {
-                                    bind_pattern(ctx, p);
-                                }
-                                let pat = if clause.pats.len() == 1 {
-                                    lower_pat(ctx, &clause.pats[0])
-                                } else {
-                                    let tuple_def_id =
-                                        ensure_tuple_constructor(ctx, clause.pats.len(), fb.span);
-                                    let tuple_ref = ctx.def_ref(tuple_def_id, fb.span);
-                                    hir::Pat::Con(
-                                        tuple_ref,
-                                        clause.pats.iter().map(|p| lower_pat(ctx, p)).collect(),
-                                        fb.span,
-                                    )
-                                };
-                                let (clause_body, clause_guards) = if clause.wheres.is_empty() {
-                                    lower_alt_rhs_and_guards(ctx, &clause.rhs)
-                                } else {
-                                    let body = lower_body_with_wheres(
-                                        ctx,
-                                        &clause.rhs,
-                                        &clause.wheres,
-                                        fb.span,
-                                    );
-                                    (body, Vec::new())
-                                };
-                                ctx.exit_scope();
-                                alts.push(hir::CaseAlt {
-                                    pat,
-                                    guards: clause_guards,
-                                    rhs: clause_body,
-                                    span: clause.span,
-                                });
-                            }
-
-                            // Create the scrutinee (tuple of params or single param)
-                            let scrutinee = if param_names.len() == 1 {
-                                hir::Expr::Var(hir::DefRef {
-                                    def_id: param_names[0].1,
-                                    span: fb.span,
-                                })
-                            } else {
-                                let tuple_elems: Vec<hir::Expr> = param_names
-                                    .iter()
-                                    .map(|(_n, id)| {
-                                        hir::Expr::Var(hir::DefRef {
-                                            def_id: *id,
-                                            span: fb.span,
-                                        })
-                                    })
-                                    .collect();
-                                hir::Expr::Tuple(tuple_elems, fb.span)
-                            };
-
-                            let case_expr = hir::Expr::Case(Box::new(scrutinee), alts, fb.span);
-                            let lam = hir::Expr::Lam(param_pats, Box::new(case_expr), fb.span);
-                            return Some(hir::Binding {
-                                pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
-                                sig: None,
-                                rhs: lam,
-                                span: fb.span,
-                            });
-                        }
+                        lower_local_fun_bind(ctx, fb)
+                    } else {
+                        None
                     }
-                    None
                 })
                 .collect();
             let mut bindings = bindings;

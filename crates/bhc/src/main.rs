@@ -11,7 +11,7 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 /// Basel Haskell Compiler - A next-generation Haskell compiler for 2026
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "bhc")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -31,9 +31,9 @@ struct Cli {
     #[arg(long, value_enum, default_value = "default")]
     profile: Profile,
 
-    /// Haskell edition
-    #[arg(long, default_value = "2026")]
-    edition: String,
+    /// Haskell edition (accepted for compatibility; not implemented yet)
+    #[arg(long)]
+    edition: Option<String>,
 
     /// Optimization level (0-3)
     // Default "2" == OptLevel::Default, matching the session default this flag
@@ -59,11 +59,11 @@ struct Cli {
     #[arg(long = "tensor-fusion", global = true)]
     tensor_fusion: bool,
 
-    /// Dump intermediate representations
+    /// Dump an intermediate representation to stdout
     #[arg(long)]
     dump_ir: Option<IrStage>,
 
-    /// Number of parallel jobs
+    /// Number of parallel jobs (accepted for compatibility; not implemented yet)
     #[arg(short, long)]
     jobs: Option<usize>,
 
@@ -71,7 +71,8 @@ struct Cli {
     #[arg(long)]
     target: Option<String>,
 
-    /// Emit format for output (e.g., ptx for GPU, llvm-ir for debugging)
+    /// Emit format for output: ptx (GPU), or llvm-ir (print the optimized
+    /// LLVM IR to stdout, like --dump-ir=llvm)
     #[arg(long)]
     emit: Option<String>,
 
@@ -159,12 +160,14 @@ enum IrStage {
     Tensor,
     /// Loop IR
     Loop,
-    /// All stages
+    /// LLVM IR (after optimization)
+    Llvm,
+    /// AST, HIR, Core and LLVM IR
     All,
 }
 
 /// Subcommands
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// Compile source files
     Build {
@@ -232,7 +235,29 @@ fn install_ice_hook() {
 /// tree deep enough to overflow the 8 MiB a main thread gets by default.
 const COMPILER_STACK_SIZE: usize = 1024 * 1024 * 1024;
 
+/// Restore the default SIGPIPE action so `bhc … | head` exits quietly.
+///
+/// Rust ignores SIGPIPE, which turns a closed pipe into a panic inside
+/// `println!`.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // SAFETY: installing the default disposition for SIGPIPE before any other
+    // thread starts; no handler code runs in this process.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 fn main() -> Result<()> {
+    reset_sigpipe();
     // Run on a thread with room for deep recursion; the main thread's stack
     // cannot be grown after the process starts.
     let child = std::thread::Builder::new()
@@ -249,7 +274,18 @@ fn main() -> Result<()> {
 
 fn real_main() -> Result<()> {
     install_ice_hook();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(target) = cli.target.take() {
+        cli.target = Some(normalize_target(&target)?);
+    }
+    // Validate --dump-ir/--emit up front so a bad value fails before compiling.
+    dump_options(&cli)?;
+    if cli.edition.is_some() {
+        eprintln!("warning: --edition has no effect yet; all modules use bhc's defaults");
+    }
+    if cli.jobs.is_some() {
+        eprintln!("warning: -j/--jobs has no effect yet; modules compile sequentially");
+    }
 
     // --numeric-version: print bare version and exit (used by hx-bhc for toolchain detection)
     if cli.numeric_version {
@@ -321,6 +357,58 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
+/// Map a `--target` value onto the triple the driver understands.
+///
+/// Accepts the short names from the documentation (`wasi`, `cuda`, `rocm`,
+/// `riscv64`) as well as full triples. An unknown target is an error rather
+/// than a silent native build for the host.
+fn normalize_target(target: &str) -> Result<String> {
+    let normalized = match target {
+        "wasi" | "wasm" | "wasm32" | "wasm32-wasi" | "wasm32-wasip1" | "wasm32-unknown-wasi" => {
+            "wasm32-wasi"
+        }
+        "cuda" | "ptx" | "nvptx" | "nvptx64" | "nvptx64-nvidia-cuda" => "nvptx64-nvidia-cuda",
+        "rocm" | "amdgcn" | "amdgcn-amd-amdhsa" => "amdgcn-amd-amdhsa",
+        "riscv64" => "riscv64-unknown-linux-gnu",
+        "riscv32" => "riscv32-unknown-none",
+        triple if bhc_target::parse_triple(triple).is_ok() => triple,
+        _ => anyhow::bail!(
+            "unknown target `{target}`; expected one of wasi, cuda, rocm, riscv64, \
+             or a triple such as x86_64-unknown-linux-gnu or aarch64-apple-darwin"
+        ),
+    };
+    Ok(normalized.to_string())
+}
+
+/// The IR dumps requested by `--dump-ir` and `--emit llvm-ir`.
+fn dump_options(cli: &Cli) -> Result<bhc_session::IrDumpOptions> {
+    let mut options = bhc_session::IrDumpOptions::default();
+    match cli.dump_ir {
+        None => {}
+        Some(IrStage::Ast) => options.dump_ast = true,
+        Some(IrStage::Hir) => options.dump_hir = true,
+        Some(IrStage::Core) => options.dump_core = true,
+        Some(IrStage::Llvm) => options.dump_llvm = true,
+        Some(IrStage::All) => {
+            options.dump_ast = true;
+            options.dump_hir = true;
+            options.dump_core = true;
+            options.dump_llvm = true;
+        }
+        Some(stage @ (IrStage::Tensor | IrStage::Loop)) => anyhow::bail!(
+            "--dump-ir={} is not implemented yet; native code is generated from Core \
+             (use --dump-ir=core or --kernel-report)",
+            format!("{stage:?}").to_lowercase()
+        ),
+    }
+    match cli.emit.as_deref() {
+        None | Some("ptx") => {}
+        Some("llvm-ir") => options.dump_llvm = true,
+        Some(other) => anyhow::bail!("unknown --emit format `{other}`; expected ptx or llvm-ir"),
+    }
+    Ok(options)
+}
+
 /// Generate shell completions
 fn generate_completions(shell: Shell) {
     let mut cmd = Cli::command();
@@ -329,6 +417,30 @@ fn generate_completions(shell: Shell) {
 
 /// Compile source files
 fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
+    try_compile_files(files, cli).map_err(|e| match e.downcast::<CompileFailed>() {
+        Ok(CompileFailed(msg)) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(1);
+        }
+        Err(other) => other,
+    })
+}
+
+/// A compile error, already formatted for `error: ...` reporting.
+#[derive(Debug)]
+struct CompileFailed(String);
+
+impl std::fmt::Display for CompileFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CompileFailed {}
+
+/// [`compile_files`], returning a compile error as [`CompileFailed`] instead
+/// of exiting, so a caller can clean up first (`bhc run`).
+fn try_compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     use bhc_driver::CompilerBuilder;
     use camino::Utf8PathBuf;
 
@@ -349,8 +461,7 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Determine output type based on target and emit flags
     let output_type = if cli.emit.as_deref() == Some("ptx") {
         bhc_session::OutputType::Object // PTX is emitted as object
-    } else if cli.target.as_deref() == Some("wasm32-wasi") || cli.target.as_deref() == Some("wasm")
-    {
+    } else if cli.target.as_deref() == Some("wasm32-wasi") {
         bhc_session::OutputType::Wasm
     } else {
         bhc_session::OutputType::Executable
@@ -369,10 +480,14 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Build compiler with configuration
     let mut builder = CompilerBuilder::new()
         .profile(profile)
+        .dump_ir(dump_options(cli)?)
         .output_type(output_type)
         .opt_level(opt_level)
         .emit_kernel_report(cli.kernel_report)
-        .tensor_fusion(cli.tensor_fusion);
+        .tensor_fusion(cli.tensor_fusion)
+        // Whole-program builds compile Data.Monoid/Data.Semigroup from the
+        // bundled sources; `-c` keeps them builtin (#52).
+        .bundled_library(!cli.compile_only);
 
     // Set target if specified
     if let Some(ref target) = cli.target {
@@ -473,10 +588,7 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => Err(CompileFailed(e.to_string()).into()),
     }
 }
 
@@ -495,7 +607,9 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     };
 
     // Build compiler with import paths and CPP defines
-    let mut builder = CompilerBuilder::new().profile(profile);
+    let mut builder = CompilerBuilder::new()
+        .profile(profile)
+        .dump_ir(dump_options(cli)?);
 
     for path in &cli.import_paths {
         builder = builder.import_path(
@@ -611,42 +725,51 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Run a Haskell program
-fn run_file(file: &Path, _args: &[String], cli: &Cli) -> Result<()> {
-    use bhc_driver::CompilerBuilder;
-    use camino::Utf8PathBuf;
-
+/// Run a Haskell program: compile it natively (the same pipeline as
+/// `bhc FILE`) into a temporary directory, then execute it with `args` and
+/// exit with its status.
+///
+/// This used to evaluate the program in the Core interpreter, whose IO and
+/// monad dispatch differ from compiled code (`getArgs >>= print` ran in the
+/// list monad, #44); `bhc run` now behaves exactly like the compiled program.
+fn run_file(file: &Path, args: &[String], cli: &Cli) -> Result<()> {
     tracing::info!("Running {}", file.display());
 
-    // Convert profile
-    let profile = match cli.profile {
-        Profile::Default => bhc_session::Profile::Default,
-        Profile::Server => bhc_session::Profile::Server,
-        Profile::Numeric => bhc_session::Profile::Numeric,
-        Profile::Edge => bhc_session::Profile::Edge,
+    let dir = std::env::temp_dir().join(format!("bhc-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let exe = dir.join(
+        file.file_stem()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| "main".into()),
+    );
+
+    let mut build = cli.clone();
+    build.output = Some(exe.clone());
+    build.quiet = true;
+    build.compile_only = false;
+    let compiled = try_compile_files(&[file.to_path_buf()], &build);
+
+    let status = compiled.and_then(|()| {
+        std::process::Command::new(&exe)
+            .args(args)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to run {}: {}", exe.display(), e))
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => match e.downcast::<CompileFailed>() {
+            Ok(CompileFailed(msg)) => {
+                eprintln!("error: {}", msg);
+                std::process::exit(1);
+            }
+            Err(other) => return Err(other),
+        },
     };
-
-    // Build compiler
-    let compiler = CompilerBuilder::new()
-        .profile(profile)
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create compiler: {}", e))?;
-
-    // Convert path
-    let path = Utf8PathBuf::from_path_buf(file.to_path_buf())
-        .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in path"))?;
-
-    // Run the file
-    match compiler.run_file(&path) {
-        Ok((_value, display)) => {
-            println!("{}", display);
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Execution error: {}", e);
-            std::process::exit(1);
-        }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
+    Ok(())
 }
 
 /// Compile source files to object files only (no linking), with optional interface generation.
@@ -668,6 +791,7 @@ fn compile_modules_only(files: &[PathBuf], cli: &Cli) -> Result<()> {
 
     let mut builder = CompilerBuilder::new()
         .profile(profile)
+        .dump_ir(dump_options(cli)?)
         .compile_only(true)
         .output_type(bhc_session::OutputType::Object)
         .emit_kernel_report(cli.kernel_report)
@@ -752,6 +876,15 @@ fn start_repl(cli: &Cli) -> Result<()> {
 
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
+    if !bhci_exe.exists() {
+        // Release archives ship only `bhc` so far (#50).
+        anyhow::bail!(
+            "the REPL needs `bhci` next to `bhc` ({} is missing); release builds do not \
+             include it yet, so build it from source with `cargo build --release -p bhci` \
+             and copy target/release/bhci next to bhc",
+            bhci_exe.display()
+        );
+    }
 
     let mut args: Vec<String> = Vec::new();
     match cli.profile {
@@ -796,4 +929,41 @@ fn print_version() {
     println!("Supported profiles: Default, Server, Numeric, Edge");
     println!();
     println!("Repository: https://github.com/raskell-io/bhc");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_target;
+
+    #[test]
+    fn target_aliases_normalize() {
+        assert_eq!(normalize_target("wasi").unwrap(), "wasm32-wasi");
+        assert_eq!(normalize_target("wasm32-wasip1").unwrap(), "wasm32-wasi");
+        assert_eq!(normalize_target("cuda").unwrap(), "nvptx64-nvidia-cuda");
+        assert_eq!(normalize_target("rocm").unwrap(), "amdgcn-amd-amdhsa");
+        assert_eq!(
+            normalize_target("x86_64-unknown-linux-gnu").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn dump_ir_and_emit_select_dumps() {
+        use clap::Parser;
+        let cli = super::Cli::parse_from(["bhc", "--dump-ir", "core", "M.hs"]);
+        let opts = super::dump_options(&cli).unwrap();
+        assert!(opts.dump_core && !opts.dump_llvm);
+        let cli = super::Cli::parse_from(["bhc", "--emit", "llvm-ir", "M.hs"]);
+        assert!(super::dump_options(&cli).unwrap().dump_llvm);
+        let cli = super::Cli::parse_from(["bhc", "--dump-ir", "tensor", "M.hs"]);
+        assert!(super::dump_options(&cli).is_err());
+        let cli = super::Cli::parse_from(["bhc", "--emit", "wat", "M.hs"]);
+        assert!(super::dump_options(&cli).is_err());
+    }
+
+    #[test]
+    fn unknown_target_is_rejected() {
+        assert!(normalize_target("bogus").is_err());
+        assert!(normalize_target("sparc-sun-solaris").is_err());
+    }
 }

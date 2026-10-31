@@ -99,10 +99,13 @@ bhc --help             # all flags
 Put `-o` before the subcommand when you use one (`bhc -o hello build hello.hs`);
 the top-level form `bhc hello.hs -o hello` accepts it anywhere.
 
-`bhc run` exists but runs the program through the Core interpreter rather than
-the compiled path. It currently prints the program's output twice and ignores
-program arguments ([#44](https://github.com/arcanist-sh/bhc/issues/44)), so
-compile and run the binary instead.
+`bhc run hello.hs [ARGS...]` compiles the program to a temporary executable,
+runs it with `ARGS`, and exits with its exit code:
+
+```bash
+bhc run hello.hs
+# Hello, World!
+```
 
 ## WebAssembly
 

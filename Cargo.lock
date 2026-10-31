@@ -269,6 +269,7 @@ dependencies = [
  "bhc-parser",
  "bhc-session",
  "bhc-span",
+ "bhc-target",
  "bhc-typeck",
  "camino",
  "clap",

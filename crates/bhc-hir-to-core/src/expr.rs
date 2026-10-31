@@ -417,7 +417,7 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
         match resolved.as_ref().and_then(con_name).as_deref() {
             Some("Integer") => {
                 let ty = Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star));
-                return Ok(core::Expr::Lit(Literal::Integer(*n as i128), ty, span));
+                return Ok(core::Expr::Lit(Literal::Integer(*n), ty, span));
             }
             // An integer literal at a floating type (`posixSecondsToUTCTime
             // 1700000000`, `POSIXTime` = `Double`) passed as a machine int
@@ -957,6 +957,7 @@ fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core:
 ///    resolve instances for concrete types.
 ///
 /// 3. **Regular variables**: Just return a variable reference.
+///
 /// `fromIntegral`/`fromInteger`/`toInteger` between `Integer` and a machine
 /// integer are real conversions (the bignum is boxed), but the builtin's own
 /// type is a loose scheme (`a -> b`, or `Int -> Int`). Record the resolved
@@ -5999,10 +6000,8 @@ fn apply_value_dicts(
         .class_method_of_def(def_ref.def_id, var.name)
         .filter(|class| ctx.is_user_class(*class))
         .and_then(|class| {
-            constraints
-                .iter()
-                .position(|c| c.class == class)
-                .map(|i| (class, i))
+            let i = constraints.iter().position(|c| c.class == class)?;
+            Some((class, i))
         });
     let mut dicts = dicts;
     let mut result = core::Expr::Var(var.clone(), span);

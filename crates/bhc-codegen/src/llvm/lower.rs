@@ -7621,7 +7621,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "minimum" => self.lower_builtin_minimum(args[0]),
             "elem" => self.lower_builtin_elem(args[0], args[1]),
             "notElem" => self.lower_builtin_not_elem(args[0], args[1]),
-            "iterate" | "repeat" | "cycle" => self.lower_lazy_list_producer(name, &args),
+            "iterate" | "repeat" | "cycle" => self.lower_lazy_list_producer(name, args),
             "takeWhile" => self.lower_builtin_take_while(args[0], args[1]),
             "dropWhile" => self.lower_builtin_drop_while(args[0], args[1]),
             "span" => self.lower_builtin_span(args[0], args[1]),
@@ -17766,10 +17766,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             1
         } else if self.is_string_type(ty) {
             2
-        } else if let Some(kind) = self.enum_key_kind(ty) {
-            kind
         } else {
-            0
+            self.enum_key_kind(ty).unwrap_or_default()
         }
     }
 

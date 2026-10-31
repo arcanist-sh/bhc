@@ -962,7 +962,7 @@ mod tests {
                         }
                     }
                     ast::Expr::Lit(ast::Lit::Int(n), span) => {
-                        hir::Expr::Lit(hir::Lit::Int(i128::from(*n)), *span)
+                        hir::Expr::Lit(hir::Lit::Int(*n), *span)
                     }
                     ast::Expr::App(f, arg, span) => {
                         // Simplified: just lower f and arg directly

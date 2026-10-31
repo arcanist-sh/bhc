@@ -1547,6 +1547,12 @@ fn test_tier2_assoc_type_literal() {
     run_native_test("tier2_functions/assoc_type_literal", Profile::Default);
 }
 
+// A GADT indexed at several types, matched by clauses and by case (#33).
+#[test]
+fn test_tier2_gadt_multi_index() {
+    run_native_test("tier2_functions/gadt_multi_index", Profile::Default);
+}
+
 #[test]
 fn test_tier3_deriving_via() {
     run_native_test("tier3_io/deriving_via", Profile::Default);

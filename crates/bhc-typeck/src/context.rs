@@ -8884,6 +8884,36 @@ impl TyCtxt {
             return self.fresh_ty();
         }
 
+        // Equations that match a GADT constructor refine its indices
+        // differently (`eval (I n) = n` at `E Int`, `eval (B b) = b` at
+        // `E Bool`), so each is checked against a shared outer type and its
+        // refinements are dropped afterwards, as for GADT case alternatives
+        // (#33). The outer type takes each such argument's general GADT type.
+        let n_args = equations[0].pats.len();
+        let gadt_args: Vec<Option<Ty>> = (0..n_args)
+            .map(|i| {
+                equations.iter().find_map(|eq| {
+                    eq.pats
+                        .get(i)
+                        .and_then(|p| crate::infer::gadt_general_type(self, p))
+                })
+            })
+            .collect();
+        if equations.len() > 1 && gadt_args.iter().any(Option::is_some) {
+            let result = self.fresh_ty();
+            let outer = gadt_args.into_iter().rev().fold(result, |acc, arg| {
+                let arg = arg.unwrap_or_else(|| self.fresh_ty());
+                Ty::fun(arg, acc)
+            });
+            for eq in equations {
+                let saved = self.subst.clone();
+                let eq_ty = self.infer_equation(eq);
+                self.unify(&outer, &eq_ty, span);
+                self.subst = saved;
+            }
+            return outer;
+        }
+
         // All equations must have the same type
         let first_ty = self.infer_equation(&equations[0]);
 

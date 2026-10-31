@@ -83,10 +83,10 @@ pub fn lower_pat_to_alt_with_fallthrough(
             })
         }
 
-        Pat::Lit(lit, _) => {
+        Pat::Lit(lit, span) => {
             // Literal pattern
             Ok(Alt {
-                con: AltCon::Lit(hir_lit_to_core(lit)),
+                con: AltCon::Lit(lit_pattern_to_core(ctx, lit, *span)),
                 binders: vec![],
                 rhs,
             })
@@ -493,6 +493,19 @@ enum PatHead {
     Lit(String),
     /// Wildcard/variable — matches anything.
     Wild,
+}
+
+/// The Core literal of a literal PATTERN: an integer literal typeck resolved
+/// at `Integer` is a bignum, matched by value; as a machine `Int` it was
+/// compared with the bignum's address and never matched (#57).
+fn lit_pattern_to_core(ctx: &LowerContext, lit: &hir::Lit, span: Span) -> Literal {
+    if let hir::Lit::Int(n) = lit {
+        if matches!(ctx.resolved_expr_ty_opt(span), Some(Ty::Con(c)) if c.name.as_str() == "Integer")
+        {
+            return Literal::Integer(*n);
+        }
+    }
+    hir_lit_to_core(lit)
 }
 
 /// Convert a HIR literal to a Core literal.
@@ -1008,8 +1021,8 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                     .iter()
                     .find_map(|row| {
                         if col < row.pats.len() {
-                            if let Pat::Lit(lit, _) = &row.pats[col] {
-                                Some(hir_lit_to_core(lit))
+                            if let Pat::Lit(lit, span) = &row.pats[col] {
+                                Some(lit_pattern_to_core(ctx, lit, *span))
                             } else {
                                 None
                             }

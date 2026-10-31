@@ -967,7 +967,21 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     };
     if matches!(
         v.name.as_str(),
-        "+" | "-" | "*" | "==" | "/=" | "<" | "<=" | ">" | ">=" | "div" | "mod" | "quot" | "rem"
+        "+" | "-"
+            | "*"
+            | "=="
+            | "/="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "div"
+            | "mod"
+            | "quot"
+            | "rem"
+            | "negate"
+            | "abs"
+            | "signum"
     ) {
         // Core bakes the single-pass type (`t -> t -> Bool`); the resolved
         // one tells codegen the operands are bignums when they are — and, for

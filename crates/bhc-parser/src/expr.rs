@@ -479,14 +479,14 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse an integer literal.
-    pub(crate) fn parse_int_literal(&self, s: &str, span: Span) -> ParseResult<i64> {
+    pub(crate) fn parse_int_literal(&self, s: &str, span: Span) -> ParseResult<i128> {
         let s = s.replace('_', "");
         let value = if s.starts_with("0x") || s.starts_with("0X") {
-            i64::from_str_radix(&s[2..], 16)
+            i128::from_str_radix(&s[2..], 16)
         } else if s.starts_with("0o") || s.starts_with("0O") {
-            i64::from_str_radix(&s[2..], 8)
+            i128::from_str_radix(&s[2..], 8)
         } else if s.starts_with("0b") || s.starts_with("0B") {
-            i64::from_str_radix(&s[2..], 2)
+            i128::from_str_radix(&s[2..], 2)
         } else {
             s.parse()
         };

@@ -1184,8 +1184,9 @@ impl Expr {
 /// A literal value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lit {
-    /// Integer literal.
-    Int(i64),
+    /// Integer literal. `i128`, so an `Integer` literal beyond 64 bits
+    /// (`18446744073709551621`) reaches lowering intact (#57).
+    Int(i128),
     /// Floating-point literal.
     Float(f64),
     /// Character literal.

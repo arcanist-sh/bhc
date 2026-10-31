@@ -59,6 +59,9 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
                 Lit::Int(_) => {
                     let ty = ctx.fresh_ty();
                     ctx.emit_constraint(bhc_intern::Symbol::intern("Num"), ty.clone(), *span);
+                    // Recorded so lowering can tell an `Integer` literal
+                    // pattern (a bignum comparison) from an `Int` one (#57).
+                    ctx.expr_types.insert(*span, ty.clone());
                     ty
                 }
                 Lit::Float(_) => {

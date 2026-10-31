@@ -26267,6 +26267,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000907, "negate");
         }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000608, &[expr], "integer_negate");
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
@@ -26284,6 +26288,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Rational dispatch
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000908, "abs");
+        }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000609, &[expr], "integer_abs");
         }
         // Double dispatch: a `Double` value is a boxed f64, so integer abs on its
         // bits would corrupt it (clearing the sign of `-2.5`'s bit pattern gives
@@ -26335,6 +26343,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Rational dispatch
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000909, "signum");
+        }
+        // A bignum at `Integer` (#57): its pointer is not the value.
+        if self.builtin_at_integer(expr) {
+            return self.call_integer_rts(1000610, &[expr], "integer_signum");
         }
         let val = self
             .lower_expr(expr)?
@@ -50745,7 +50757,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Primop used as a value - create a wrapper closure, unless
                     // it is arithmetic typed at Integer/Double/Float, which the
                     // untyped wrapper would do in machine ints.
-                    if let Some(lam) = Self::typed_arith_lambda(name, var) {
+                    // `negate`/`abs`/`signum` at `Integer` likewise (#57).
+                    if let Some(lam) =
+                        Self::typed_arith_lambda(name, var).or_else(|| self.typed_functor_eta(var))
+                    {
                         return self.lower_expr(&lam);
                     }
                     self.create_primop_closure(primop, arity, name)
@@ -51756,7 +51771,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///
     /// - `\f x -> fmap f x` for `fmap`/`<$>` at a `Maybe` or `Either` functor
     ///   (`Map.alter (fmap (+ 1))`, #25);
-    /// - `\x -> even x` / `\x -> odd x` at `Integer` (`filter even`, #51).
+    /// - `\x -> even x` / `\x -> odd x` at `Integer` (`filter even`, #51),
+    ///   and `negate`/`abs`/`signum` likewise (`map negate`, #57).
     ///
     /// Used where the builtin is a function value or partially applied: the
     /// generic wrapper closure runs with no `current_builtin_ty` and sees only
@@ -51774,7 +51790,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 2
             }
-            "even" | "odd" => match &var.ty {
+            "even" | "odd" | "negate" | "abs" | "signum" => match &var.ty {
                 Ty::Fun(a, _) if self.is_integer_type(a) => 1,
                 _ => return None,
             },
@@ -59361,6 +59377,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match scrut_val {
             BasicValueEnum::IntValue(i) => self.lower_case_literal_int(i, alts),
             BasicValueEnum::FloatValue(f) => self.lower_case_literal_float(f, alts),
+            BasicValueEnum::PointerValue(p)
+                if alts
+                    .iter()
+                    .any(|alt| matches!(&alt.con, AltCon::Lit(Literal::Integer(_)))) =>
+            {
+                self.lower_case_literal_integer(p, alts)
+            }
             BasicValueEnum::PointerValue(p) => {
                 // Check if the alternatives have integer/char literals - if so, unbox the pointer
                 if has_int_lit || has_char_lit {
@@ -59522,6 +59545,113 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a case expression with float/double literal patterns.
     /// Uses chained comparisons since LLVM switch doesn't support floats.
+    /// A case on an `Integer` (a boxed BigInt) with literal alternatives:
+    /// `if x == lit1 then .. else if x == lit2 then .. else default`, where
+    /// `==` at `Integer` compares the values. Unboxing the pointer and
+    /// switching on it, as for `Int`, compared an address with the literal,
+    /// so no `Integer` literal pattern ever matched (#57).
+    fn lower_case_literal_integer(
+        &mut self,
+        scrut: PointerValue<'ctx>,
+        alts: &[Alt],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 6_000_000);
+        let span = bhc_span::Span::default();
+        let integer = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Integer"),
+            bhc_types::Kind::Star,
+        ));
+        let bool_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Bool"),
+            bhc_types::Kind::Star,
+        ));
+        let x = Var {
+            name: Symbol::intern("$integer_scrut"),
+            id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+            ty: integer.clone(),
+        };
+        let eq = Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(integer.clone(), Ty::fun(integer.clone(), bool_ty)),
+        };
+        let bool_con = |name: &str, tag: u32| DataCon {
+            name: Symbol::intern(name),
+            ty_con: bhc_types::TyCon::new(Symbol::intern("Bool"), bhc_types::Kind::Star),
+            tag,
+            arity: 0,
+        };
+
+        // The default alternative (or a pattern-match failure) ends the chain;
+        // its binders, like `n` in `n -> ..`, are the scrutinee itself.
+        let mut bound = Vec::new();
+        let mut chain = match alts.iter().find(|a| matches!(a.con, AltCon::Default)) {
+            Some(alt) => {
+                bound.extend(alt.binders.iter().map(|b| b.id));
+                alt.rhs.clone()
+            }
+            None => {
+                let error_var = Var {
+                    name: Symbol::intern("error"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                Expr::App(
+                    Box::new(Expr::Var(error_var, span)),
+                    Box::new(Expr::Lit(
+                        Literal::String(Symbol::intern("Non-exhaustive patterns in case")),
+                        Ty::Error,
+                        span,
+                    )),
+                    span,
+                )
+            }
+        };
+        for alt in alts.iter().rev() {
+            let AltCon::Lit(lit @ Literal::Integer(_)) = &alt.con else {
+                continue;
+            };
+            let cond = Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Var(eq.clone(), span)),
+                    Box::new(Expr::Var(x.clone(), span)),
+                    span,
+                )),
+                Box::new(Expr::Lit(lit.clone(), integer.clone(), span)),
+                span,
+            );
+            chain = Expr::Case(
+                Box::new(cond),
+                vec![
+                    Alt {
+                        con: AltCon::DataCon(bool_con("True", 1)),
+                        binders: vec![],
+                        rhs: alt.rhs.clone(),
+                    },
+                    Alt {
+                        con: AltCon::DataCon(bool_con("False", 0)),
+                        binders: vec![],
+                        rhs: chain,
+                    },
+                ],
+                Ty::Error,
+                span,
+            );
+        }
+
+        self.env.insert(x.id, scrut.into());
+        for id in &bound {
+            self.env.insert(*id, scrut.into());
+        }
+        let result = self.lower_expr(&chain);
+        self.env.remove(&x.id);
+        for id in &bound {
+            self.env.remove(id);
+        }
+        result
+    }
+
     fn lower_case_literal_float(
         &mut self,
         scrut_float: FloatValue<'ctx>,

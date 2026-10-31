@@ -4797,7 +4797,7 @@ impl Compiler {
                 Box::new(Self::interface_pat_to_ast(inner)),
                 span,
             ),
-            P::Int(n) => bhc_ast::Pat::Lit(bhc_ast::Lit::Int(*n), span),
+            P::Int(n) => bhc_ast::Pat::Lit(bhc_ast::Lit::Int(i128::from(*n)), span),
             P::Str(t) => bhc_ast::Pat::Lit(bhc_ast::Lit::String(t.clone()), span),
         }
     }

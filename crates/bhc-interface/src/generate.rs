@@ -520,7 +520,8 @@ fn convert_pat(pat: &bhc_ast::Pat) -> Option<InterfacePat> {
             InterfacePat::List(ps.iter().map(convert_pat).collect::<Option<Vec<_>>>()?)
         }
         Pat::Lit(lit, _) => match lit {
-            bhc_ast::Lit::Int(n) => InterfacePat::Int(*n),
+            // A literal beyond 64 bits is not representable in an interface.
+            bhc_ast::Lit::Int(n) => InterfacePat::Int(i64::try_from(*n).ok()?),
             bhc_ast::Lit::String(t) => InterfacePat::Str(t.to_string()),
             _ => return None,
         },

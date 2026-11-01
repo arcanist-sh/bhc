@@ -1451,9 +1451,24 @@ impl LowerContext {
             self.class_registry
                 .register_instance(crate::dictionary::InstanceInfo {
                     class: Symbol::intern("Functor"),
-                    instance_types: vec![list_head],
+                    instance_types: vec![list_head.clone()],
                     methods: fn_methods,
                     superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            // `Applicative []`: without it `fs <*> xs` at a list resolved no
+            // instance, stayed the bare builtin, and codegen called the list
+            // of functions as a closure (#63).
+            let mut ap_methods = FxHashMap::default();
+            ap_methods.insert(Symbol::intern("pure"), DefId::new(790_017));
+            ap_methods.insert(Symbol::intern("<*>"), DefId::new(790_018));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Applicative"),
+                    instance_types: vec![list_head.clone()],
+                    methods: ap_methods,
+                    superclass_instances: vec![list_head],
                     assoc_type_impls: FxHashMap::default(),
                     instance_constraints: Vec::new(),
                 });
@@ -1788,6 +1803,9 @@ impl LowerContext {
             "Data.Unit.append",
             "Data.Unit.empty",
             "Data.Unit.concat",
+            // 790_017–790_018: the builtin `Applicative []`.
+            "Data.List.pure",
+            "Data.List.ap",
         ]
         .iter()
         .enumerate()

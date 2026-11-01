@@ -7874,10 +7874,41 @@ impl TyCtxt {
                         | "sequence_"
                         | "mapM_"
                         | "forM_"
+                        // `import Data.Traversable (for)`: typed fresh, `for`
+                        // at IO had no element type and printed an address
+                        // (#63).
+                        | "traverse"
+                        | "for"
+                        | "sequenceA"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
             .collect();
+
+        // Builtin values whose by-NAME scheme is exact but whose DefId does not
+        // carry it. The lowering pass and `register_primitive_ops` number
+        // their builtin lists independently and the lists have drifted apart,
+        // so a builtin with no case above holds whatever scheme the typeck
+        // list put at that number: `liftA2` got an unrelated stub's
+        // `forall a. a`, its result never unified with `f c`, and
+        // `print (liftA2 (+) (Just 1) (Just 2))` printed an address (#63).
+        // Only these names: elsewhere the permissive scheme at the DefId is
+        // what lets programs through (see `builtin_by_name` above).
+        for def_info in defs.values() {
+            if !matches!(def_info.kind, DefKind::Value)
+                || def_info.type_scheme.is_some()
+                || local_value_ids.contains(&def_info.id)
+                || !matches!(
+                    def_info.name.as_str(),
+                    "liftA" | "liftA2" | "liftA3" | "liftM" | "liftM2"
+                )
+            {
+                continue;
+            }
+            if let Some(scheme) = self.env.lookup_local(def_info.name).cloned() {
+                self.env.insert_global(def_info.id, scheme);
+            }
+        }
 
         // Second pass: register any remaining definitions (imported items not in builtins)
         // with their interface type schemes (if available) or fresh type variables.

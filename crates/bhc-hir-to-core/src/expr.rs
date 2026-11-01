@@ -5098,30 +5098,47 @@ fn lower_monadic_lift(
         }
         return Ok(None);
     };
-    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
-        if m_dbg {
-            eprintln!("[lift] declined at {}", dbg_ty(&monad_ty));
+    // `Maybe`, `Either e` and lists have no builtin to fall back on (`liftA2`
+    // and `liftM2` there were RTS stubs, #63): their `>>=`/`pure` are written
+    // out as for a generated traversal.
+    let written_out = matches!(
+        applied_head_name(&monad_ty)
+            .map(|n| n.as_str().to_string())
+            .as_deref(),
+        Some("Maybe" | "Either" | "[]" | "List")
+    );
+    let (bind_e, pure_e) = if written_out {
+        let Some(ops) = traversal_ops(ctx, &monad_ty, span) else {
+            return Ok(None);
+        };
+        ops
+    } else {
+        if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+            if m_dbg {
+                eprintln!("[lift] declined at {}", dbg_ty(&monad_ty));
+            }
+            return Ok(None);
         }
-        return Ok(None);
-    }
-    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern(">>="),
-        Symbol::intern("Monad"),
-        &monad_ty,
-        span,
-    ) else {
-        if m_dbg {
-            eprintln!("[lift] no >>= at {}", dbg_ty(&monad_ty));
-        }
-        return Ok(None);
-    };
-    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern("pure"),
-        Symbol::intern("Applicative"),
-        &monad_ty,
-        span,
-    ) else {
-        return Ok(None);
+        let Some(bind_e) = ctx.resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            &monad_ty,
+            span,
+        ) else {
+            if m_dbg {
+                eprintln!("[lift] no >>= at {}", dbg_ty(&monad_ty));
+            }
+            return Ok(None);
+        };
+        let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            &monad_ty,
+            span,
+        ) else {
+            return Ok(None);
+        };
+        (bind_e, pure_e)
     };
     // The actions are the LAST `n_actions` arguments; anything before them is
     // the function `liftM`/`liftM2` applies.
@@ -5160,6 +5177,31 @@ fn lower_monadic_lift(
                 span,
             )),
             Box::new(core::Expr::Lam(binder, Box::new(body), span)),
+            span,
+        );
+    }
+    // The chain of lambdas carries no type, and `print` chooses how to show a
+    // value from its type: name the result at the type the checker gave the
+    // application, or `print (liftA2 (+) (Just 1) (Just 2))` showed an
+    // address.
+    let result_ty = ctx.resolved_expr_ty_opt(head_span).and_then(|mut t| {
+        for _ in 0..args.len() {
+            match t {
+                Ty::Fun(_, r) => t = *r,
+                _ => return None,
+            }
+        }
+        Some(t)
+    });
+    if let Some(ty) = result_ty.filter(Ty::is_ground) {
+        let r = ctx.fresh_var(
+            "$lift_r",
+            crate::context::canonical_list_spelling(&ty),
+            span,
+        );
+        body = core::Expr::Let(
+            Box::new(Bind::NonRec(r.clone(), Box::new(body))),
+            Box::new(core::Expr::Var(r, span)),
             span,
         );
     }

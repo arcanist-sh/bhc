@@ -907,31 +907,35 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(list_list_a, list_a))
             }),
             ("liftM", {
-                // liftM :: (a -> b) -> [a] -> [b] (same as fmap/map)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // liftM :: Monad m => (a -> b) -> m a -> m b
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let m_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![m.clone(), a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(list_a, list_b),
+                        Ty::fun(m_a, m_b),
                     ),
                 )
             }),
             ("liftM2", {
-                // liftM2 :: (a -> b -> c) -> [a] -> [b] -> [c]
+                // liftM2 :: Monad m => (a -> b -> c) -> m a -> m b -> m c
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
                 let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let list_c = Ty::List(Box::new(Ty::Var(c.clone())));
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let m_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
+                let m_c = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(c.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
+                    vec![m.clone(), a.clone(), b.clone(), c.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(a.clone()),
                             Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
                         ),
-                        Ty::fun(list_a, Ty::fun(list_b, list_c)),
+                        Ty::fun(m_a, Ty::fun(m_b, m_c)),
                     ),
                 )
             }),

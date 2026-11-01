@@ -333,6 +333,8 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         } else {
                             ctx.generalize(&var_ty)
                         };
+                        ctx.local_generalized_vars
+                            .extend(scheme.vars.iter().cloned());
                         ctx.env.insert_local(*name, scheme.clone());
                         ctx.env.insert_global(*def_id, scheme);
                     }

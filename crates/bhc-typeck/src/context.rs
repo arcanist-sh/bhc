@@ -93,6 +93,13 @@ pub struct TyCtxt {
     /// environment pinning their types.
     pub(crate) generalizing: Vec<Symbol>,
 
+    /// Type variables a local let/where binding was generalized over. Each
+    /// use instantiates them afresh, with its own constraints, so a pending
+    /// constraint on the original variable is not ambiguous and must not be
+    /// defaulted: `let h x = x + 1` defaulted to `Int` there left `h`'s Core
+    /// binder at `Int -> Int` though it is used at `Integer` (#57).
+    pub(crate) local_generalized_vars: rustc_hash::FxHashSet<TyVar>,
+
     /// Diagnostic handler for error collection.
     diag: DiagnosticHandler,
 
@@ -216,6 +223,7 @@ impl TyCtxt {
             subst: Subst::new(),
             env: TypeEnv::new(),
             generalizing: Vec::new(),
+            local_generalized_vars: rustc_hash::FxHashSet::default(),
             diag: DiagnosticHandler::new(),
             builtins: Builtins::default(),
             file_id,
@@ -483,6 +491,9 @@ impl TyCtxt {
             // If all args are type variables, try defaulting (single-arg only)
             if args.len() == 1 {
                 if let Ty::Var(ref v) = args[0] {
+                    if self.local_generalized_vars.contains(v) {
+                        continue;
+                    }
                     if self.try_default_constraint(constraint.class, v) {
                         continue;
                     }
@@ -560,6 +571,9 @@ impl TyCtxt {
             // If all args are type variables, try defaulting (single-arg only)
             if args.len() == 1 {
                 if let Ty::Var(ref v) = args[0] {
+                    if self.local_generalized_vars.contains(v) {
+                        continue;
+                    }
                     if self.try_default_constraint(constraint.class, v) {
                         continue;
                     }

@@ -146,6 +146,13 @@ pub struct TypeEnv {
     /// Stack of scope frames, each containing Symbol -> Scheme mappings.
     locals: Vec<FxHashMap<Symbol, Scheme>>,
 
+    /// `DefId`s of pattern-bound variables (lambda/case/equation parameters).
+    /// They are entered in `globals` too, and stay there after their scope
+    /// closes, so `free_vars` skips them: while in scope their types are
+    /// counted through `locals`. A stale parameter entry pinned the variable
+    /// of `let g a = a == a`, which then could not be used at two types.
+    pattern_defs: rustc_hash::FxHashSet<DefId>,
+
     /// Type constructors (name -> `TyCon`).
     type_cons: FxHashMap<Symbol, TyCon>,
 
@@ -185,6 +192,7 @@ impl TypeEnv {
         Self {
             globals: FxHashMap::default(),
             locals: vec![FxHashMap::default()], // Start with one scope
+            pattern_defs: rustc_hash::FxHashSet::default(),
             type_cons: FxHashMap::default(),
             data_cons: FxHashMap::default(),
             data_cons_by_id: FxHashMap::default(),
@@ -211,6 +219,14 @@ impl TypeEnv {
     /// Insert a global binding.
     pub fn insert_global(&mut self, def_id: DefId, scheme: Scheme) {
         self.globals.insert(def_id, scheme);
+    }
+
+    /// Insert the binding of a pattern variable, by name in the current
+    /// scope and by `DefId`.
+    pub fn insert_pattern_var(&mut self, name: Symbol, def_id: DefId, scheme: Scheme) {
+        self.insert_local(name, scheme.clone());
+        self.globals.insert(def_id, scheme);
+        self.pattern_defs.insert(def_id);
     }
 
     /// Insert a local binding in the current scope.
@@ -420,7 +436,10 @@ impl TypeEnv {
         let mut vars = Vec::new();
 
         // Collect free vars from globals
-        for scheme in self.globals.values() {
+        for (def_id, scheme) in &self.globals {
+            if self.pattern_defs.contains(def_id) {
+                continue;
+            }
             collect_scheme_free_vars(scheme, &mut vars);
         }
 

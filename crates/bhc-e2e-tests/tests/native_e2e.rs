@@ -2316,3 +2316,13 @@ fn test_tier2_class_polymorphic_numeric() {
         Profile::Default,
     );
 }
+
+// Local functions using builtin class methods, used at several types, and
+// `Show a =>` at non-numeric types (#57).
+#[test]
+fn test_tier2_local_polymorphic_classes() {
+    run_native_test(
+        "tier2_functions/local_polymorphic_classes",
+        Profile::Default,
+    );
+}

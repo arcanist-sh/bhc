@@ -42,10 +42,9 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
             // Variable pattern: create fresh type and bind
             let ty = ctx.fresh_ty();
             let scheme = Scheme::mono(ty.clone());
-            // Bind by name (for nested pattern lookups)
-            ctx.env.insert_local(*name, scheme.clone());
-            // Also bind by DefId (for expression variable lookups)
-            ctx.env.insert_global(*def_id, scheme);
+            // Bind by name (for nested pattern lookups) and by DefId (for
+            // expression variable lookups)
+            ctx.env.insert_pattern_var(*name, *def_id, scheme);
             ty
         }
 
@@ -170,10 +169,9 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
             // As-pattern: bind name and check inner pattern
             let ty = infer_pattern(ctx, inner);
             let scheme = Scheme::mono(ty.clone());
-            // Bind by name (for nested pattern lookups)
-            ctx.env.insert_local(*name, scheme.clone());
-            // Also bind by DefId (for expression variable lookups)
-            ctx.env.insert_global(*def_id, scheme);
+            // Bind by name (for nested pattern lookups) and by DefId (for
+            // expression variable lookups)
+            ctx.env.insert_pattern_var(*name, *def_id, scheme);
             ty
         }
 

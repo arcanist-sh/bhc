@@ -31,7 +31,7 @@ use crate::{Alt, Bind, CoreModule, Expr, Literal, Var, VarId};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Subst, Ty, TyVar};
+use bhc_types::{Kind, Subst, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
 
 /// Most copies made of any one binding (bounds polymorphic recursion).
@@ -125,6 +125,7 @@ fn redirect(e: &mut Expr, subst: Option<&Subst>, ctx: &mut Ctx) {
                 }
             }
             redirect(body, subst, ctx);
+            specialize_local_let(e, subst, ctx);
         }
         Expr::Case(s, alts, _, _) => {
             redirect(s, subst, ctx);
@@ -148,14 +149,15 @@ fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
     collect_tyvars(&orig.ty, &mut vars);
     let [tv] = vars.as_slice() else { return None };
     let mut m = Subst::new();
-    if !(match_ty(&orig.ty, occ, &mut m) || {
+    let (orig_ty, occ) = (expand_string(&orig.ty), expand_string(occ));
+    if !(match_ty(&orig_ty, &occ, &mut m) || {
         m = Subst::new();
-        match_ty(ultimate_result(&orig.ty), ultimate_result(occ), &mut m)
+        match_ty(ultimate_result(&orig_ty), ultimate_result(&occ), &mut m)
     }) {
         return None;
     }
     let image = m.get(tv)?.clone();
-    if has_free_tyvar(&image) || !needs_copy(&image) || !uses_class_builtin(&body) {
+    if !copy_needed(&image, &body) {
         return None;
     }
     let key = (orig.id, format!("{image:?}"));
@@ -184,6 +186,7 @@ fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
     // Memoize before recursing, so a recursive body calls this same copy.
     ctx.memo.insert(key, spec.clone());
     let mut copy = substitute(&body, &subst);
+    freshen_binders(&mut copy, &mut FxHashMap::default());
     propagate(&mut copy, &mut FxHashMap::default());
     redirect(&mut copy, Some(&subst), ctx);
     // `BHC_DUMP_NUMSPEC=<substring>` dumps matching copies with their types.
@@ -200,6 +203,83 @@ fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
     ctx.new_bindings
         .push(Bind::NonRec(spec.clone(), Box::new(copy)));
     Some(spec)
+}
+
+/// Give every binder of a copy a fresh id. Codegen keys facts about a local
+/// by its id (an `Integer`-typed binder takes the BigInt paths), so two
+/// copies of one body at different types must not share binders: the
+/// `Maybe Bool` copy of `s a = show a ++ "!"` showed its argument as the
+/// `Integer` copy's.
+fn freshen_binders(e: &mut Expr, map: &mut FxHashMap<VarId, VarId>) {
+    fn bind(v: &mut Var, map: &mut FxHashMap<VarId, VarId>) {
+        let id = fresh_var_id();
+        map.insert(v.id, id);
+        v.id = id;
+    }
+    match e {
+        Expr::Var(v, _) => {
+            if let Some(id) = map.get(&v.id) {
+                v.id = *id;
+            }
+        }
+        Expr::App(f, x, _) => {
+            freshen_binders(f, map);
+            freshen_binders(x, map);
+        }
+        Expr::Lam(v, body, _) => {
+            bind(v, map);
+            freshen_binders(body, map);
+        }
+        Expr::TyApp(f, _, _)
+        | Expr::TyLam(_, f, _)
+        | Expr::Lazy(f, _)
+        | Expr::Cast(f, _, _)
+        | Expr::Tick(_, f, _) => freshen_binders(f, map),
+        Expr::Let(b, body, _) => {
+            match b.as_mut() {
+                Bind::NonRec(v, r) => {
+                    freshen_binders(r, map);
+                    bind(v, map);
+                }
+                Bind::Rec(bs) => {
+                    for (v, _) in bs.iter_mut() {
+                        bind(v, map);
+                    }
+                    for (_, r) in bs.iter_mut() {
+                        freshen_binders(r, map);
+                    }
+                }
+            }
+            freshen_binders(body, map);
+        }
+        Expr::Case(sc, alts, _, _) => {
+            freshen_binders(sc, map);
+            for a in alts {
+                for v in &mut a.binders {
+                    bind(v, map);
+                }
+                freshen_binders(&mut a.rhs, map);
+            }
+        }
+        Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
+    }
+}
+
+/// `ty` with the `String` synonym spelled `[Char]`, so a binder type and an
+/// occurrence type that spell it differently still match.
+fn expand_string(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Con(c) if c.name.as_str() == "String" => Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        )))),
+        Ty::App(f, a) => Ty::App(Box::new(expand_string(f)), Box::new(expand_string(a))),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(expand_string(a)), Box::new(expand_string(b))),
+        Ty::List(a) => Ty::List(Box::new(expand_string(a))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(expand_string).collect()),
+        Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(expand_string(b))),
+        _ => ty.clone(),
+    }
 }
 
 /// Types whose representation differs from the machine-int default, where a
@@ -220,66 +300,86 @@ fn needs_copy(ty: &Ty) -> bool {
 /// Whether `e` uses a builtin whose implementation depends on its operands'
 /// type (arithmetic, comparison, numeric conversion, `show`, …).
 fn uses_class_builtin(e: &Expr) -> bool {
+    mentions(e, &|bare| {
+        matches!(
+            bare,
+            "+" | "-"
+                | "*"
+                | "/"
+                | "^"
+                | "negate"
+                | "abs"
+                | "signum"
+                | "fromInteger"
+                | "fromIntegral"
+                | "toInteger"
+                | "realToFrac"
+                | "div"
+                | "mod"
+                | "quot"
+                | "rem"
+                | "=="
+                | "/="
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "compare"
+                | "max"
+                | "min"
+                | "maximum"
+                | "minimum"
+                | "sum"
+                | "product"
+                | "elem"
+                | "notElem"
+                | "lookup"
+                | "nub"
+                | "sort"
+                | "show"
+                | "even"
+                | "odd"
+        )
+    })
+}
+
+/// Whether `e` shows a value. `show` needs the exact type for every
+/// representation, not just the non-machine-int ones `needs_copy` lists
+/// (`show` of a `Bool` at a type variable prints its raw bits).
+fn uses_show(e: &Expr) -> bool {
+    mentions(e, &|bare| {
+        matches!(bare, "show" | "shows" | "showsPrec" | "print")
+    })
+}
+
+/// Whether a specialized copy at `image` is needed for a body.
+fn copy_needed(image: &Ty, body: &Expr) -> bool {
+    !has_free_tyvar(image) && uses_class_builtin(body) && (needs_copy(image) || uses_show(body))
+}
+
+/// Whether `e` mentions a variable whose unqualified name satisfies `pred`.
+fn mentions(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
     match e {
         Expr::Var(v, _) => {
             let name = v.name.as_str();
-            let bare = name.rsplit('.').next().unwrap_or(name);
-            matches!(
-                bare,
-                "+" | "-"
-                    | "*"
-                    | "/"
-                    | "^"
-                    | "negate"
-                    | "abs"
-                    | "signum"
-                    | "fromInteger"
-                    | "fromIntegral"
-                    | "toInteger"
-                    | "realToFrac"
-                    | "div"
-                    | "mod"
-                    | "quot"
-                    | "rem"
-                    | "=="
-                    | "/="
-                    | "<"
-                    | "<="
-                    | ">"
-                    | ">="
-                    | "compare"
-                    | "max"
-                    | "min"
-                    | "maximum"
-                    | "minimum"
-                    | "sum"
-                    | "product"
-                    | "elem"
-                    | "notElem"
-                    | "lookup"
-                    | "nub"
-                    | "sort"
-                    | "show"
-                    | "even"
-                    | "odd"
-            )
+            pred(name.rsplit('.').next().unwrap_or(name))
         }
-        Expr::App(f, x, _) => uses_class_builtin(f) || uses_class_builtin(x),
+        Expr::App(f, x, _) => mentions(f, pred) || mentions(x, pred),
         Expr::TyApp(f, _, _)
         | Expr::Lam(_, f, _)
         | Expr::TyLam(_, f, _)
         | Expr::Lazy(f, _)
         | Expr::Cast(f, _, _)
-        | Expr::Tick(_, f, _) => uses_class_builtin(f),
+        | Expr::Tick(_, f, _) => mentions(f, pred),
         Expr::Let(bind, body, _) => {
             let in_bind = match bind.as_ref() {
-                Bind::NonRec(_, r) => uses_class_builtin(r),
-                Bind::Rec(bs) => bs.iter().any(|(_, r)| uses_class_builtin(r)),
+                Bind::NonRec(_, r) => mentions(r, pred),
+                Bind::Rec(bs) => bs.iter().any(|(_, r)| mentions(r, pred)),
             };
-            in_bind || uses_class_builtin(body)
+            in_bind || mentions(body, pred)
         }
         Expr::Case(s, alts, _, _) => {
-            uses_class_builtin(s) || alts.iter().any(|a| uses_class_builtin(&a.rhs))
+            mentions(s, pred) || alts.iter().any(|a| mentions(&a.rhs, pred))
         }
         Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
     }
@@ -586,5 +686,136 @@ fn type_arg(x: &mut Expr, p: &Ty, env: &mut FxHashMap<VarId, Ty>) {
             }
         }
         _ => {}
+    }
+}
+
+/// A let-bound class-polymorphic function (`let f x = x * x in map f xs` at
+/// `Integer`): give it a specialized copy, bound right after it, for each
+/// concrete type its uses in the body need, and point those uses at the copy.
+/// Non-recursive lets only.
+fn specialize_local_let(e: &mut Expr, subst: Option<&Subst>, ctx: &mut Ctx) {
+    let Expr::Let(bind, body, span) = e else {
+        return;
+    };
+    let Bind::NonRec(v, rhs) = bind.as_ref() else {
+        return;
+    };
+    let mut vars: Vec<TyVar> = Vec::new();
+    collect_tyvars(&v.ty, &mut vars);
+    let [tv] = vars.as_slice() else { return };
+    if !uses_class_builtin(rhs) {
+        return;
+    }
+    let (v, rhs, tv) = (v.clone(), (**rhs).clone(), tv.clone());
+    // image (as a string key) -> copy binder; new lets to add.
+    let mut copies: FxHashMap<String, Var> = FxHashMap::default();
+    let mut new_binds: Vec<(Var, Expr)> = Vec::new();
+    retarget_local(body, &v, &tv, &rhs, subst, ctx, &mut copies, &mut new_binds);
+    if new_binds.is_empty() {
+        return;
+    }
+    let mut inner = std::mem::replace(body.as_mut(), Expr::Type(Ty::Error, *span));
+    for (cv, cr) in new_binds.into_iter().rev() {
+        inner = Expr::Let(
+            Box::new(Bind::NonRec(cv, Box::new(cr))),
+            Box::new(inner),
+            *span,
+        );
+    }
+    **body = inner;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retarget_local(
+    e: &mut Expr,
+    v: &Var,
+    tv: &TyVar,
+    rhs: &Expr,
+    subst: Option<&Subst>,
+    ctx: &mut Ctx,
+    copies: &mut FxHashMap<String, Var>,
+    new_binds: &mut Vec<(Var, Expr)>,
+) {
+    let go = |x: &mut Expr,
+              ctx: &mut Ctx,
+              copies: &mut FxHashMap<String, Var>,
+              nb: &mut Vec<(Var, Expr)>| {
+        retarget_local(x, v, tv, rhs, subst, ctx, copies, nb);
+    };
+    match e {
+        Expr::Var(occ, span) if occ.id == v.id => {
+            let occ_ty = match subst {
+                Some(s) => Some(s.apply(&occ.ty)),
+                None => ctx.resolved.get(span).cloned(),
+            };
+            let Some(occ_ty) = occ_ty.filter(|t| !has_free_tyvar(t)) else {
+                return;
+            };
+            let mut m = Subst::new();
+            let (v_ty, occ_ty) = (expand_string(&v.ty), expand_string(&occ_ty));
+            if !(match_ty(&v_ty, &occ_ty, &mut m) || {
+                m = Subst::new();
+                match_ty(ultimate_result(&v_ty), ultimate_result(&occ_ty), &mut m)
+            }) {
+                return;
+            }
+            let Some(image) = m.get(tv).cloned() else {
+                return;
+            };
+            if !copy_needed(&image, rhs) {
+                return;
+            }
+            let key = format!("{image:?}");
+            let copy_var = if let Some(c) = copies.get(&key) {
+                c.clone()
+            } else {
+                let mut body_vars = Vec::new();
+                collect_body_tyvars(rhs, &mut body_vars);
+                let mut s2 = Subst::new();
+                for bv in body_vars {
+                    s2.insert(&bv, image.clone());
+                }
+                s2.insert(tv, image.clone());
+                let id = fresh_var_id();
+                let name = Symbol::intern(&format!("{}$$num{}", v.name.as_str(), id.index()));
+                let cv = Var::new(name, id, s2.apply(&v.ty));
+                let mut copy = substitute(rhs, &s2);
+                freshen_binders(&mut copy, &mut FxHashMap::default());
+                propagate(&mut copy, &mut FxHashMap::default());
+                redirect(&mut copy, Some(&s2), ctx);
+                copies.insert(key, cv.clone());
+                new_binds.push((cv.clone(), copy));
+                cv
+            };
+            *e = Expr::Var(copy_var, *span);
+        }
+        Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
+        Expr::App(f, x, _) => {
+            go(f, ctx, copies, new_binds);
+            go(x, ctx, copies, new_binds);
+        }
+        Expr::TyApp(f, _, _)
+        | Expr::Lam(_, f, _)
+        | Expr::TyLam(_, f, _)
+        | Expr::Lazy(f, _)
+        | Expr::Cast(f, _, _)
+        | Expr::Tick(_, f, _) => go(f, ctx, copies, new_binds),
+        Expr::Let(bind, body, _) => {
+            match bind.as_mut() {
+                Bind::NonRec(_, r) => go(r, ctx, copies, new_binds),
+                Bind::Rec(bs) => {
+                    for (_, r) in bs {
+                        go(r, ctx, copies, new_binds);
+                    }
+                }
+            }
+            go(body, ctx, copies, new_binds);
+        }
+        Expr::Case(sc, alts, _, _) => {
+            go(sc, ctx, copies, new_binds);
+            for a in alts {
+                go(&mut a.rhs, ctx, copies, new_binds);
+            }
+        }
     }
 }

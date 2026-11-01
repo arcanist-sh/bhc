@@ -1,0 +1,2 @@
+Node (Node Leaf (0,10) Leaf) (1,20) (Node Leaf (2,30) Leaf)
+Just (7,5)

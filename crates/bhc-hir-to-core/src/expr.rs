@@ -13,6 +13,7 @@ use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Constraint, Kind, Ty, TyCon};
+use rustc_hash::FxHashSet;
 
 use crate::context::{has_type_variables, LowerContext};
 use crate::pattern::lower_pat_to_alt;
@@ -4507,6 +4508,546 @@ fn short_circuit_monad_ops(
     Some((bind, nullary_var(ok_name, span)))
 }
 
+/// `>>=` and `pure` at `monad_ty` for a generated traversal
+/// ([`derived_traversal_fn`]): `Maybe`/`Either` as `case`, the list monad
+/// through `concatMap`, IO's builtins, else the monad's instance methods.
+fn traversal_ops(
+    ctx: &mut LowerContext,
+    monad_ty: &Ty,
+    span: Span,
+) -> Option<(core::Expr, core::Expr)> {
+    if let Some(ops) = short_circuit_monad_ops(ctx, monad_ty, span) {
+        return Some(ops);
+    }
+    let head = applied_head_name(monad_ty)?;
+    match head.as_str() {
+        "[]" | "List" => {
+            // m >>= k = concatMap k m; pure x = [x]
+            let m = ctx.fresh_var("$tl_m", Ty::Error, span);
+            let k = ctx.fresh_var("$tl_k", Ty::Error, span);
+            let x = ctx.fresh_var("$tl_x", Ty::Error, span);
+            let var = |v: &Var| core::Expr::Var(v.clone(), span);
+            let app =
+                |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+            let bind = core::Expr::Lam(
+                m.clone(),
+                Box::new(core::Expr::Lam(
+                    k.clone(),
+                    Box::new(app(app(nullary_var("concatMap", span), var(&k)), var(&m))),
+                    span,
+                )),
+                span,
+            );
+            let pure = core::Expr::Lam(
+                x.clone(),
+                Box::new(app(
+                    app(nullary_var(":", span), var(&x)),
+                    nullary_var("[]", span),
+                )),
+                span,
+            );
+            Some((bind, pure))
+        }
+        "IO" => {
+            // The builtins, typed at IO as user code's are (under the closure
+            // IO model too: there the resolved instance methods crashed in a
+            // recursive traversal).
+            let io = |t: Ty| Ty::App(Box::new(monad_ty.clone()), Box::new(t));
+            let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+            let typed = |name: &str, ty: Ty| {
+                core::Expr::Var(
+                    Var {
+                        name: Symbol::intern(name),
+                        id: VarId::new(0),
+                        ty,
+                    },
+                    span,
+                )
+            };
+            let bind_ty = fun(
+                io(Ty::Error),
+                fun(fun(Ty::Error, io(Ty::Error)), io(Ty::Error)),
+            );
+            Some((
+                typed(">>=", bind_ty),
+                typed("pure", fun(Ty::Error, io(Ty::Error))),
+            ))
+        }
+        _ => {
+            let bind = ctx.resolve_method_at_concrete_type(
+                Symbol::intern(">>="),
+                Symbol::intern("Monad"),
+                monad_ty,
+                span,
+            )?;
+            let pure = ctx.resolve_method_at_concrete_type(
+                Symbol::intern("pure"),
+                Symbol::intern("Applicative"),
+                monad_ty,
+                span,
+            )?;
+            Some((bind, pure))
+        }
+    }
+}
+
+/// The traversable a field type is built from: `[x]` and `G … x` as `G`
+/// (lists as `List`) with its arguments.
+fn traversable_head(ty: &Ty) -> Option<(Symbol, Vec<&Ty>)> {
+    match ty {
+        Ty::List(elem) => Some((Symbol::intern("List"), vec![elem.as_ref()])),
+        Ty::App(..) => {
+            let mut args = Vec::new();
+            let mut head = ty;
+            while let Ty::App(f, a) = head {
+                args.push(a.as_ref());
+                head = f.as_ref();
+            }
+            args.reverse();
+            match head {
+                Ty::Con(tc) if tc.name.as_str() == "[]" => Some((Symbol::intern("List"), args)),
+                Ty::Con(tc) => Some((tc.name, args)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn mentions_tyvar(ty: &Ty, param: &bhc_types::TyVar) -> bool {
+    ty.free_vars().iter().any(|v| v.id == param.id)
+}
+
+/// The mapped-over type variable and, per constructor, (constructor
+/// expression, data constructor, field types).
+type TraversalShape = (bhc_types::TyVar, Vec<(core::Expr, DataCon, Vec<Ty>)>);
+
+/// The constructors a generated traversal of `type_name` rebuilds: the
+/// derived type's own, or those of `[]`/`Maybe`. Each is (constructor
+/// variable, data constructor, field types), with `param` the mapped-over
+/// variable.
+fn traversal_shape(ctx: &LowerContext, type_name: Symbol, span: Span) -> Option<TraversalShape> {
+    let builtin = |name: &str, ty_con: &str, tag: u32, fields: Vec<Ty>| {
+        (
+            nullary_var(name, span),
+            DataCon {
+                name: Symbol::intern(name),
+                ty_con: TyCon::new(Symbol::intern(ty_con), Kind::Star),
+                tag,
+                arity: fields.len() as u32,
+            },
+            fields,
+        )
+    };
+    match type_name.as_str() {
+        "List" | "Maybe" => {
+            let p = bhc_types::TyVar::new_star(u32::MAX - 53);
+            let pv = Ty::Var(p.clone());
+            let cons = if type_name.as_str() == "List" {
+                vec![
+                    builtin("[]", "List", 0, vec![]),
+                    builtin(":", "List", 1, vec![pv.clone(), Ty::List(Box::new(pv))]),
+                ]
+            } else {
+                vec![
+                    builtin("Nothing", "Maybe", 0, vec![]),
+                    builtin("Just", "Maybe", 1, vec![pv]),
+                ]
+            };
+            Some((p, cons))
+        }
+        _ => {
+            let info = ctx.derived_traversables.get(&type_name)?;
+            let mut cons = Vec::new();
+            for (def_id, name, tag, fields) in &info.cons {
+                let con_var = ctx.lookup_var(*def_id)?.clone();
+                cons.push((
+                    core::Expr::Var(con_var, span),
+                    DataCon {
+                        name: *name,
+                        ty_con: TyCon::new(type_name, Kind::Star),
+                        tag: *tag,
+                        arity: fields.len() as u32,
+                    },
+                    fields.clone(),
+                ));
+            }
+            Some((info.param.clone(), cons))
+        }
+    }
+}
+
+/// Whether every field of `type_name` is one a generated traversal can walk:
+/// free of the parameter, the parameter itself, or a traversable of such
+/// (`[a]`, `Maybe a`, `Tree a`, `[Tree a]`) whose other arguments are free
+/// of it.
+fn traversal_supported(
+    ctx: &LowerContext,
+    type_name: Symbol,
+    visiting: &mut FxHashSet<Symbol>,
+) -> bool {
+    if !visiting.insert(type_name) {
+        return true;
+    }
+    let Some((param, cons)) = traversal_shape(ctx, type_name, Span::default()) else {
+        return false;
+    };
+    fn field_ok(
+        ctx: &LowerContext,
+        ty: &Ty,
+        param: &bhc_types::TyVar,
+        visiting: &mut FxHashSet<Symbol>,
+    ) -> bool {
+        if !mentions_tyvar(ty, param) || matches!(ty, Ty::Var(v) if v.id == param.id) {
+            return true;
+        }
+        let Some((head, args)) = traversable_head(ty) else {
+            return false;
+        };
+        let Some((last, init)) = args.split_last() else {
+            return false;
+        };
+        init.iter().all(|a| !mentions_tyvar(a, param))
+            && field_ok(ctx, last, param, visiting)
+            && traversal_supported(ctx, head, visiting)
+    }
+    cons.iter()
+        .all(|(_, _, fields)| fields.iter().all(|t| field_ok(ctx, t, &param, visiting)))
+}
+
+/// How a generated traversal reaches its monad's `>>=` and `pure`.
+#[derive(Clone)]
+enum TraversalMonad {
+    /// IO, `Maybe`, `Either e` or a list: operations that mention nothing
+    /// local ([`traversal_ops`]), applied in place in the generated body. IO's
+    /// builtins must be applied directly: passed as values, their actions ran
+    /// out of order (and crashed under the closure IO model).
+    Closed(Ty),
+    /// A monad whose operations are resolved through instances: they can
+    /// mention the calling function's own dictionary parameters, which a
+    /// top-level binding cannot (LLVM rejected pandoc's `App.Opt`, "Referring
+    /// to an argument in another function"), so the generated function takes
+    /// them as its first two parameters.
+    Passed,
+}
+
+impl TraversalMonad {
+    fn of(monad_ty: &Ty) -> Self {
+        let head = applied_head_name(monad_ty).map(|n| n.as_str().to_string());
+        match head.as_deref() {
+            Some("IO" | "Maybe" | "Either" | "[]" | "List") => Self::Closed(monad_ty.clone()),
+            _ => Self::Passed,
+        }
+    }
+
+    /// Distinguishes the generated functions of one type.
+    fn key(&self) -> String {
+        match self {
+            Self::Closed(t) => applied_head_name(t).map_or_else(String::new, |n| n.to_string()),
+            Self::Passed => "$passed".to_string(),
+        }
+    }
+}
+
+/// The parameters of a generated traversal in its body: `>>=` and `pure`
+/// when they are passed, and the function applied to each element.
+struct TraversalParams {
+    monad: TraversalMonad,
+    passed: Option<(Var, Var)>,
+    f: Var,
+}
+
+impl TraversalParams {
+    /// `>>=` and `pure` at one use in the body.
+    fn ops(&self, ctx: &mut LowerContext, span: Span) -> Option<(core::Expr, core::Expr)> {
+        match (&self.monad, &self.passed) {
+            (_, Some((b, p))) => Some((
+                core::Expr::Var(b.clone(), span),
+                core::Expr::Var(p.clone(), span),
+            )),
+            (TraversalMonad::Closed(t), None) => traversal_ops(ctx, t, span),
+            (TraversalMonad::Passed, None) => None,
+        }
+    }
+
+    /// The leading arguments of a call to another generated traversal.
+    fn leading_args(&self, span: Span) -> Vec<core::Expr> {
+        self.passed
+            .iter()
+            .flat_map(|(b, p)| {
+                [
+                    core::Expr::Var(b.clone(), span),
+                    core::Expr::Var(p.clone(), span),
+                ]
+            })
+            .collect()
+    }
+}
+
+/// A function `\f x -> …` (`\bind pure f x -> …` for a
+/// [`TraversalMonad::Passed`] monad) traversing `type_name`: each
+/// constructor's fields that hold the parameter are traversed in order
+/// through the monad's `>>=`, then `pure` rebuilds the constructor. A field
+/// of type `a` is `f a_i`; a nested or recursive one (`Tree a`, `[a]`,
+/// `Maybe a`) goes through that type's own generated traversal.
+///
+/// The stock-derived `traverse` is one generic body with no `Applicative`
+/// to dispatch on: it applied `f` to a recursive field and could not
+/// short-circuit at `Maybe` or branch at lists (#53). `None` when a field
+/// is of a shape this does not walk, or the monad's operations are unknown.
+fn derived_traversal_fn(
+    ctx: &mut LowerContext,
+    type_name: Symbol,
+    monad: &TraversalMonad,
+    span: Span,
+) -> Option<core::Expr> {
+    let key = (type_name, monad.key());
+    if let Some(v) = ctx.traversal_specs.get(&key) {
+        return Some(core::Expr::Var(v.clone(), span));
+    }
+    if !traversal_supported(ctx, type_name, &mut FxHashSet::default()) {
+        return None;
+    }
+    if let TraversalMonad::Closed(t) = monad {
+        traversal_ops(ctx, t, span)?;
+    }
+    let (param, cons) = traversal_shape(ctx, type_name, span)?;
+    let spec = ctx.fresh_var(&format!("$trav_{type_name}"), Ty::Error, span);
+    ctx.traversal_specs.insert(key, spec.clone());
+    let passed = match monad {
+        TraversalMonad::Passed => Some((
+            ctx.fresh_var("$trav_bind", Ty::Error, span),
+            ctx.fresh_var("$trav_pure", Ty::Error, span),
+        )),
+        TraversalMonad::Closed(_) => None,
+    };
+    let params = TraversalParams {
+        monad: monad.clone(),
+        passed,
+        f: ctx.fresh_var("$trav_f", Ty::Error, span),
+    };
+    let x = ctx.fresh_var("$trav_c", Ty::Error, span);
+    let mut alts = Vec::new();
+    for (con_expr, data_con, fields) in cons {
+        let binders: Vec<Var> = fields
+            .iter()
+            .map(|_| ctx.fresh_var("$trav_a", Ty::Error, span))
+            .collect();
+        let mut steps: Vec<(Var, core::Expr)> = Vec::new();
+        let mut con_args = Vec::new();
+        for (b, ty) in binders.iter().zip(&fields) {
+            let field = core::Expr::Var(b.clone(), span);
+            let f_expr = core::Expr::Var(params.f.clone(), span);
+            match field_traversal(ctx, ty, &param, &f_expr, &params, span)? {
+                Some(g) => {
+                    let r = ctx.fresh_var("$trav_r", Ty::Error, span);
+                    con_args.push(core::Expr::Var(r.clone(), span));
+                    steps.push((r, core::Expr::App(Box::new(g), Box::new(field), span)));
+                }
+                None => con_args.push(field),
+            }
+        }
+        let built = con_args.into_iter().fold(con_expr, |acc, a| {
+            core::Expr::App(Box::new(acc), Box::new(a), span)
+        });
+        let (_, pure_e) = params.ops(ctx, span)?;
+        let mut body = core::Expr::App(Box::new(pure_e), Box::new(built), span);
+        for (r, action) in steps.into_iter().rev() {
+            let (bind_e, _) = params.ops(ctx, span)?;
+            body = core::Expr::App(
+                Box::new(core::Expr::App(Box::new(bind_e), Box::new(action), span)),
+                Box::new(core::Expr::Lam(r, Box::new(body), span)),
+                span,
+            );
+        }
+        alts.push(Alt {
+            con: AltCon::DataCon(data_con),
+            binders,
+            rhs: body,
+        });
+    }
+    let case = core::Expr::Case(
+        Box::new(core::Expr::Var(x.clone(), span)),
+        alts,
+        Ty::Error,
+        span,
+    );
+    let mut lambda_params: Vec<Var> = params
+        .passed
+        .iter()
+        .flat_map(|(b, p)| [b.clone(), p.clone()])
+        .collect();
+    lambda_params.push(params.f);
+    lambda_params.push(x);
+    let lam = lambda_params
+        .into_iter()
+        .rev()
+        .fold(case, |body, v| core::Expr::Lam(v, Box::new(body), span));
+    ctx.traversal_spec_binds
+        .push(Bind::NonRec(spec.clone(), Box::new(lam)));
+    Some(core::Expr::Var(spec, span))
+}
+
+/// How a generated traversal walks a field of type `ty`: `Some(None)` when
+/// the field does not hold the parameter (it is kept as is), `Some(Some(g))`
+/// with `g` the function to traverse it with.
+fn field_traversal(
+    ctx: &mut LowerContext,
+    ty: &Ty,
+    param: &bhc_types::TyVar,
+    f: &core::Expr,
+    params: &TraversalParams,
+    span: Span,
+) -> Option<Option<core::Expr>> {
+    if !mentions_tyvar(ty, param) {
+        return Some(None);
+    }
+    if matches!(ty, Ty::Var(v) if v.id == param.id) {
+        return Some(Some(f.clone()));
+    }
+    let (head, args) = traversable_head(ty)?;
+    let inner = (*args.last()?).clone();
+    let g = field_traversal(ctx, &inner, param, f, params, span)??;
+    let spec = derived_traversal_fn(ctx, head, &params.monad, span)?;
+    // `\y -> spec [bind pure] g y`
+    let y = ctx.fresh_var("$trav_y", Ty::Error, span);
+    let mut args = params.leading_args(span);
+    args.push(g);
+    args.push(core::Expr::Var(y.clone(), span));
+    let call = args.into_iter().fold(spec, |acc, a| {
+        core::Expr::App(Box::new(acc), Box::new(a), span)
+    });
+    Some(Some(core::Expr::Lam(y, Box::new(call), span)))
+}
+
+/// `traverse`/`mapM`/`for`/`forM`/`sequenceA`/`sequence` (and their `_`
+/// forms) over a container with a generated traversal
+/// ([`derived_traversal_fn`]): a stock-derived `Traversable` of this module
+/// or a `Maybe` at any monad, a list at the list monad (other list
+/// traversals keep the fold in [`lower_monadic_traversal_spine`]).
+fn lower_generated_traversal(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    args: &[&hir::Expr],
+    head_ref: &DefRef,
+    monad_ty: &Ty,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let (collect, fn_pos, cont_pos, n_args) = match name.as_str() {
+        "traverse" | "mapM" => (true, Some(0), 1, 2),
+        "traverse_" | "mapM_" => (false, Some(0), 1, 2),
+        "for" | "forM" => (true, Some(1), 0, 2),
+        "for_" | "forM_" => (false, Some(1), 0, 2),
+        "sequenceA" | "sequence" => (true, None, 0, 1),
+        "sequenceA_" | "sequence_" => (false, None, 0, 1),
+        _ => return Ok(None),
+    };
+    if args.len() != n_args {
+        return Ok(None);
+    }
+    let container_ty = ctx.resolved_expr_ty_opt(args[cont_pos].span()).or_else(|| {
+        let mut t = ctx.resolved_expr_ty_opt(head_ref.span)?;
+        for _ in 0..cont_pos {
+            match t {
+                Ty::Fun(_, r) => t = *r,
+                _ => return None,
+            }
+        }
+        match t {
+            Ty::Fun(p, _) => Some(*p),
+            _ => None,
+        }
+    });
+    let Some((container, _)) = container_ty.as_ref().and_then(traversable_head) else {
+        return Ok(None);
+    };
+    let list_monad = matches!(
+        applied_head_name(monad_ty)
+            .map(|n| n.as_str().to_string())
+            .as_deref(),
+        Some("[]" | "List")
+    );
+    let handled = match container.as_str() {
+        "List" => list_monad,
+        "Maybe" => true,
+        _ => ctx.derived_traversables.contains_key(&container),
+    };
+    if !handled {
+        return Ok(None);
+    }
+    let monad = TraversalMonad::of(monad_ty);
+    let Some((bind_e, pure_e)) = traversal_ops(ctx, monad_ty, span) else {
+        return Ok(None);
+    };
+    let Some(mut spec) = derived_traversal_fn(ctx, container, &monad, span) else {
+        return Ok(None);
+    };
+    let passed = matches!(monad, TraversalMonad::Passed);
+    // The call's type, from the traversal's own instantiated type: a result
+    // with an untyped element printed `[P Int]` as addresses.
+    if let (core::Expr::Var(v, _), Some(head_ty)) =
+        (&mut spec, ctx.resolved_expr_ty_opt(head_ref.span))
+    {
+        let traversal_ty = match (fn_pos, head_ty) {
+            (Some(0), t) => t,
+            (Some(_), Ty::Fun(cont_ty, rest)) => match *rest {
+                Ty::Fun(fn_ty, res) => Ty::Fun(fn_ty, Box::new(Ty::Fun(cont_ty, res))),
+                _ => Ty::Error,
+            },
+            (None, t) => Ty::Fun(Box::new(Ty::Error), Box::new(t)),
+            _ => Ty::Error,
+        };
+        // after the `bind` and `pure` parameters, when passed
+        let untyped = |t: Ty| Ty::Fun(Box::new(Ty::Error), Box::new(t));
+        v.ty = if passed {
+            untyped(untyped(traversal_ty))
+        } else {
+            traversal_ty
+        };
+        // `show` reads a list result as `Ty::List`, not `[] a`.
+        v.ty = crate::context::canonical_list_spelling(&v.ty);
+        if std::env::var("BHC_DBG_TRAV").is_ok() {
+            eprintln!(
+                "trav {}: generated {} :: {:?}",
+                name.as_str(),
+                v.name.as_str(),
+                v.ty
+            );
+        }
+    }
+    let func = match fn_pos {
+        Some(pos) => lower_expr(ctx, args[pos])?,
+        None => {
+            let v = ctx.fresh_var("$trav_id", Ty::Error, span);
+            core::Expr::Lam(v.clone(), Box::new(core::Expr::Var(v, span)), span)
+        }
+    };
+    let cont = lower_expr(ctx, args[cont_pos])?;
+    let mut call_args = if passed {
+        vec![bind_e, pure_e]
+    } else {
+        Vec::new()
+    };
+    call_args.push(func);
+    call_args.push(cont);
+    let call = call_args.into_iter().fold(spec, |acc, a| {
+        core::Expr::App(Box::new(acc), Box::new(a), span)
+    });
+    if collect {
+        return Ok(Some(call));
+    }
+    let Some((bind_e, pure_e)) = traversal_ops(ctx, monad_ty, span) else {
+        return Ok(None);
+    };
+    let ignored = ctx.fresh_var("$trav_ignored", Ty::Error, span);
+    let unit = core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
+    Ok(Some(core::Expr::App(
+        Box::new(core::Expr::App(Box::new(bind_e), Box::new(call), span)),
+        Box::new(core::Expr::Lam(ignored, Box::new(unit), span)),
+        span,
+    )))
+}
+
 fn nullary_var(name: &str, span: Span) -> core::Expr {
     core::Expr::Var(
         Var {
@@ -5113,6 +5654,9 @@ fn lower_monadic_traversal_spine(
             name.as_str(),
             applied_head_name(&monad_ty)
         );
+    }
+    if let Some(e) = lower_generated_traversal(ctx, name, &args, head_ref, &monad_ty, span)? {
+        return Ok(Some(e));
     }
     let short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
     if short_circuit.is_none()

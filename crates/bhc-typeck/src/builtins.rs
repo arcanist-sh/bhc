@@ -7885,15 +7885,24 @@ impl Builtins {
                     ),
                 ),
             );
-            // sequenceA :: Applicative f => c -> f d
+            // sequenceA :: Applicative f => t (f a) -> f (t a)
+            // With `c -> f d` nothing tied the applicative to the elements,
+            // so `sequenceA [Just 1, Just 2]` had no known `f` (#53).
+            let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
             env.register_value(
                 DefId::new(12004),
                 Symbol::intern("sequenceA"),
                 Scheme::poly(
-                    vec![f.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), t.clone(), a.clone()],
                     Ty::fun(
-                        Ty::Var(c.clone()),
-                        Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d))),
+                        Ty::App(Box::new(Ty::Var(t.clone())), Box::new(f_a)),
+                        Ty::App(
+                            Box::new(Ty::Var(f.clone())),
+                            Box::new(Ty::App(
+                                Box::new(Ty::Var(t.clone())),
+                                Box::new(Ty::Var(a.clone())),
+                            )),
+                        ),
                     ),
                 ),
             );

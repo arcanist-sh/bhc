@@ -111,6 +111,23 @@ fn has_type_vars(t: &Ty) -> bool {
     }
 }
 
+/// `ty` with every `[] a` written `[a]` (`Ty::List`), the form the show
+/// descriptors recognise.
+fn list_spelled(ty: &Ty) -> Ty {
+    match ty {
+        Ty::App(f, a) => match f.as_ref() {
+            Ty::Con(c) if matches!(c.name.as_str(), "[]" | "List") => {
+                Ty::List(Box::new(list_spelled(a)))
+            }
+            _ => Ty::App(Box::new(list_spelled(f)), Box::new(list_spelled(a))),
+        },
+        Ty::Fun(a, r) => Ty::Fun(Box::new(list_spelled(a)), Box::new(list_spelled(r))),
+        Ty::List(e) => Ty::List(Box::new(list_spelled(e))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(list_spelled).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Metadata about a data constructor, used for code generation.
 #[derive(Clone, Debug)]
 pub struct ConstructorMeta {
@@ -13102,6 +13119,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+        let list_ptr = self.value_to_ptr(self.build_force(list_ptr.into())?)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -13336,6 +13354,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+        // The list may arrive unevaluated — a lambda parameter bound to a
+        // lazy argument (`let bnd m k = concatMap k m in bnd (g ys) k`) —
+        // and the loop reads its tag directly.
+        let list_ptr = self.value_to_ptr(self.build_force(list_ptr.into())?)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -13429,6 +13451,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| {
                 CodegenError::Internal("concatMap: function returned void".to_string())
             })?;
+        // `f`'s list may be a thunk as well (it is read the same way).
+        let inner_list_ptr = self.build_force(inner_list_ptr)?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -29824,7 +29848,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn descriptor_from_ty(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
         match ty {
             Ty::Var(_) | Ty::Error => None,
-            _ => Some(self.build_show_descriptor(&Self::ty_only_expr(ty.clone()))),
+            // `[] ([] Int)` (a list monad's result, as the type checker
+            // spells it) described as `[[Int]]`: the inner lists printed as
+            // addresses.
+            _ => Some(self.build_show_descriptor(&Self::ty_only_expr(list_spelled(ty)))),
         }
     }
 

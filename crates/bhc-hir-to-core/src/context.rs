@@ -247,6 +247,27 @@ pub struct LowerContext {
     /// Set before lowering a case alternative RHS so that pattern lowering
     /// can reuse the same vars (instead of creating different fresh ones).
     pub(crate) existential_dict_binders: Vec<Var>,
+
+    /// This module's data types with a stock-derived `Traversable`, by name.
+    /// A traversal over one at a known monad is lowered to a generated
+    /// function for that monad (see `expr::derived_traversal_fn`): the
+    /// derived instance itself has no `Applicative` to dispatch on (#53).
+    pub(crate) derived_traversables: FxHashMap<Symbol, DerivedTraversable>,
+    /// Generated traversal functions, by type name and monad kind, so each
+    /// is built once and a recursive field calls the function being built.
+    pub(crate) traversal_specs: FxHashMap<(Symbol, String), Var>,
+    /// The bindings of those functions, appended to the module's bindings.
+    pub(crate) traversal_spec_binds: Vec<Bind>,
+}
+
+/// A data type with a stock-derived `Traversable`: what a generated
+/// traversal needs to rebuild each constructor.
+#[derive(Clone, Debug)]
+pub(crate) struct DerivedTraversable {
+    /// The type's last parameter, the one `traverse` maps over.
+    pub param: bhc_types::TyVar,
+    /// Each constructor's id, name, tag and declared field types.
+    pub cons: Vec<(DefId, Symbol, u32, Vec<Ty>)>,
 }
 
 /// The head of a type application (`StateT` in `StateT s m a`).
@@ -322,6 +343,9 @@ impl LowerContext {
             instance_alias_span: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
+            derived_traversables: FxHashMap::default(),
+            traversal_specs: FxHashMap::default(),
+            traversal_spec_binds: Vec::new(),
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
@@ -5157,6 +5181,43 @@ impl LowerContext {
         }
     }
 
+    /// Record `data_def` in [`Self::derived_traversables`] when it derives
+    /// `Traversable` (stock) over a last type parameter.
+    fn register_derived_traversable(&mut self, data_def: &bhc_hir::DataDef) {
+        let stock = data_def.deriving.iter().any(|clause| {
+            clause.class.as_str() == "Traversable"
+                && matches!(
+                    clause.strategy,
+                    bhc_hir::DerivingStrategy::Stock | bhc_hir::DerivingStrategy::Default
+                )
+        });
+        let Some(param) = data_def.params.last() else {
+            return;
+        };
+        if !stock || data_def.cons.iter().any(|c| !c.existential_vars.is_empty()) {
+            return;
+        }
+        let cons = data_def
+            .cons
+            .iter()
+            .enumerate()
+            .map(|(tag, con)| {
+                let fields = match &con.fields {
+                    bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                    bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+                };
+                (con.id, con.name, tag as u32, fields)
+            })
+            .collect();
+        self.derived_traversables.insert(
+            data_def.name,
+            DerivedTraversable {
+                param: param.clone(),
+                cons,
+            },
+        );
+    }
+
     /// Register a local `newtype`'s constructor; see
     /// [`register_data_constructors`](Self::register_data_constructors).
     fn register_newtype_constructor(&mut self, newtype_def: &bhc_hir::NewtypeDef) {
@@ -5321,7 +5382,10 @@ impl LowerContext {
 
         for item in &module.items {
             match item {
-                Item::Data(data_def) => self.register_data_constructors(data_def),
+                Item::Data(data_def) => {
+                    self.register_data_constructors(data_def);
+                    self.register_derived_traversable(data_def);
+                }
                 Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
                 _ => {}
             }
@@ -5740,6 +5804,7 @@ impl LowerContext {
 
         let foreign_imports = std::mem::take(&mut self.foreign_imports);
 
+        bindings.append(&mut self.traversal_spec_binds);
         lazify_recursive_parser_calls(&mut bindings);
         lazify_self_recursive_monadic_args(&mut bindings);
         expand_transformer_synonyms(&mut bindings, &self.type_aliases);

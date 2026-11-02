@@ -606,16 +606,11 @@ fn propagate(e: &mut Expr, env: &mut FxHashMap<VarId, Ty>) {
                 }
             }
             // Walk the spine again, mutably, pairing args with `params`.
-            fn walk_args(
-                e: &mut Expr,
-                params: &[Ty],
-                depth: usize,
-                env: &mut FxHashMap<VarId, Ty>,
-            ) {
+            fn walk_args(e: &mut Expr, params: &[Ty], env: &mut FxHashMap<VarId, Ty>) {
                 if let Expr::App(f, x, _) = e {
-                    walk_args(f, params, depth + 1, env);
-                    // `depth` counts from the outermost application, so this
-                    // argument is at position `n_args - 1 - depth`.
+                    walk_args(f, params, env);
+                    // This argument's position is the number of
+                    // applications beneath it.
                     let n_args = depth_of(f) + 1;
                     let pos = n_args - 1;
                     if let Some(p) = params.get(pos) {
@@ -632,7 +627,7 @@ fn propagate(e: &mut Expr, env: &mut FxHashMap<VarId, Ty>) {
                     _ => 0,
                 }
             }
-            walk_args(e, &params, 0, env);
+            walk_args(e, &params, env);
         }
         Expr::Lam(v, b, _) => {
             if !matches!(v.ty, Ty::Error) {

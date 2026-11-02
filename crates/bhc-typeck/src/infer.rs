@@ -770,26 +770,19 @@ pub(crate) fn is_builtin_class(class: Symbol) -> bool {
     )
 }
 
-/// Variables mentioned by a pending constraint of a builtin VALUE class
-/// (`Eq`, `IsString`, the numeric classes, …) — not the monad/functor family,
-/// over which a local function may legitimately stay general.
+/// Variables mentioned by a pending `IsString` constraint, which a local
+/// function must not generalize over under the closure IO model: its body is
+/// compiled once, so `toDoc t | t == " " = space | otherwise = literal t`
+/// (pandoc's Writers.Blaze) made `forall t. (Eq t, IsString t) => …` let the
+/// literal default `t` to `String`.
+///
+/// The other builtin value classes (`Eq`, `Ord`, `Show`, the numeric ones)
+/// are not listed: Core's numeric specialization gives each use type its own
+/// copy, as under the eager model, so `let inc x = x + 1` works at `Integer`
+/// and `Double` alike (#57).
 fn value_class_constrained_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
     for c in &ctx.constraints {
-        if !matches!(
-            c.class.as_str(),
-            "Eq" | "Ord"
-                | "IsString"
-                | "Show"
-                | "Num"
-                | "Integral"
-                | "Real"
-                | "Fractional"
-                | "Floating"
-                | "RealFrac"
-                | "RealFloat"
-                | "Enum"
-                | "Bounded"
-        ) {
+        if c.class.as_str() != "IsString" {
             continue;
         }
         for arg in &c.args {

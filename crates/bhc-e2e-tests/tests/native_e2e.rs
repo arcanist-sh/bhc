@@ -2319,16 +2319,8 @@ fn test_tier2_class_polymorphic_numeric() {
 
 // Local functions using builtin class methods, used at several types, and
 // `Show a =>` at non-numeric types (#57).
-//
-// Default IO model only: under the closure model a local function stays
-// monomorphic over a value-class variable by design (infer.rs, the
-// `value_class_constrained_vars` restriction), so `inc` at Integer and Double
-// is a type error there.
 #[test]
 fn test_tier2_local_polymorphic_classes() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("closure") {
-        return;
-    }
     run_native_test(
         "tier2_functions/local_polymorphic_classes",
         Profile::Default,

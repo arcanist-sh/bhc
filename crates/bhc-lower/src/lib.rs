@@ -149,6 +149,14 @@ pub enum LowerWarning {
         /// What kind of stub (value, type, or constructor).
         kind: &'static str,
     },
+    /// A builtin that type-checks but has no implementation yet, so calling
+    /// it aborts at run time (the concurrency primitives, #38).
+    NotImplemented {
+        /// The builtin's name.
+        name: String,
+        /// Source location of the first use.
+        span: Span,
+    },
     /// A LANGUAGE pragma extension is not yet implemented.
     UnimplementedExtension {
         /// The extension name.
@@ -186,6 +194,13 @@ impl std::fmt::Display for LowerWarning {
                 write!(
                     f,
                     "extension `{name}` is not yet implemented and will be ignored"
+                )
+            }
+            LowerWarning::NotImplemented { name, .. } => {
+                write!(
+                    f,
+                    "`{name}` is not implemented yet: calling it aborts at run time \
+                     (concurrency is not wired to the runtime, see issue #38)"
                 )
             }
             LowerWarning::UnknownExtension { name, .. } => {

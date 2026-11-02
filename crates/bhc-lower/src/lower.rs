@@ -348,6 +348,17 @@ fn process_imports(
                 );
                 let known = register_standard_module_exports(ctx, &module_name, Some(import))
                     || BUILTIN_ONLY_MODULES.contains(&module_name.as_str());
+                let qualifier = import.alias.as_ref().map_or_else(
+                    || module_name.clone(),
+                    |a| {
+                        a.parts
+                            .iter()
+                            .map(|p| p.as_str())
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    },
+                );
+                ctx.mark_unimplemented_imports(&module_name, &qualifier);
                 if !known {
                     ctx.warnings.push(crate::LowerWarning::ModuleNotFound {
                         name: module_name.clone(),

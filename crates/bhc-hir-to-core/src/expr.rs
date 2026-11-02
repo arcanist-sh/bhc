@@ -4523,6 +4523,17 @@ fn traversal_ops(
     if let Some(ops) = short_circuit_monad_ops(ctx, monad_ty, span) {
         return Some(ops);
     }
+    // A monad that is a variable: the in-scope dictionary's (#63).
+    if matches!(monad_ty, Ty::Var(_)) {
+        let bind =
+            ctx.select_method_via_superclass(Symbol::intern("Monad"), Symbol::intern(">>="), span)?;
+        let pure = ctx.select_method_via_superclass(
+            Symbol::intern("Monad"),
+            Symbol::intern("pure"),
+            span,
+        )?;
+        return Some((bind, pure));
+    }
     let head = applied_head_name(monad_ty)?;
     match head.as_str() {
         "[]" | "List" => {
@@ -5814,6 +5825,91 @@ fn lower_monadic_traversal_spine(
     lower_foldable_consumer(ctx, name, head_ref, &args, span)
 }
 
+/// The two-constructor containers [`traverse_sum`] handles: the constructor
+/// that holds no element (`Nothing`, `Left e`) and the one that holds it.
+#[derive(Clone, Copy)]
+enum SumShape {
+    Maybe,
+    Either,
+}
+
+impl SumShape {
+    fn of(type_name: &str) -> Option<Self> {
+        match type_name {
+            "Maybe" => Some(Self::Maybe),
+            "Either" => Some(Self::Either),
+            _ => None,
+        }
+    }
+}
+
+/// `traverse f c` over `Maybe`/`Either e`, through `>>=` and `pure`:
+///
+/// ```text
+/// case c of { Nothing -> pure Nothing; Just x -> f x >>= \y -> pure (Just y) }
+/// case c of { Left e -> pure (Left e); Right x -> f x >>= \y -> pure (Right y) }
+/// ```
+fn traverse_sum(
+    ctx: &mut LowerContext,
+    shape: SumShape,
+    f: core::Expr,
+    container: core::Expr,
+    bind_e: core::Expr,
+    pure_e: core::Expr,
+    span: Span,
+) -> core::Expr {
+    let (type_name, empty_name, empty_arity, full_name) = match shape {
+        SumShape::Maybe => ("Maybe", "Nothing", 0, "Just"),
+        SumShape::Either => ("Either", "Left", 1, "Right"),
+    };
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let tycon = TyCon::new(Symbol::intern(type_name), Kind::Star);
+    let con = |name: &str, tag, arity| {
+        AltCon::DataCon(DataCon {
+            name: Symbol::intern(name),
+            ty_con: tycon.clone(),
+            tag,
+            arity,
+        })
+    };
+    // The element-free constructor is rebuilt, not reused: its type changes
+    // (`Left e :: Either e a` becomes `Either e b`).
+    let empty_binders: Vec<Var> = (0..empty_arity)
+        .map(|_| ctx.fresh_var("$trav_e", Ty::Error, span))
+        .collect();
+    let mut empty_val = nullary_var(empty_name, span);
+    for b in &empty_binders {
+        empty_val = app(empty_val, core::Expr::Var(b.clone(), span));
+    }
+    let x = ctx.fresh_var("$trav_x", Ty::Error, span);
+    let y = ctx.fresh_var("$trav_y", Ty::Error, span);
+    let rebuild = core::Expr::Lam(
+        y.clone(),
+        Box::new(app(
+            pure_e.clone(),
+            app(nullary_var(full_name, span), core::Expr::Var(y, span)),
+        )),
+        span,
+    );
+    let full_rhs = app(
+        app(bind_e, app(f, core::Expr::Var(x.clone(), span))),
+        rebuild,
+    );
+    let alts = vec![
+        Alt {
+            con: con(empty_name, 0, empty_arity),
+            binders: empty_binders,
+            rhs: app(pure_e, empty_val),
+        },
+        Alt {
+            con: con(full_name, 1, 1),
+            binders: vec![x],
+            rhs: full_rhs,
+        },
+    ];
+    core::Expr::Case(Box::new(container), alts, Ty::Error, span)
+}
+
 /// [`lower_monadic_traversal_spine`] for everything but the plain `Foldable`
 /// consumers.
 fn lower_monadic_traversal_spine_inner(
@@ -5935,7 +6031,25 @@ fn lower_monadic_traversal_spine_inner(
     if let Some(e) = lower_generated_traversal(ctx, name, args, head_ref, &monad_ty, span)? {
         return Ok(Some(e));
     }
-    let short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
+    let mut short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
+    // A monad that is still a variable (`traverse g mx` under `Monad m =>`)
+    // takes `>>=` and `pure` from the in-scope dictionary; codegen's builtin
+    // traversal cannot run actions of an unknown monad and segfaulted (#63).
+    if short_circuit.is_none() && matches!(monad_ty, Ty::Var(_)) {
+        let bind = ctx.select_method_via_superclass(
+            Symbol::intern("Monad"),
+            Symbol::intern(">>="),
+            head_ref.span,
+        );
+        let pure = ctx.select_method_via_superclass(
+            Symbol::intern("Monad"),
+            Symbol::intern("pure"),
+            head_ref.span,
+        );
+        if let (Some(b), Some(p)) = (bind, pure) {
+            short_circuit = Some((b, p));
+        }
+    }
     if short_circuit.is_none()
         && (monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none())
     {
@@ -6040,6 +6154,28 @@ fn lower_monadic_traversal_spine_inner(
             head = f.as_ref();
         }
         if matches!(head, Ty::Con(tc) if tc.name.as_str() != "[]" && tc.name.as_str() != "List") {
+            // `traverse g mx` over `Maybe`/`Either e` at a monad that is a
+            // variable: one `case`, through the dictionary's `>>=`/`pure`.
+            if let (Ty::Con(tc), true, false, false, true) = (
+                head,
+                collect,
+                elems,
+                missing_list,
+                matches!(monad_ty, Ty::Var(_)),
+            ) {
+                if let Some(shape) = SumShape::of(tc.name.as_str()) {
+                    let (f_h, c_h) = if flipped {
+                        (args[1], args[0])
+                    } else {
+                        (args[0], args[1])
+                    };
+                    let f_core = lower_expr(ctx, f_h)?;
+                    let c_core = lower_expr(ctx, c_h)?;
+                    return Ok(Some(traverse_sum(
+                        ctx, shape, f_core, c_core, bind_e, pure_e, span,
+                    )));
+                }
+            }
             if collect || elems || !is_foldable_non_list(&cty) {
                 return Ok(None);
             }

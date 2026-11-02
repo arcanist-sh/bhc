@@ -15906,6 +15906,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         action: BasicValueEnum<'ctx>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // The action may still be a thunk: a dictionary's `>>=` gets the
+        // recursive call of a `Monad m =>` function (`cnt g (n - 1) >>= k`)
+        // unevaluated, and calling the thunk as an action crashed (#63).
+        let action = self.build_force(action)?;
         let action_ptr = self.value_to_ptr(action)?;
         let fn_ptr = self.checked_closure_fn_ptr(action_ptr, "run IO action")?;
         let ptr_type = self.type_mapper().ptr_type();

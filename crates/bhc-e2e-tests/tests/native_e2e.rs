@@ -2362,3 +2362,8 @@ fn test_tier3_list_applicative_lift() {
 fn test_tier3_user_foldable_consumers() {
     run_native_test("tier3_io/user_foldable_consumers", Profile::Default);
 }
+
+#[test]
+fn test_tier3_polymorphic_monad_traverse() {
+    run_native_test("tier3_io/polymorphic_monad_traverse", Profile::Default);
+}

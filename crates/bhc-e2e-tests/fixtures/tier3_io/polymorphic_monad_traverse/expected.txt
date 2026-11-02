@@ -1,0 +1,11 @@
+Just 12
+Nothing
+Just (Just 12)
+Nothing
+Right 2
+Left "no"
+[2,3,4]
+Nothing
+Node (Node Leaf 10 Leaf) 20 Leaf
+Just (Node (Node Leaf 2 Leaf) 3 Leaf)
+Nothing

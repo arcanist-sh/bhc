@@ -235,6 +235,13 @@ fn test_tier2_multimodule_basic_native() {
     run_native_test("tier2_functions/multimodule_basic", Profile::Default);
 }
 
+/// Class-polymorphic functions imported from another module, used at
+/// Integer and Double (#57).
+#[test]
+fn test_tier2_multimodule_numeric_poly() {
+    run_native_test("tier2_functions/multimodule_numeric_poly", Profile::Default);
+}
+
 /// `StateT` over a GND newtype monad imported from another module.
 #[test]
 fn test_tier2_multimodule_newtype_monad_native() {

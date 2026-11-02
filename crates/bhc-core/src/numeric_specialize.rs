@@ -19,11 +19,17 @@
 //! the right operations in the copy. Occurrences are redirected by typeck's
 //! span-keyed `resolved_expr_types`, as in `monomorphize`.
 //!
-//! Scope: module-local, top-level bindings quantified over ONE type variable
-//! (so every type variable in the body denotes it), whose bodies use a
-//! class-sensitive builtin, used at `Integer`, `Double`, `Float`, `Rational`,
-//! `Text` or a list type. `Int` and the other machine-int types need no copy.
-//! No arity changes: the original binding stays as it is.
+//! Scope: top-level bindings quantified over ONE type variable (so every type
+//! variable in the body denotes it), whose bodies use a class-sensitive
+//! builtin, used at `Integer`, `Double`, `Float`, `Rational`, `Text` or a
+//! list type. `Int` and the other machine-int types need no copy. No arity
+//! changes: the original binding stays as it is.
+//!
+//! A binding imported from another module (its body transported in a `.bhc`
+//! sidecar, as for `monomorphize`) is copied into this module, at the numeric
+//! types only (`Integer`, `Double`, `Float`, `Rational`): `sq` from a library
+//! used at `Integer` multiplied machine ints. Text and list uses of library
+//! code are left to the library's own compiled body.
 
 use crate::monomorphize::{collect_tyvars, has_free_tyvar, match_ty, ultimate_result};
 use crate::simplify::expr_util::fresh_var_id;
@@ -39,7 +45,11 @@ const MAX_SPECS_PER_BINDING: usize = 16;
 
 /// Specialize class-polymorphic bindings at representation-sensitive types.
 /// Returns the number of copies created. `BHC_NO_NUMSPEC=1` disables it.
-pub fn specialize_numeric(module: &mut CoreModule, resolved: &FxHashMap<Span, Ty>) -> usize {
+pub fn specialize_numeric(
+    module: &mut CoreModule,
+    resolved: &FxHashMap<Span, Ty>,
+    imported: &FxHashMap<String, (Var, Expr)>,
+) -> usize {
     if std::env::var_os("BHC_NO_NUMSPEC").is_some() {
         return 0;
     }
@@ -58,6 +68,7 @@ pub fn specialize_numeric(module: &mut CoreModule, resolved: &FxHashMap<Span, Ty
     }
     let mut ctx = Ctx {
         top,
+        imported,
         resolved,
         memo: FxHashMap::default(),
         counts: FxHashMap::default(),
@@ -82,6 +93,8 @@ pub fn specialize_numeric(module: &mut CoreModule, resolved: &FxHashMap<Span, Ty
 
 struct Ctx<'a> {
     top: FxHashMap<VarId, (Var, Expr)>,
+    /// Imported bindings by name (`.bhc` sidecars); see the module docs.
+    imported: &'a FxHashMap<String, (Var, Expr)>,
     resolved: &'a FxHashMap<Span, Ty>,
     /// (binder id, concrete type) -> specialized binder.
     memo: FxHashMap<(VarId, String), Var>,
@@ -140,11 +153,18 @@ fn redirect(e: &mut Expr, subst: Option<&Subst>, ctx: &mut Ctx) {
 /// The specialized copy of `v`'s binding for the concrete occurrence type
 /// `occ`, when it needs one.
 fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
-    let (orig, body) = ctx
+    // By id, validated by name (inside a copy of an imported body the ids
+    // are the source module's); else an imported binding by name.
+    let local = ctx
         .top
         .get(&v.id)
-        .filter(|(o, _)| o.name == v.name)?
-        .clone();
+        .filter(|(o, _)| o.name == v.name)
+        .cloned();
+    let is_imported = local.is_none();
+    let (orig, body) = match local {
+        Some(b) => b,
+        None => ctx.imported.get(v.name.as_str())?.clone(),
+    };
     let mut vars: Vec<TyVar> = Vec::new();
     collect_tyvars(&orig.ty, &mut vars);
     let [tv] = vars.as_slice() else { return None };
@@ -157,7 +177,7 @@ fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
         return None;
     }
     let image = m.get(tv)?.clone();
-    if !copy_needed(&image, &body) {
+    if !copy_needed(&image, &body) || (is_imported && !is_numeric(&image)) {
         return None;
     }
     let key = (orig.id, format!("{image:?}"));
@@ -280,6 +300,12 @@ fn expand_string(ty: &Ty) -> Ty {
         Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(expand_string(b))),
         _ => ty.clone(),
     }
+}
+
+/// The numeric types whose representation is not a machine int: the ones an
+/// imported binding is copied at.
+fn is_numeric(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if matches!(c.name.as_str(), "Integer" | "Double" | "Float" | "Rational"))
 }
 
 /// Types whose representation differs from the machine-int default, where a

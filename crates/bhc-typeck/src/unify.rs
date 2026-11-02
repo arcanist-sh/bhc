@@ -733,6 +733,21 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
         // In Haskell, String is defined as `type String = [Char]`, so these
         // types should unify. Handle both directions.
         // When unifying String with [a], unify a with Char.
+        // `t a ~ String` is `t ~ []`, `a ~ Char`: `length r` (any `t a` since
+        // #63) with `r` later found to be a `String` (a `MonadReader String`
+        // functional dependency) left `r` unresolved.
+        (Ty::App(f, a), t2) if is_string_con(t2) && !is_many_con(f) => {
+            let list_con = Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::star_to_star()));
+            unify_inner(ctx, f, &list_con, span);
+            let a_applied = ctx.apply_subst(a);
+            unify_inner(ctx, &a_applied, &char_ty(), span);
+        }
+        (t1, Ty::App(f, a)) if is_string_con(t1) && !is_many_con(f) => {
+            let list_con = Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::star_to_star()));
+            unify_inner(ctx, f, &list_con, span);
+            let a_applied = ctx.apply_subst(a);
+            unify_inner(ctx, &a_applied, &char_ty(), span);
+        }
         (t1, t2) if is_string_con(t1) => {
             if let Some(elem) = get_list_elem(t2) {
                 // String ~ [elem] => unify elem with Char

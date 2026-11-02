@@ -2707,21 +2707,21 @@ impl TyCtxt {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
                 }
-                // length :: [a] -> Int
+                // length :: Foldable t => t a -> Int. Any container, like
+                // `elem` (#63): a user Foldable's container becomes a list
+                // through its `foldr` in hir-to-core
+                // (`lower_foldable_consumer`). The unifier decomposes a list
+                // as `App([], a)`, so list uses still unify.
                 "length" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a, self.builtins.int_ty.clone()),
-                    )
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, self.builtins.int_ty.clone()))
                 }
-                // null :: [a] -> Bool
+                // null :: Foldable t => t a -> Bool
                 "null" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a, self.builtins.bool_ty.clone()),
-                    )
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, self.builtins.bool_ty.clone()))
                 }
                 // take, drop :: Int -> [a] -> [a]
                 "take" | "drop" => {
@@ -2736,10 +2736,12 @@ impl TyCtxt {
                 }
                 // sum, product :: [Int] -> Int
                 "sum" | "product" => {
-                    // Num a => [a] -> a (polymorphic — not pinned to Int, else
-                    // `sum [2.0,3.0] :: Double` fails). See builtins.rs `sum`.
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                    // (Foldable t, Num a) => t a -> a (polymorphic — not
+                    // pinned to Int, else `sum [2.0,3.0] :: Double` fails).
+                    // Any container, as `length`.
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, Ty::Var(a.clone())))
                 }
                 // foldl :: (b -> a -> b) -> b -> t a -> b
                 // Any `t a` container, so DeriveFoldable types work — codegen
@@ -2835,10 +2837,11 @@ impl TyCtxt {
                     };
                     Scheme::poly(vars, ty)
                 }
-                // maximum, minimum :: [a] -> a
+                // maximum, minimum :: (Foldable t, Ord a) => t a -> a
                 "maximum" | "minimum" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, Ty::Var(a.clone())))
                 }
                 // last :: [a] -> a
                 "last" => {
@@ -3320,25 +3323,27 @@ impl TyCtxt {
                     vec![a.clone()],
                     Ty::fun(Ty::Var(a.clone()), self.builtins.integer_ty.clone()),
                 ),
-                // any :: (a -> Bool) -> [a] -> Bool
+                // any :: Foldable t => (a -> Bool) -> t a -> Bool
                 "any" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), t],
                         Ty::fun(
                             Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                            Ty::fun(list_a, self.builtins.bool_ty.clone()),
+                            Ty::fun(ta, self.builtins.bool_ty.clone()),
                         ),
                     )
                 }
-                // all :: (a -> Bool) -> [a] -> Bool
+                // all :: Foldable t => (a -> Bool) -> t a -> Bool
                 "all" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), t],
                         Ty::fun(
                             Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                            Ty::fun(list_a, self.builtins.bool_ty.clone()),
+                            Ty::fun(ta, self.builtins.bool_ty.clone()),
                         ),
                     )
                 }

@@ -1876,6 +1876,14 @@ impl LowerContext {
         std::mem::take(&mut self.warnings)
     }
 
+    /// Whether `type_name` is a newtype (its constructor is erased at runtime).
+    #[must_use]
+    pub(crate) fn is_newtype_name(&self, type_name: Symbol) -> bool {
+        self.constructor_map
+            .values()
+            .any(|c| c.is_newtype && c.type_name == type_name)
+    }
+
     /// Get all constructors for a given type name.
     ///
     /// Returns a vector of `(tag, name, arity)` tuples sorted by tag.

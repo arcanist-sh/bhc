@@ -31048,13 +31048,79 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `mapM_`.
+    ///
+    /// Its own loop rather than `map`: `map` stops at a tail that is still a
+    /// thunk and leaves the rest for later, which `mapM_` never demands, so
+    /// over a lazily built list (a `Foldable`'s `foldr (:) []`, #63) only the
+    /// first actions ran. This forces each tail and walks on.
     fn lower_builtin_mapm_(
         &mut self,
         func_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_builtin_map(func_expr, list_expr)?;
-        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+        let err = |what: &str| CodegenError::Internal(format!("mapM_: {what}"));
+        let fn_ptr = match self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| err("no function"))?
+        {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => {
+                return Err(CodegenError::TypeError(
+                    "mapM_: function must be a closure".into(),
+                ))
+            }
+        };
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| err("no list"))?;
+        let list_ptr = self.build_force(list_val)?.into_pointer_value();
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| err("no block"))?;
+        let current_fn = entry_block.get_parent().ok_or_else(|| err("no function"))?;
+        let header = self.llvm_ctx.append_basic_block(current_fn, "mapm__header");
+        let body = self.llvm_ctx.append_basic_block(current_fn, "mapm__body");
+        let exit = self.llvm_ctx.append_basic_block(current_fn, "mapm__exit");
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+
+        self.builder().position_at_end(header);
+        let list_phi = self
+            .builder()
+            .build_phi(ptr_type, "mapm__list")
+            .map_err(|e| err(&format!("phi: {e:?}")))?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let tag = self.extract_adt_tag(cell)?;
+        let is_empty = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                i64_type.const_zero(),
+                "is_empty",
+            )
+            .map_err(|e| err(&format!("compare: {e:?}")))?;
+        self.builder()
+            .build_conditional_branch(is_empty, exit, body)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+
+        self.builder().position_at_end(body);
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
+        self.call_closure1(fn_ptr, head_ptr.into(), "mapm_")?;
+        let tail = self.extract_list_tail(cell)?;
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| err("no block"))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, body_end)]);
+
+        self.builder().position_at_end(exit);
+        Ok(Some(ptr_type.const_null().into()))
     }
 
     /// Lower `sequence`.
@@ -50328,8 +50394,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Populates the derived_show_fns/derived_eq_fns/derived_compare_fns dispatch tables and
     /// constructor_metadata.type_name from case alternatives in derived bindings.
     fn detect_derived_instance_methods(&mut self, bindings: &[Bind]) {
-        for bind in bindings {
-            if let Bind::NonRec(var, expr) = bind {
+        // A recursive derivation (`foldr`/`fmap` over `Node (Tree a) a (Tree
+        // a)`) is a one-binding `Rec` group: look inside those too, or it
+        // drops out of the dispatch tables.
+        let pairs: Vec<(&Var, &Expr)> = bindings
+            .iter()
+            .flat_map(|bind| match bind {
+                Bind::NonRec(var, expr) => vec![(var, expr.as_ref())],
+                Bind::Rec(group) => group.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+            })
+            .collect();
+        for (var, expr) in pairs {
+            {
                 let name = var.name.as_str();
                 // `$derived_showt_T` first: `$derived_show_` is its prefix.
                 if let Some(remainder) = name.strip_prefix("$derived_showt_") {

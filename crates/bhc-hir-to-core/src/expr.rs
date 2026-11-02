@@ -1032,7 +1032,11 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         } else {
             &["Integer"][..]
         };
-        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+        // These are typed at any `t a` (#63): a list arrives spelled `[] a`.
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| crate::context::canonical_list_spelling(&t));
+        if let Some(resolved) = resolved {
             if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::List(e)
                 if matches!(e.as_ref(), Ty::Con(c) if wanted.contains(&c.name.as_str()))))
             {
@@ -5578,6 +5582,219 @@ fn try_lower_bare_sequence(
     lower_monadic_traversal_spine(ctx, def_ref, Vec::new(), def_ref.span)
 }
 
+/// The list of a container that is not a list but is `Foldable`
+/// (`container_ty` is `T a`): `foldr (:) [] c` through `T`'s instance, or
+/// `case c of { Nothing -> []; Just x -> [x] }` at `Maybe`, which has no
+/// instance to resolve. The list is let-bound at `[a]`: codegen's list
+/// builtins read the element type off their argument, and an untyped
+/// application made `sum` add boxed elements as raw words. `None` for a list
+/// and for a container with no instance.
+fn foldable_list(
+    ctx: &mut LowerContext,
+    container_ty: &Ty,
+    container: core::Expr,
+    span: Span,
+) -> Option<core::Expr> {
+    // The instance is keyed at the constructor (`Foldable Tree`).
+    let Ty::App(foldable_ty, elem_ty) = container_ty else {
+        return None;
+    };
+    let head = applied_head_name(foldable_ty).map(|n| n.as_str().to_string());
+    if matches!(head.as_deref(), None | Some("[]" | "List")) {
+        return None;
+    }
+    // A newtype is its field at runtime, which the builtins already walk
+    // (pandoc's `Many a = Many (Seq a)`); its derived `foldr` hands `f` the
+    // whole field, so going through it made a list holding the `Seq`.
+    if head
+        .as_deref()
+        .is_some_and(|h| ctx.is_newtype_name(Symbol::intern(h)))
+    {
+        return None;
+    }
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let list = if head.as_deref() == Some("Maybe") {
+        let x = ctx.fresh_var("$foldable_x", Ty::Error, span);
+        let maybe = TyCon::new(Symbol::intern("Maybe"), Kind::Star);
+        let con = |name: &str, tag, arity| {
+            AltCon::DataCon(DataCon {
+                name: Symbol::intern(name),
+                ty_con: maybe.clone(),
+                tag,
+                arity,
+            })
+        };
+        let singleton = app(
+            app(nullary_var(":", span), core::Expr::Var(x.clone(), span)),
+            nullary_var("[]", span),
+        );
+        let alts = vec![
+            Alt {
+                con: con("Nothing", 0, 0),
+                binders: vec![],
+                rhs: nullary_var("[]", span),
+            },
+            Alt {
+                con: con("Just", 1, 1),
+                binders: vec![x],
+                rhs: singleton,
+            },
+        ];
+        core::Expr::Case(Box::new(container), alts, Ty::Error, span)
+    } else {
+        // Through the class when the module declares or imports `Foldable`'s
+        // methods; with only stock-derived instances the builtin class has no
+        // method table, so take the instance's `foldr` directly.
+        let foldable = Symbol::intern("Foldable");
+        let foldr = Symbol::intern("foldr");
+        let direct = ctx
+            .class_registry()
+            .resolve_instance(foldable, foldable_ty)
+            .and_then(|(inst, _)| inst.methods.get(&foldr).copied())
+            .and_then(|id| ctx.lookup_var(id).cloned())
+            .map(|v| core::Expr::Var(v, span));
+        let foldr_e = ctx
+            .resolve_method_at_concrete_type(foldr, foldable, foldable_ty, span)
+            .or(direct)?;
+        app(
+            app(
+                app(foldr_e, nullary_var(":", span)),
+                nullary_var("[]", span),
+            ),
+            container,
+        )
+    };
+    Some(typed_list(ctx, elem_ty, list, span))
+}
+
+/// `list` let-bound at `[elem_ty]`, so codegen's list builtins and `show`
+/// see the element type (an untyped list of `Char` printed as numbers).
+fn typed_list(ctx: &mut LowerContext, elem_ty: &Ty, list: core::Expr, span: Span) -> core::Expr {
+    let list_ty = Ty::App(
+        Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("[]"),
+            Kind::star_to_star(),
+        ))),
+        Box::new(elem_ty.clone()),
+    );
+    let v = ctx.fresh_var(
+        "$foldable_list",
+        crate::context::canonical_list_spelling(&list_ty),
+        span,
+    );
+    core::Expr::Let(
+        Box::new(Bind::NonRec(v.clone(), Box::new(list))),
+        Box::new(core::Expr::Var(v, span)),
+        span,
+    )
+}
+
+/// The type of argument `pos` of a call: the argument's own recorded type,
+/// or the head's instantiated parameter type when the checker recorded none
+/// at the argument (`Node Leaf 'a' Leaf`).
+fn call_arg_ty(
+    ctx: &LowerContext,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+    pos: usize,
+) -> Option<Ty> {
+    args.get(pos)
+        .and_then(|a| ctx.resolved_expr_ty_opt(a.span()))
+        .or_else(|| {
+            let mut t = ctx.resolved_expr_ty_opt(head_ref.span)?;
+            for _ in 0..pos {
+                match t {
+                    Ty::Fun(_, r) => t = *r,
+                    _ => return None,
+                }
+            }
+            match t {
+                Ty::Fun(p, _) => Some(*p),
+                _ => None,
+            }
+        })
+}
+
+/// `sum`, `length`, `elem`, `mapM_`, … over a container that is not a list
+/// but is `Foldable`: the builtin, which walks lists, gets the container's
+/// list ([`foldable_list`]). typeck types these at any `t a` (#63); without
+/// this, codegen walked a `Tree` as if it were a list. A derived instance and
+/// a hand-written one resolve alike. `None` (lowered as before) for lists and
+/// for containers with no instance.
+fn lower_foldable_consumer(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    // Only the Foldable-generic functions: `Data.Map.toList` (pairs, not
+    // values), `Set.elem`, `M.null`, … are the container's own and take it
+    // as it is. Rewriting those broke pandoc's baked-in data-file lookup.
+    let bare = match name.as_str().rsplit_once('.') {
+        None => name.as_str(),
+        Some((
+            "Prelude" | "Data.Foldable" | "Data.List" | "Data.OldList" | "Control.Monad"
+            | "Data.Traversable" | "GHC.List" | "Data.Functor",
+            op,
+        )) => op,
+        Some(_) => return Ok(None),
+    };
+    let container_pos = match (bare, args.len()) {
+        ("sum" | "product" | "length" | "null" | "maximum" | "minimum" | "toList", 1) => 0,
+        ("elem" | "notElem" | "any" | "all" | "mapM_" | "traverse_", 2) => 1,
+        ("forM_" | "for_", 2) => 0,
+        _ => return Ok(None),
+    };
+    let Some(container_ty) = call_arg_ty(ctx, head_ref, args, container_pos) else {
+        return Ok(None);
+    };
+    if !is_foldable_non_list(&container_ty) {
+        return Ok(None);
+    }
+    let container = lower_expr(ctx, args[container_pos])?;
+    let Some(list) = foldable_list(ctx, &container_ty, container, span) else {
+        // A newtype keeps the builtin, but `toList`'s list still needs its
+        // element type (`toList (Bag "xy")` printed `[120,121]`).
+        if let ("toList", Ty::App(_, elem_ty)) = (bare, &container_ty) {
+            let call = lower_expr(ctx, &hir::Expr::Var(*head_ref))?;
+            let arg = lower_expr(ctx, args[0])?;
+            let list = core::Expr::App(Box::new(call), Box::new(arg), span);
+            return Ok(Some(typed_list(ctx, elem_ty, list, span)));
+        }
+        return Ok(None);
+    };
+    // `toList` of the list is the list: through the builtin, the result lost
+    // the list's element type and `print` showed `"ab"` as `[97,98]`.
+    if bare == "toList" {
+        return Ok(Some(list));
+    }
+    let mut result = lower_expr(ctx, &hir::Expr::Var(*head_ref))?;
+    let mut list = Some(list);
+    for (i, arg) in args.iter().enumerate() {
+        let arg_core = match list.take_if(|_| i == container_pos) {
+            Some(l) => l,
+            None => lower_expr(ctx, arg)?,
+        };
+        result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
+    }
+    Ok(Some(result))
+}
+
+/// Whether `ty` is `T a` for a `T` that is not the list type, so a
+/// `Foldable` consumer goes through [`foldable_list`].
+fn is_foldable_non_list(ty: &Ty) -> bool {
+    let Ty::App(f, _) = ty else {
+        return false;
+    };
+    !matches!(
+        applied_head_name(f)
+            .map(|n| n.as_str().to_string())
+            .as_deref(),
+        None | Some("[]" | "List")
+    )
+}
+
 /// [`try_lower_monadic_traversal`] once the head and its arguments are known.
 fn lower_monadic_traversal_spine(
     ctx: &mut LowerContext,
@@ -5588,6 +5805,24 @@ fn lower_monadic_traversal_spine(
     let Some(name) = ctx.lookup_var(head_ref.def_id).map(|v| v.name) else {
         return Ok(None);
     };
+    // `mapM_`/`forM_` over a non-list `Foldable` take the monadic rewrite
+    // below when it applies (the closure IO model runs the actions it
+    // builds); otherwise, as the other consumers, the builtin over the list.
+    if let Some(e) = lower_monadic_traversal_spine_inner(ctx, name, head_ref, &args, span)? {
+        return Ok(Some(e));
+    }
+    lower_foldable_consumer(ctx, name, head_ref, &args, span)
+}
+
+/// [`lower_monadic_traversal_spine`] for everything but the plain `Foldable`
+/// consumers.
+fn lower_monadic_traversal_spine_inner(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
     // `ap mf mx` is `<*>` written through the Monad; codegen has no
     // implementation for it and aborts with `stub: ap not implemented`.
     if name.as_str() == "ap" && args.len() == 2 {
@@ -5647,9 +5882,9 @@ fn lower_monadic_traversal_spine(
         ("liftM2" | "liftA2", 3) => Some((2, MonadicShape::ApplyFn)),
         _ => None,
     } {
-        return lower_monadic_lift(ctx, &args, n_actions, build, head_ref.span, span);
+        return lower_monadic_lift(ctx, args, n_actions, build, head_ref.span, span);
     }
-    if let Some(e) = lower_monadic_fold_family(ctx, name, &args, head_ref.span, span)? {
+    if let Some(e) = lower_monadic_fold_family(ctx, name, args, head_ref.span, span)? {
         return Ok(Some(e));
     }
     // `collect`: the result list is kept. `elems`: the arguments are already
@@ -5697,7 +5932,7 @@ fn lower_monadic_traversal_spine(
             applied_head_name(&monad_ty)
         );
     }
-    if let Some(e) = lower_generated_traversal(ctx, name, &args, head_ref, &monad_ty, span)? {
+    if let Some(e) = lower_generated_traversal(ctx, name, args, head_ref, &monad_ty, span)? {
         return Ok(Some(e));
     }
     let short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
@@ -5795,16 +6030,20 @@ fn lower_monadic_traversal_spine(
     if std::env::var("BHC_DBG_TRAV").is_ok() {
         eprintln!("trav {}: container {:?}", name.as_str(), container_ty);
     }
+    // `mapM_`/`forM_` over another `Foldable` fold its list
+    // ([`foldable_list`], #63); the collecting forms need the container's
+    // own `Traversable` and are left to it.
+    let mut foldable_cty = None;
     if let Some(cty) = container_ty {
-        {
-            let mut head = &cty;
-            while let Ty::App(f, _) = head {
-                head = f.as_ref();
-            }
-            if matches!(head, Ty::Con(tc) if tc.name.as_str() != "[]" && tc.name.as_str() != "List")
-            {
+        let mut head = &cty;
+        while let Ty::App(f, _) = head {
+            head = f.as_ref();
+        }
+        if matches!(head, Ty::Con(tc) if tc.name.as_str() != "[]" && tc.name.as_str() != "List") {
+            if collect || elems || !is_foldable_non_list(&cty) {
                 return Ok(None);
             }
+            foldable_cty = Some(cty);
         }
     }
     let (fn_expr, list_expr) = if missing_list && elems {
@@ -5841,8 +6080,18 @@ fn lower_monadic_traversal_spine(
             }
             e
         }
-        (Some(e), _) => lower_expr(ctx, e)?,
-        (None, Some(v)) => core::Expr::Var(v.clone(), span),
+        (Some(e), _) => {
+            let lowered = lower_expr(ctx, e)?;
+            match &foldable_cty {
+                Some(cty) => match foldable_list(ctx, cty, lowered, span) {
+                    Some(list) => list,
+                    None => return Ok(None),
+                },
+                None => lowered,
+            }
+        }
+        (None, Some(v)) if foldable_cty.is_none() => core::Expr::Var(v.clone(), span),
+        (None, Some(_)) => return Ok(None),
         (None, None) => return Ok(None),
     };
     let fn_core = match fn_expr {

@@ -967,15 +967,18 @@ impl Builtins {
                 )
             }),
             ("mapM_", {
-                // mapM_ :: Monad m => (a -> m b) -> [a] -> m () (polymorphic)
+                // mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
+                // Any container (#63): a user Foldable's becomes a list
+                // through its `foldr` in hir-to-core (`lower_foldable_consumer`).
                 let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, m_kind);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(list_a, m_unit)),
+                    vec![t, m.clone(), a.clone(), b.clone()],
+                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(t_a, m_unit)),
                 )
             }),
             ("forM", {
@@ -994,15 +997,17 @@ impl Builtins {
                 )
             }),
             ("forM_", {
-                // forM_ :: Monad m => [a] -> (a -> m b) -> m () (polymorphic)
+                // forM_ :: (Foldable t, Monad m) => t a -> (a -> m b) -> m ()
+                // Any container, as `mapM_`.
                 let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, m_kind);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(list_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_unit)),
+                    vec![t, m.clone(), a.clone(), b.clone()],
+                    Ty::fun(t_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_unit)),
                 )
             }),
             ("sequence", {

@@ -2357,3 +2357,8 @@ fn test_tier3_derived_traverse_user_monad() {
 fn test_tier3_list_applicative_lift() {
     run_native_test("tier3_io/list_applicative_lift", Profile::Default);
 }
+
+#[test]
+fn test_tier3_user_foldable_consumers() {
+    run_native_test("tier3_io/user_foldable_consumers", Profile::Default);
+}

@@ -166,7 +166,7 @@ unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
 /// where it knows the key's type — an unknown key keeps today's behaviour
 /// rather than risking a dereference of a large integer.
 ///
-/// [`Key`] orders interned keys by their content, so `toList` on a
+/// `Key` orders interned keys by their content, so `toList` on a
 /// boxed-key map is in key order.
 ///
 /// # Safety

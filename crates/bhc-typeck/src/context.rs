@@ -93,6 +93,13 @@ pub struct TyCtxt {
     /// environment pinning their types.
     pub(crate) generalizing: Vec<Symbol>,
 
+    /// Type variables a local let/where binding was generalized over. Each
+    /// use instantiates them afresh, with its own constraints, so a pending
+    /// constraint on the original variable is not ambiguous and must not be
+    /// defaulted: `let h x = x + 1` defaulted to `Int` there left `h`'s Core
+    /// binder at `Int -> Int` though it is used at `Integer` (#57).
+    pub(crate) local_generalized_vars: rustc_hash::FxHashSet<TyVar>,
+
     /// Diagnostic handler for error collection.
     diag: DiagnosticHandler,
 
@@ -216,6 +223,7 @@ impl TyCtxt {
             subst: Subst::new(),
             env: TypeEnv::new(),
             generalizing: Vec::new(),
+            local_generalized_vars: rustc_hash::FxHashSet::default(),
             diag: DiagnosticHandler::new(),
             builtins: Builtins::default(),
             file_id,
@@ -483,6 +491,9 @@ impl TyCtxt {
             // If all args are type variables, try defaulting (single-arg only)
             if args.len() == 1 {
                 if let Ty::Var(ref v) = args[0] {
+                    if self.local_generalized_vars.contains(v) {
+                        continue;
+                    }
                     if self.try_default_constraint(constraint.class, v) {
                         continue;
                     }
@@ -560,6 +571,9 @@ impl TyCtxt {
             // If all args are type variables, try defaulting (single-arg only)
             if args.len() == 1 {
                 if let Ty::Var(ref v) = args[0] {
+                    if self.local_generalized_vars.contains(v) {
+                        continue;
+                    }
                     if self.try_default_constraint(constraint.class, v) {
                         continue;
                     }
@@ -2693,21 +2707,21 @@ impl TyCtxt {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
                 }
-                // length :: [a] -> Int
+                // length :: Foldable t => t a -> Int. Any container, like
+                // `elem` (#63): a user Foldable's container becomes a list
+                // through its `foldr` in hir-to-core
+                // (`lower_foldable_consumer`). The unifier decomposes a list
+                // as `App([], a)`, so list uses still unify.
                 "length" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a, self.builtins.int_ty.clone()),
-                    )
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, self.builtins.int_ty.clone()))
                 }
-                // null :: [a] -> Bool
+                // null :: Foldable t => t a -> Bool
                 "null" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a, self.builtins.bool_ty.clone()),
-                    )
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, self.builtins.bool_ty.clone()))
                 }
                 // take, drop :: Int -> [a] -> [a]
                 "take" | "drop" => {
@@ -2722,10 +2736,12 @@ impl TyCtxt {
                 }
                 // sum, product :: [Int] -> Int
                 "sum" | "product" => {
-                    // Num a => [a] -> a (polymorphic — not pinned to Int, else
-                    // `sum [2.0,3.0] :: Double` fails). See builtins.rs `sum`.
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                    // (Foldable t, Num a) => t a -> a (polymorphic — not
+                    // pinned to Int, else `sum [2.0,3.0] :: Double` fails).
+                    // Any container, as `length`.
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, Ty::Var(a.clone())))
                 }
                 // foldl :: (b -> a -> b) -> b -> t a -> b
                 // Any `t a` container, so DeriveFoldable types work — codegen
@@ -2821,10 +2837,11 @@ impl TyCtxt {
                     };
                     Scheme::poly(vars, ty)
                 }
-                // maximum, minimum :: [a] -> a
+                // maximum, minimum :: (Foldable t, Ord a) => t a -> a
                 "maximum" | "minimum" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone(), t], Ty::fun(ta, Ty::Var(a.clone())))
                 }
                 // last :: [a] -> a
                 "last" => {
@@ -3306,25 +3323,27 @@ impl TyCtxt {
                     vec![a.clone()],
                     Ty::fun(Ty::Var(a.clone()), self.builtins.integer_ty.clone()),
                 ),
-                // any :: (a -> Bool) -> [a] -> Bool
+                // any :: Foldable t => (a -> Bool) -> t a -> Bool
                 "any" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), t],
                         Ty::fun(
                             Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                            Ty::fun(list_a, self.builtins.bool_ty.clone()),
+                            Ty::fun(ta, self.builtins.bool_ty.clone()),
                         ),
                     )
                 }
-                // all :: (a -> Bool) -> [a] -> Bool
+                // all :: Foldable t => (a -> Bool) -> t a -> Bool
                 "all" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let t = TyVar::new(0xFFFD_0002, Kind::star_to_star());
+                    let ta = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), t],
                         Ty::fun(
                             Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                            Ty::fun(list_a, self.builtins.bool_ty.clone()),
+                            Ty::fun(ta, self.builtins.bool_ty.clone()),
                         ),
                     )
                 }
@@ -7860,10 +7879,41 @@ impl TyCtxt {
                         | "sequence_"
                         | "mapM_"
                         | "forM_"
+                        // `import Data.Traversable (for)`: typed fresh, `for`
+                        // at IO had no element type and printed an address
+                        // (#63).
+                        | "traverse"
+                        | "for"
+                        | "sequenceA"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
             .collect();
+
+        // Builtin values whose by-NAME scheme is exact but whose DefId does not
+        // carry it. The lowering pass and `register_primitive_ops` number
+        // their builtin lists independently and the lists have drifted apart,
+        // so a builtin with no case above holds whatever scheme the typeck
+        // list put at that number: `liftA2` got an unrelated stub's
+        // `forall a. a`, its result never unified with `f c`, and
+        // `print (liftA2 (+) (Just 1) (Just 2))` printed an address (#63).
+        // Only these names: elsewhere the permissive scheme at the DefId is
+        // what lets programs through (see `builtin_by_name` above).
+        for def_info in defs.values() {
+            if !matches!(def_info.kind, DefKind::Value)
+                || def_info.type_scheme.is_some()
+                || local_value_ids.contains(&def_info.id)
+                || !matches!(
+                    def_info.name.as_str(),
+                    "liftA" | "liftA2" | "liftA3" | "liftM" | "liftM2"
+                )
+            {
+                continue;
+            }
+            if let Some(scheme) = self.env.lookup_local(def_info.name).cloned() {
+                self.env.insert_global(def_info.id, scheme);
+            }
+        }
 
         // Second pass: register any remaining definitions (imported items not in builtins)
         // with their interface type schemes (if available) or fresh type variables.
@@ -8237,6 +8287,13 @@ impl TyCtxt {
             if class_known {
                 self.check_value_def(method);
                 self.guide_instance_method_type(instance, method);
+            } else if let Some(scheme) = self.traversable_method_scheme(instance, method.name) {
+                // A hand-written `Traversable` instance's `traverse`: checked
+                // with its own `Applicative f` given, so `pure`/`<*>` inside
+                // resolve at that applicative, not at the container (#66).
+                let mut typed = method.clone();
+                typed.sig = Some(scheme);
+                self.check_value_def(&typed);
             } else if let Some(shape) = builtin_value_method_shape(instance, method.name)
                 .or_else(|| self.monad_family_method_shape(instance, method.name))
                 .map(|shape| own.apply(&shape))
@@ -8302,6 +8359,58 @@ impl TyCtxt {
     /// to the instance being defined. Only in the closure IO model
     /// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005), until checking these
     /// bodies is proven on the e2e suite and pandoc.
+    /// The scheme of a hand-written builtin-class method that needs one to be
+    /// checked: `Foldable`'s `foldr` (below), or `traverse` in an `instance
+    /// Traversable T`:
+    /// `forall f a b. Applicative f => (a -> f b) -> T a -> f (T b)`. Under
+    /// the closure IO model only, where `Applicative` is dictionary-passed
+    /// (hir-to-core gives the method that dictionary; #66).
+    fn traversable_method_scheme(
+        &mut self,
+        instance: &InstanceDef,
+        method: Symbol,
+    ) -> Option<Scheme> {
+        if instance.types.len() != 1 {
+            return None;
+        }
+        let t = instance.types[0].clone();
+        // `foldr :: (a -> b -> b) -> b -> T a -> b` of a hand-written
+        // `Foldable` instance: checked, so its recursive `foldr` has a
+        // container type to dispatch on (#66). No constraint, any IO model.
+        if instance.class.as_str() == "Foldable" && method.as_str() == "foldr" {
+            let a = self.fresh_ty_var_with_kind(Kind::Star);
+            let b = self.fresh_ty_var_with_kind(Kind::Star);
+            let fun = |x: Ty, y: Ty| Ty::Fun(Box::new(x), Box::new(y));
+            let (av, bv) = (Ty::Var(a.clone()), Ty::Var(b.clone()));
+            let ty = fun(
+                fun(av.clone(), fun(bv.clone(), bv.clone())),
+                fun(bv.clone(), fun(Ty::App(Box::new(t), Box::new(av)), bv)),
+            );
+            return Some(Scheme::poly(vec![a, b], ty));
+        }
+        if !crate::io_closure_mode()
+            || instance.class.as_str() != "Traversable"
+            || method.as_str() != "traverse"
+        {
+            return None;
+        }
+        let f = self.fresh_ty_var_with_kind(Kind::star_to_star());
+        let a = self.fresh_ty_var_with_kind(Kind::Star);
+        let b = self.fresh_ty_var_with_kind(Kind::Star);
+        let at = |c: &Ty, x: &TyVar| Ty::App(Box::new(c.clone()), Box::new(Ty::Var(x.clone())));
+        let fun = |x: Ty, y: Ty| Ty::Fun(Box::new(x), Box::new(y));
+        let f_ty = Ty::Var(f.clone());
+        let ty = fun(
+            fun(Ty::Var(a.clone()), at(&f_ty, &b)),
+            fun(
+                at(&t, &a),
+                Ty::App(Box::new(f_ty.clone()), Box::new(at(&t, &b))),
+            ),
+        );
+        let applicative = Constraint::new(Symbol::intern("Applicative"), f_ty, instance.span);
+        Some(Scheme::qualified(vec![f, a, b], vec![applicative], ty))
+    }
+
     fn monad_family_method_shape(&mut self, instance: &InstanceDef, method: Symbol) -> Option<Ty> {
         if !crate::io_closure_mode()
             || !matches!(instance.class.as_str(), "Functor" | "Applicative" | "Monad")

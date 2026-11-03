@@ -9,3 +9,5 @@ Just 3
 [2,1]
 Sum {getSum = 3}
 Dual {getDual = "ab"}
+11
+7

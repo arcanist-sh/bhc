@@ -14,3 +14,5 @@ main = do
   print (getDual (Dual [1 :: Int] <> Dual [2]))
   print (getDual (Dual (Sum (1 :: Int)) <> Dual (Sum 2)))
   print (Dual "ab" <> mempty)
+  print (appEndo (Endo (+ 1) <> Endo (* 2)) (5 :: Int))
+  print (appEndo (mconcat [Endo (+ 1), Endo (* 3)]) (2 :: Int))

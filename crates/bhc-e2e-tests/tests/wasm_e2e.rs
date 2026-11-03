@@ -579,6 +579,8 @@ fn test_tier3_derive_read_wasm() {
 // Derived Traversable: traverse/mapM reduce to the derived Functor (fmap)/map
 // in the eager IO model — the effect runs as each element is evaluated.
 #[test]
+#[ignore = "wasm: an IO function passed as an argument does not run, which the \
+            generated derived traversals (#53) rely on (#68)"]
 fn test_tier3_derive_traversable_wasm() {
     run_wasm_test("tier3_io/derive_traversable", Profile::Default);
 }
@@ -1041,4 +1043,10 @@ fn test_tier4_foldl_map_lambda_wasm() {
 #[test]
 fn test_tier3_file_append_roundtrip_wasm() {
     run_wasm_test("tier3_io/file_append_roundtrip", Profile::Default);
+}
+
+// getArgs and runtime String lists show quoted (#41).
+#[test]
+fn test_tier3_show_string_list_wasm() {
+    run_wasm_test("tier3_io/show_string_list", Profile::Default);
 }

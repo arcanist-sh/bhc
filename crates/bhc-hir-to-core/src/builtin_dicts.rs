@@ -171,7 +171,11 @@ impl Builder<'_> {
                 let nothing = b.nothing();
                 b.case_maybe(b.var(m), nothing, |b, x| b.just(b.app(b.var(f), b.var(x))))
             }),
-            ValueMonad::List => self.named("map"),
+            // Applied, not the bare builtin: `map` reached as a value took
+            // its list as already evaluated, and a recursive `Applicative f
+            // =>` function hands it the recursive call as a thunk
+            // (`go n = fmap (n :) (go (n - 1))` at lists crashed; #66).
+            ValueMonad::List => self.lam2(|b, f, xs| b.app2(b.named("map"), b.var(f), b.var(xs))),
         }
     }
 

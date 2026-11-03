@@ -138,6 +138,29 @@ pub fn lower_core_module(
     wasm: &mut WasmModule,
     runtime: &RuntimeIndices,
 ) -> WasmResult<u32> {
+    // A WASI module has no C library to link a `foreign import` against: a
+    // call compiled to the constant 0 with only a log warning (#41). Only the
+    // C math functions the backend implements itself are accepted, and only
+    // under the names its call lowering recognizes (`sin` or `c_sin`); any
+    // other import is a compile error.
+    let unsupported: Vec<String> = core
+        .foreign_imports
+        .iter()
+        .filter(|f| {
+            let c = f.c_name.as_str();
+            let hs = strip_qualifier(f.haskell_name.as_str());
+            !(matches!(c, "sin" | "cos" | "sqrt") && (hs == c || hs == format!("c_{c}")))
+        })
+        .map(|f| format!("{} (\"{}\")", f.haskell_name.as_str(), f.c_name.as_str()))
+        .collect();
+    if !unsupported.is_empty() {
+        return Err(crate::WasmError::NotSupported(format!(
+            "foreign import on the WASM target: {}; a WASI program cannot call C \
+             functions (only `sin`, `cos` and `sqrt`, named `c_sin`/`sin` etc., are built in)",
+            unsupported.join(", ")
+        )));
+    }
+
     let mut lowering = WasmLowering::new(wasm, runtime);
 
     // Register user-defined data constructors so their tags/arities match the
@@ -1229,6 +1252,11 @@ impl<'a> WasmLowering<'a> {
                         names.len().saturating_sub(1) as i32
                     };
                     instrs.push(WasmInstr::I32Const(tag));
+                } else if strip_qualifier(name) == "getArgs" {
+                    // From WASI's argv (#41).
+                    instrs.push(WasmInstr::Call(self.runtime.get_args_idx));
+                } else if strip_qualifier(name) == "getProgName" {
+                    instrs.push(WasmInstr::Call(self.runtime.get_prog_name_idx));
                 } else {
                     // Unknown variable - push 0 as fallback
                     tracing::warn!(var = name, "unresolved variable, using 0");
@@ -2701,6 +2729,27 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::Else);
                 instrs.push(WasmInstr::I32Const(false_ptr as i32));
                 instrs.push(WasmInstr::End);
+            }
+            ElemKind::Str => {
+                // The element as a flat `pstr` (nil is "", a cons `[Char]` is
+                // converted), then shown quoted.
+                let empty = self.intern_pstr("") as i32;
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::I32Eqz);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(empty));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+                instrs.push(WasmInstr::I32And);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::Else);
+                self.emit_charlist_to_pstr(head, instrs, local_count);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
             }
         }
         instrs.push(WasmInstr::Call(concat));
@@ -5033,6 +5082,13 @@ impl<'a> WasmLowering<'a> {
             // The content (and path) as a flat `pstr`: a computed String can be
             // a cons `[Char]`, whose first word the host writer read as the
             // length — `writeFile f (reverse "hello")` wrote `o` (#40).
+            // `getArgs`/`getProgName` from WASI's argv (#41).
+            Some(n) if args.is_empty() && strip_qualifier(n) == "getArgs" => {
+                instrs.push(WasmInstr::Call(self.runtime.get_args_idx));
+            }
+            Some(n) if args.is_empty() && strip_qualifier(n) == "getProgName" => {
+                instrs.push(WasmInstr::Call(self.runtime.get_prog_name_idx));
+            }
             Some(n) if args.len() == 2 && strip_qualifier(n) == "writeFile" => {
                 self.emit_string_as_pstr(args[0], instrs, locals, local_count)?; // path
                 self.emit_string_as_pstr(args[1], instrs, locals, local_count)?; // content
@@ -11162,6 +11218,8 @@ enum ElemKind {
     Int,
     Double,
     Bool,
+    /// A `String` element, shown quoted (`["x","y z"]`, #41).
+    Str,
 }
 
 /// If `ty` is a list type `[e]` whose element is a renderable scalar, return its
@@ -11180,8 +11238,12 @@ fn list_elem_show_kind(ty: &Ty) -> Option<ElemKind> {
             "Int" | "Integer" | "Word" | "Char" => Some(ElemKind::Int),
             "Double" | "Float" => Some(ElemKind::Double),
             "Bool" => Some(ElemKind::Bool),
+            "String" => Some(ElemKind::Str),
             _ => None,
         },
+        Ty::List(c) if matches!(c.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Char") => {
+            Some(ElemKind::Str)
+        }
         _ => None,
     }
 }

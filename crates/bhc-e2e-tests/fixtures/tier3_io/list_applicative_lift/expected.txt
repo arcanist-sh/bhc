@@ -1,0 +1,17 @@
+[11,21,12,22]
+[6,7,10,12]
+[3]
+[('a',True),('a',False),('b',True),('b',False)]
+[11,12]
+[11,21,12,22]
+Just 3
+Nothing
+[11,21,12,22]
+Right 3
+Left "e"
+Just 5
+first
+second
+3
+('x',True)
+[2,4]

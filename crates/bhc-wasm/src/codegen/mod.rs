@@ -119,6 +119,10 @@ pub struct RuntimeIndices {
     /// Index of `file_append` (path, content): append to an existing file's
     /// contents, or create it if absent.
     pub file_append_idx: u32,
+    /// Index of `get_args` () -> `[String]` (#41).
+    pub get_args_idx: u32,
+    /// Index of `get_prog_name` () -> `String` (#41).
+    pub get_prog_name_idx: u32,
     /// Index of `make_rational` (num, den) -> ptr: build a normalized
     /// `Ratio Int` (`[num|den]`).
     pub make_rational_idx: u32,
@@ -722,6 +726,8 @@ impl WasmModule {
             file_append_host_idx,
         );
         let file_append_idx = self.add_function(file_append_func);
+        let get_args_idx = self.add_function(wasi::generate_get_args(alloc_idx));
+        let get_prog_name_idx = self.add_function(wasi::generate_get_prog_name(alloc_idx));
 
         // Rational (Ratio Int) constructor.
         let make_rational_func = wasi::generate_make_rational(alloc_idx);
@@ -748,6 +754,8 @@ impl WasmModule {
             file_write_idx,
             file_read_idx,
             file_append_idx,
+            get_args_idx,
+            get_prog_name_idx,
             make_rational_idx,
             newline_offset,
         }

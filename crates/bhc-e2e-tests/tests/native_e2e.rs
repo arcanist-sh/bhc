@@ -235,6 +235,13 @@ fn test_tier2_multimodule_basic_native() {
     run_native_test("tier2_functions/multimodule_basic", Profile::Default);
 }
 
+/// Class-polymorphic functions imported from another module, used at
+/// Integer and Double (#57).
+#[test]
+fn test_tier2_multimodule_numeric_poly() {
+    run_native_test("tier2_functions/multimodule_numeric_poly", Profile::Default);
+}
+
 /// `StateT` over a GND newtype monad imported from another module.
 #[test]
 fn test_tier2_multimodule_newtype_monad_native() {
@@ -2299,4 +2306,75 @@ fn test_tier4_foldl_map_lambda_numeric() {
 #[test]
 fn test_tier3_file_append_roundtrip() {
     run_native_test("tier3_io/file_append_roundtrip", Profile::Default);
+}
+
+// getArgs and runtime String lists show quoted (#41).
+#[test]
+fn test_tier3_show_string_list() {
+    run_native_test("tier3_io/show_string_list", Profile::Default);
+}
+
+// Class-polymorphic functions at Integer/Double/String get specialized
+// copies (#57).
+#[test]
+fn test_tier2_class_polymorphic_numeric() {
+    run_native_test(
+        "tier2_functions/class_polymorphic_numeric",
+        Profile::Default,
+    );
+}
+
+// Local functions using builtin class methods, used at several types, and
+// `Show a =>` at non-numeric types (#57).
+#[test]
+fn test_tier2_local_polymorphic_classes() {
+    run_native_test(
+        "tier2_functions/local_polymorphic_classes",
+        Profile::Default,
+    );
+}
+
+// Recursive/nested fields, Maybe/Either/IO/list monads, sequenceA (#53).
+#[test]
+fn test_tier3_derived_traverse_nested() {
+    run_native_test("tier3_io/derived_traverse_nested", Profile::Default);
+}
+
+// concatMap/concat over a lazily bound list argument.
+#[test]
+fn test_tier2_concatmap_lazy_arg() {
+    run_native_test("tier2_functions/concatmap_lazy_arg", Profile::Default);
+}
+
+// A user-defined monad, its operations passed to the generated traversal (#53).
+#[test]
+fn test_tier3_derived_traverse_user_monad() {
+    run_native_test("tier3_io/derived_traverse_user_monad", Profile::Default);
+}
+
+#[test]
+fn test_tier3_list_applicative_lift() {
+    run_native_test("tier3_io/list_applicative_lift", Profile::Default);
+}
+
+#[test]
+fn test_tier3_user_foldable_consumers() {
+    run_native_test("tier3_io/user_foldable_consumers", Profile::Default);
+}
+
+// A hand-written `Traversable` instance used at Maybe, IO and lists (#66).
+//
+// Closure IO model only: the instance's `traverse` takes an `Applicative`
+// dictionary, and the eager model does not pass monad-family dictionaries.
+#[test]
+fn test_tier3_hand_written_traversable() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/hand_written_traversable", Profile::Default);
+}
+
+#[test]
+fn test_tier3_polymorphic_monad_traverse() {
+    run_native_test("tier3_io/polymorphic_monad_traverse", Profile::Default);
 }

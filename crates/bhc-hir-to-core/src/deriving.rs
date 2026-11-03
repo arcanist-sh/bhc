@@ -2933,7 +2933,7 @@ impl DerivingContext {
             &format!("$derived_foldr_{}", data_def.name.as_str()),
             Ty::Error,
         );
-        let foldr_body = self.generate_foldr_body(data_def, type_param, span);
+        let foldr_body = self.generate_foldr_body(data_def, type_param, &foldr_var, span);
 
         let mut methods = FxHashMap::default();
         methods.insert(
@@ -2952,19 +2952,23 @@ impl DerivingContext {
 
         Some(DerivedInstance {
             instance,
-            bindings: vec![Bind::NonRec(foldr_var, Box::new(foldr_body))],
+            // Recursive: a field of the type itself folds through `foldr_var`.
+            bindings: vec![Bind::Rec(vec![(foldr_var, Box::new(foldr_body))])],
         })
     }
 
     /// Generate the body of foldr for a data type.
     ///
     /// foldr f z x = case x of
-    ///   Con1 a1 a2 ... -> f a1 (f a2 (... z))  -- fold where type param appears
+    ///   Con1 a1 a2 ... -> fold a1 (fold a2 (... z))  -- fields holding the parameter
     ///   Con2 -> z  -- no type param fields
+    ///
+    /// See [`Self::fold_foldable_field`] for how one field is folded.
     fn generate_foldr_body(
         &mut self,
         data_def: &DataDef,
         type_param: &TyVar,
+        self_foldr: &Var,
         span: Span,
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
@@ -2988,24 +2992,20 @@ impl DerivingContext {
                     .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
                     .collect();
 
-                // Collect fields that contain the type parameter (in reverse for foldr)
-                let param_fields: Vec<&Var> = field_types
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, ty)| self.type_contains_param(ty, type_param))
-                    .map(|(i, _)| &binders[i])
-                    .collect();
-
-                // Build: f a1 (f a2 (... z))
+                // Fold the fields that hold the parameter, right to left.
                 let mut result = core::Expr::Var(z_var.clone(), span);
-                for field_var in param_fields.into_iter().rev() {
-                    result = core::Expr::App(
-                        Box::new(core::Expr::App(
-                            Box::new(core::Expr::Var(f_var.clone(), span)),
-                            Box::new(core::Expr::Var(field_var.clone(), span)),
-                            span,
-                        )),
-                        Box::new(result),
+                for (i, field_ty) in field_types.iter().enumerate().rev() {
+                    if !self.type_contains_param(field_ty, type_param) {
+                        continue;
+                    }
+                    result = self.fold_foldable_field(
+                        field_ty,
+                        core::Expr::Var(binders[i].clone(), span),
+                        result,
+                        type_param,
+                        data_def.name,
+                        &f_var,
+                        self_foldr,
                         span,
                     );
                 }
@@ -3029,6 +3029,79 @@ impl DerivingContext {
         let lam1 = core::Expr::Lam(x_var, Box::new(case_expr), span);
         let lam2 = core::Expr::Lam(z_var, Box::new(lam1), span);
         core::Expr::Lam(f_var, Box::new(lam2), span)
+    }
+
+    /// Fold one field of a derived `foldr` into `acc`, by the field's type:
+    /// the parameter itself is `f x acc`, this type (`Tree a`) is the
+    /// derived `foldr` applied recursively, and a container around either
+    /// (`[Rose a]`) is `foldr (\\y acc' -> <fold y into acc'>) acc x`.
+    /// Applying `f` to every field handed it whole subtrees (#63).
+    #[allow(clippy::too_many_arguments)]
+    fn fold_foldable_field(
+        &mut self,
+        field_ty: &Ty,
+        x: core::Expr,
+        acc: core::Expr,
+        type_param: &TyVar,
+        self_name: Symbol,
+        f_var: &Var,
+        self_foldr: &Var,
+        span: Span,
+    ) -> core::Expr {
+        let app2 = |g: core::Expr, a: core::Expr, b: core::Expr| {
+            core::Expr::App(
+                Box::new(core::Expr::App(Box::new(g), Box::new(a), span)),
+                Box::new(b),
+                span,
+            )
+        };
+        let f_ref = core::Expr::Var(f_var.clone(), span);
+        if matches!(field_ty, Ty::Var(v) if v == type_param) {
+            return app2(f_ref, x, acc);
+        }
+        let mut head = field_ty;
+        while let Ty::App(h, _) = head {
+            head = h;
+        }
+        if matches!(head, Ty::Con(c) if c.name == self_name) {
+            let call = app2(core::Expr::Var(self_foldr.clone(), span), f_ref, acc);
+            return core::Expr::App(Box::new(call), Box::new(x), span);
+        }
+        let inner = match field_ty {
+            Ty::List(elem) => Some(elem.as_ref().clone()),
+            Ty::App(_, last) => Some(last.as_ref().clone()),
+            _ => None,
+        };
+        let step = match inner {
+            Some(inner) if self.type_contains_param(&inner, type_param) => {
+                let y = self.fresh_var("y", inner.clone());
+                let acc_var = self.fresh_var("acc", Ty::Error);
+                let body = self.fold_foldable_field(
+                    &inner,
+                    core::Expr::Var(y.clone(), span),
+                    core::Expr::Var(acc_var.clone(), span),
+                    type_param,
+                    self_name,
+                    f_var,
+                    self_foldr,
+                    span,
+                );
+                core::Expr::Lam(
+                    y,
+                    Box::new(core::Expr::Lam(acc_var, Box::new(body), span)),
+                    span,
+                )
+            }
+            // A shape this does not know: `foldr f`, as before.
+            _ => f_ref,
+        };
+        let foldr_var = Var {
+            name: Symbol::intern("foldr"),
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+        let call = app2(core::Expr::Var(foldr_var, span), step, acc);
+        core::Expr::App(Box::new(call), Box::new(x), span)
     }
 
     /// Derive Foldable for a newtype.
@@ -3076,14 +3149,18 @@ impl DerivingContext {
             arity: 1,
         };
 
-        // f inner z
-        let result = core::Expr::App(
-            Box::new(core::Expr::App(
-                Box::new(core::Expr::Var(f_var.clone(), span)),
-                Box::new(core::Expr::Var(inner_var.clone(), span)),
-                span,
-            )),
-            Box::new(core::Expr::Var(z_var.clone(), span)),
+        // The field folded into `z` by its type: `f inner z` when it is the
+        // parameter, `foldr f z inner` through a container of it
+        // (`newtype Many a = Many (Seq a)`), which applying `f` to the whole
+        // field got wrong (#66).
+        let result = self.fold_foldable_field(
+            &field_ty,
+            core::Expr::Var(inner_var.clone(), span),
+            core::Expr::Var(z_var.clone(), span),
+            type_param,
+            newtype_def.name,
+            &f_var,
+            &foldr_var,
             span,
         );
 
@@ -3115,7 +3192,8 @@ impl DerivingContext {
 
         Some(DerivedInstance {
             instance,
-            bindings: vec![Bind::NonRec(foldr_var, Box::new(foldr_body))],
+            // Recursive when the field mentions the newtype itself.
+            bindings: vec![Bind::Rec(vec![(foldr_var, Box::new(foldr_body))])],
         })
     }
 
@@ -3625,6 +3703,41 @@ impl DerivingContext {
 impl Default for DerivingContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
+/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
+fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
+    match ty {
+        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
+            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
+            None => ty.clone(),
+        },
+        Ty::App(f, a) => Ty::App(
+            Box::new(mark_type_params(f, params)),
+            Box::new(mark_type_params(a, params)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(mark_type_params(a, params)),
+            Box::new(mark_type_params(b, params)),
+        ),
+        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+/// Whether `ty` mentions a `$targ<i>` marker.
+fn mentions_type_param_marker(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
+        Ty::App(f, a) | Ty::Fun(f, a) => {
+            mentions_type_param_marker(f) || mentions_type_param_marker(a)
+        }
+        Ty::List(a) => mentions_type_param_marker(a),
+        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
+        _ => false,
     }
 }
 
@@ -4138,40 +4251,5 @@ mod tests {
             .instance
             .methods
             .contains_key(&Symbol::intern("traverse")));
-    }
-}
-
-/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
-/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
-fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
-    match ty {
-        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
-            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
-            None => ty.clone(),
-        },
-        Ty::App(f, a) => Ty::App(
-            Box::new(mark_type_params(f, params)),
-            Box::new(mark_type_params(a, params)),
-        ),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(mark_type_params(a, params)),
-            Box::new(mark_type_params(b, params)),
-        ),
-        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
-        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
-        _ => ty.clone(),
-    }
-}
-
-/// Whether `ty` mentions a `$targ<i>` marker.
-fn mentions_type_param_marker(ty: &Ty) -> bool {
-    match ty {
-        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
-        Ty::App(f, a) | Ty::Fun(f, a) => {
-            mentions_type_param_marker(f) || mentions_type_param_marker(a)
-        }
-        Ty::List(a) => mentions_type_param_marker(a),
-        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
-        _ => false,
     }
 }

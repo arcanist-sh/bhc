@@ -1654,6 +1654,11 @@ pub(crate) fn string_as_char_list(ty: &Ty) -> Ty {
             Symbol::intern("Char"),
             bhc_types::Kind::Star,
         )))),
+        // `[] a`, the constructor spelling of `[a]`: typeck leaves it when a
+        // `t a` (a Foldable builtin's container, #63) is solved at a list.
+        Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(tc) if tc.name.as_str() == "[]") => {
+            Ty::List(Box::new(string_as_char_list(a)))
+        }
         Ty::App(f, a) => Ty::App(
             Box::new(string_as_char_list(f)),
             Box::new(string_as_char_list(a)),

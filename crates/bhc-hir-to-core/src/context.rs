@@ -247,6 +247,27 @@ pub struct LowerContext {
     /// Set before lowering a case alternative RHS so that pattern lowering
     /// can reuse the same vars (instead of creating different fresh ones).
     pub(crate) existential_dict_binders: Vec<Var>,
+
+    /// This module's data types with a stock-derived `Traversable`, by name.
+    /// A traversal over one at a known monad is lowered to a generated
+    /// function for that monad (see `expr::derived_traversal_fn`): the
+    /// derived instance itself has no `Applicative` to dispatch on (#53).
+    pub(crate) derived_traversables: FxHashMap<Symbol, DerivedTraversable>,
+    /// Generated traversal functions, by type name and monad kind, so each
+    /// is built once and a recursive field calls the function being built.
+    pub(crate) traversal_specs: FxHashMap<(Symbol, String), Var>,
+    /// The bindings of those functions, appended to the module's bindings.
+    pub(crate) traversal_spec_binds: Vec<Bind>,
+}
+
+/// A data type with a stock-derived `Traversable`: what a generated
+/// traversal needs to rebuild each constructor.
+#[derive(Clone, Debug)]
+pub(crate) struct DerivedTraversable {
+    /// The type's last parameter, the one `traverse` maps over.
+    pub param: bhc_types::TyVar,
+    /// Each constructor's id, name, tag and declared field types.
+    pub cons: Vec<(DefId, Symbol, u32, Vec<Ty>)>,
 }
 
 /// The head of a type application (`StateT` in `StateT s m a`).
@@ -322,6 +343,9 @@ impl LowerContext {
             instance_alias_span: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
+            derived_traversables: FxHashMap::default(),
+            traversal_specs: FxHashMap::default(),
+            traversal_spec_binds: Vec::new(),
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
@@ -1427,9 +1451,24 @@ impl LowerContext {
             self.class_registry
                 .register_instance(crate::dictionary::InstanceInfo {
                     class: Symbol::intern("Functor"),
-                    instance_types: vec![list_head],
+                    instance_types: vec![list_head.clone()],
                     methods: fn_methods,
                     superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            // `Applicative []`: without it `fs <*> xs` at a list resolved no
+            // instance, stayed the bare builtin, and codegen called the list
+            // of functions as a closure (#63).
+            let mut ap_methods = FxHashMap::default();
+            ap_methods.insert(Symbol::intern("pure"), DefId::new(790_017));
+            ap_methods.insert(Symbol::intern("<*>"), DefId::new(790_018));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Applicative"),
+                    instance_types: vec![list_head.clone()],
+                    methods: ap_methods,
+                    superclass_instances: vec![list_head],
                     assoc_type_impls: FxHashMap::default(),
                     instance_constraints: Vec::new(),
                 });
@@ -1764,6 +1803,9 @@ impl LowerContext {
             "Data.Unit.append",
             "Data.Unit.empty",
             "Data.Unit.concat",
+            // 790_017–790_018: the builtin `Applicative []`.
+            "Data.List.pure",
+            "Data.List.ap",
         ]
         .iter()
         .enumerate()
@@ -1832,6 +1874,14 @@ impl LowerContext {
     /// Take all recorded warnings.
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    /// Whether `type_name` is a newtype (its constructor is erased at runtime).
+    #[must_use]
+    pub(crate) fn is_newtype_name(&self, type_name: Symbol) -> bool {
+        self.constructor_map
+            .values()
+            .any(|c| c.is_newtype && c.type_name == type_name)
     }
 
     /// Get all constructors for a given type name.
@@ -3774,7 +3824,12 @@ impl LowerContext {
     /// superclass is about it (`Monad m` out of `PandocMonad m`). The general
     /// lookup lets a dictionary registered without arguments fit any
     /// variable, which picks the instance context's `Monad (t m)` for `m`.
-    fn dict_known_for_var(&self, class: Symbol, want: &Ty, span: Span) -> Option<core::Expr> {
+    pub(crate) fn dict_known_for_var(
+        &self,
+        class: Symbol,
+        want: &Ty,
+        span: Span,
+    ) -> Option<core::Expr> {
         let direct = self
             .dict_scope_all
             .iter()
@@ -5157,6 +5212,43 @@ impl LowerContext {
         }
     }
 
+    /// Record `data_def` in [`Self::derived_traversables`] when it derives
+    /// `Traversable` (stock) over a last type parameter.
+    fn register_derived_traversable(&mut self, data_def: &bhc_hir::DataDef) {
+        let stock = data_def.deriving.iter().any(|clause| {
+            clause.class.as_str() == "Traversable"
+                && matches!(
+                    clause.strategy,
+                    bhc_hir::DerivingStrategy::Stock | bhc_hir::DerivingStrategy::Default
+                )
+        });
+        let Some(param) = data_def.params.last() else {
+            return;
+        };
+        if !stock || data_def.cons.iter().any(|c| !c.existential_vars.is_empty()) {
+            return;
+        }
+        let cons = data_def
+            .cons
+            .iter()
+            .enumerate()
+            .map(|(tag, con)| {
+                let fields = match &con.fields {
+                    bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                    bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+                };
+                (con.id, con.name, tag as u32, fields)
+            })
+            .collect();
+        self.derived_traversables.insert(
+            data_def.name,
+            DerivedTraversable {
+                param: param.clone(),
+                cons,
+            },
+        );
+    }
+
     /// Register a local `newtype`'s constructor; see
     /// [`register_data_constructors`](Self::register_data_constructors).
     fn register_newtype_constructor(&mut self, newtype_def: &bhc_hir::NewtypeDef) {
@@ -5321,7 +5413,10 @@ impl LowerContext {
 
         for item in &module.items {
             match item {
-                Item::Data(data_def) => self.register_data_constructors(data_def),
+                Item::Data(data_def) => {
+                    self.register_data_constructors(data_def);
+                    self.register_derived_traversable(data_def);
+                }
                 Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
                 _ => {}
             }
@@ -5549,6 +5644,23 @@ impl LowerContext {
                         // the inner monad, so a user transformer's `lift`
                         // takes that `Monad m` first. `select_monad_trans_method`
                         // supplies it at every use.
+                        // A hand-written `traverse` takes its `Applicative f`
+                        // (typeck checks it at `Applicative f => …`); every
+                        // traversal of the type passes it
+                        // (`lower_user_traversal`, #66).
+                        if bhc_types::io_closure_mode()
+                            && instance_def.class.as_str() == "Traversable"
+                            && method_def.name.as_str() == "traverse"
+                        {
+                            method_level.push(Constraint::new(
+                                Symbol::intern("Applicative"),
+                                Ty::Var(bhc_types::TyVar::new(
+                                    u32::MAX - 8,
+                                    bhc_types::Kind::star_to_star(),
+                                )),
+                                method_def.span,
+                            ));
+                        }
                         if !bhc_types::io_closure_mode()
                             && instance_def.class.as_str() == "MonadTrans"
                             && method_def.name.as_str() == "lift"
@@ -5740,6 +5852,7 @@ impl LowerContext {
 
         let foreign_imports = std::mem::take(&mut self.foreign_imports);
 
+        bindings.append(&mut self.traversal_spec_binds);
         lazify_recursive_parser_calls(&mut bindings);
         lazify_self_recursive_monadic_args(&mut bindings);
         expand_transformer_synonyms(&mut bindings, &self.type_aliases);
@@ -7578,19 +7691,6 @@ pub(crate) fn expand_transformer_synonyms(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fresh_var() {
-        let mut ctx = LowerContext::new();
-        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
-        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
-        assert_ne!(v1.id, v2.id);
-    }
-}
-
 /// Spell every list type as `Ty::List`. A resolved type can carry the
 /// constructor form `[] a` (`App(Con "[]", a)`) where instance heads and
 /// declared types use `Ty::List`, and the two never match: `MonadReader
@@ -7618,5 +7718,18 @@ pub(crate) fn canonical_list_spelling(ty: &Ty) -> Ty {
         Ty::Tuple(es) => Ty::Tuple(es.iter().map(canonical_list_spelling).collect()),
         Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(canonical_list_spelling(b))),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fresh_var() {
+        let mut ctx = LowerContext::new();
+        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
+        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
+        assert_ne!(v1.id, v2.id);
     }
 }

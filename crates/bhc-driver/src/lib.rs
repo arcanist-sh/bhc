@@ -1665,6 +1665,14 @@ impl Compiler {
         });
         // `BHC_NO_MONO=1` skips the pass (diagnosis: does a wrong answer come
         // from a specialized clone?).
+        // Numeric specialization copies an imported class-polymorphic body used
+        // at Integer/Double/Float/Rational (#57), so it needs the bodies too when
+        // the module mentions one of those types.
+        let mentions_numeric = typed
+            .resolved_expr_types
+            .values()
+            .any(Self::mentions_numeric_ty);
+        let mut loaded_bodies: Option<FxHashMap<String, (bhc_core::Var, Expr)>> = None;
         let mono = if maybe_concrete_monad && std::env::var_os("BHC_NO_MONO").is_none() {
             // Load the transported bodies and type expansions of imported modules,
             // so the pass can specialize an imported writer at an imported newtype.
@@ -1683,17 +1691,40 @@ impl Compiler {
             }
             // Runs on the freshly-lowered Core (original Var spans still match
             // `resolved_expr_types`), before the simplifier. (BHC-BRIEF-0004.)
-            bhc_core::monomorphize::monomorphize_module(
+            let n = bhc_core::monomorphize::monomorphize_module(
                 &mut core,
                 &typed.resolved_expr_types,
                 &imported_bodies,
                 &newtypes,
-            )
+            );
+            loaded_bodies = Some(imported_bodies);
+            n
         } else {
             0
         };
         if mono > 0 {
             debug!(specialized = mono, "monad monomorphization complete");
+        }
+        // Copies of class-polymorphic bindings at representation-sensitive
+        // types (`sq :: Num a => …` at `Integer`; #57). Same span-keyed types,
+        // so it also runs before the simplifier.
+        if loaded_bodies.is_none() && mentions_numeric {
+            let (bodies, _, imported_cons) = self.load_imported_core_bodies(hir);
+            // A copy may build the source module's private constructors.
+            for con in imported_cons {
+                if !core.constructors.iter().any(|c| c.name == con.name) {
+                    core.constructors.push(con);
+                }
+            }
+            loaded_bodies = Some(bodies);
+        }
+        let numspec = bhc_core::numeric_specialize::specialize_numeric(
+            &mut core,
+            &typed.resolved_expr_types,
+            &loaded_bodies.unwrap_or_default(),
+        );
+        if numspec > 0 {
+            debug!(specialized = numspec, "numeric specialization complete");
         }
 
         // Core IR optimization (simplifier)
@@ -1838,6 +1869,20 @@ impl Compiler {
         }
         if let Ok(mut mem) = self.core_sidecars.lock() {
             mem.insert(module_name.to_string(), bytes);
+        }
+    }
+
+    /// Whether `ty` mentions `Integer`, `Double`, `Float` or `Rational`.
+    fn mentions_numeric_ty(ty: &bhc_types::Ty) -> bool {
+        use bhc_types::Ty;
+        match ty {
+            Ty::Con(c) => matches!(c.name.as_str(), "Integer" | "Double" | "Float" | "Rational"),
+            Ty::App(f, a) | Ty::Fun(f, a) => {
+                Self::mentions_numeric_ty(f) || Self::mentions_numeric_ty(a)
+            }
+            Ty::List(e) => Self::mentions_numeric_ty(e),
+            Ty::Tuple(ts) => ts.iter().any(Self::mentions_numeric_ty),
+            _ => false,
         }
     }
 

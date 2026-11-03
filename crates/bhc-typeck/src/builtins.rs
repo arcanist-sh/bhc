@@ -907,31 +907,35 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(list_list_a, list_a))
             }),
             ("liftM", {
-                // liftM :: (a -> b) -> [a] -> [b] (same as fmap/map)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // liftM :: Monad m => (a -> b) -> m a -> m b
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let m_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![m.clone(), a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(list_a, list_b),
+                        Ty::fun(m_a, m_b),
                     ),
                 )
             }),
             ("liftM2", {
-                // liftM2 :: (a -> b -> c) -> [a] -> [b] -> [c]
+                // liftM2 :: Monad m => (a -> b -> c) -> m a -> m b -> m c
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
                 let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let list_c = Ty::List(Box::new(Ty::Var(c.clone())));
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let m_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
+                let m_c = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(c.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
+                    vec![m.clone(), a.clone(), b.clone(), c.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(a.clone()),
                             Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
                         ),
-                        Ty::fun(list_a, Ty::fun(list_b, list_c)),
+                        Ty::fun(m_a, Ty::fun(m_b, m_c)),
                     ),
                 )
             }),
@@ -963,15 +967,18 @@ impl Builtins {
                 )
             }),
             ("mapM_", {
-                // mapM_ :: Monad m => (a -> m b) -> [a] -> m () (polymorphic)
+                // mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
+                // Any container (#63): a user Foldable's becomes a list
+                // through its `foldr` in hir-to-core (`lower_foldable_consumer`).
                 let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, m_kind);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(list_a, m_unit)),
+                    vec![t, m.clone(), a.clone(), b.clone()],
+                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(t_a, m_unit)),
                 )
             }),
             ("forM", {
@@ -990,15 +997,17 @@ impl Builtins {
                 )
             }),
             ("forM_", {
-                // forM_ :: Monad m => [a] -> (a -> m b) -> m () (polymorphic)
+                // forM_ :: (Foldable t, Monad m) => t a -> (a -> m b) -> m ()
+                // Any container, as `mapM_`.
                 let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, m_kind);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(list_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_unit)),
+                    vec![t, m.clone(), a.clone(), b.clone()],
+                    Ty::fun(t_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_unit)),
                 )
             }),
             ("sequence", {
@@ -7885,15 +7894,24 @@ impl Builtins {
                     ),
                 ),
             );
-            // sequenceA :: Applicative f => c -> f d
+            // sequenceA :: Applicative f => t (f a) -> f (t a)
+            // With `c -> f d` nothing tied the applicative to the elements,
+            // so `sequenceA [Just 1, Just 2]` had no known `f` (#53).
+            let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
             env.register_value(
                 DefId::new(12004),
                 Symbol::intern("sequenceA"),
                 Scheme::poly(
-                    vec![f.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), t.clone(), a.clone()],
                     Ty::fun(
-                        Ty::Var(c.clone()),
-                        Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d))),
+                        Ty::App(Box::new(Ty::Var(t.clone())), Box::new(f_a)),
+                        Ty::App(
+                            Box::new(Ty::Var(f.clone())),
+                            Box::new(Ty::App(
+                                Box::new(Ty::Var(t.clone())),
+                                Box::new(Ty::Var(a.clone())),
+                            )),
+                        ),
                     ),
                 ),
             );

@@ -70,6 +70,33 @@ impl DefKind {
     }
 }
 
+/// Builtins that type-check but abort at run time: `Control.Concurrent`'s
+/// threads, `MVar`s and `Chan`s are not wired to the runtime scheduler yet
+/// (#38). Using one is a warning rather than an error, so a module that only
+/// mentions them (pandoc's `Text.Pandoc.Process`) still compiles.
+const UNIMPLEMENTED_BUILTINS: &[&str] = &[
+    "forkIO",
+    "forkOS",
+    "killThread",
+    "threadDelay",
+    "myThreadId",
+    "throwTo",
+    "newMVar",
+    "newEmptyMVar",
+    "takeMVar",
+    "putMVar",
+    "readMVar",
+    "tryPutMVar",
+    "tryTakeMVar",
+    "modifyMVar",
+    "modifyMVar_",
+    "swapMVar",
+    "withMVar",
+    "newChan",
+    "readChan",
+    "writeChan",
+];
+
 /// Every builtin definition has a DefId below this; the first user or
 /// imported definition is allocated at it (see `define_builtins`).
 pub const BUILTIN_DEF_LIMIT: usize = 12323;
@@ -297,6 +324,9 @@ pub struct LowerContext {
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
     pub warnings: Vec<crate::LowerWarning>,
+    /// Definitions bound by importing a module whose operations are not
+    /// implemented ([`UNIMPLEMENTED_BUILTINS`]); using one warns.
+    unimplemented_defs: FxHashSet<DefId>,
     /// Import aliases: maps alias (e.g., "M") to full module name (e.g., "Data.Map")
     import_aliases: FxHashMap<Symbol, Symbol>,
     /// Qualified imports: maps "Module.name" to the unqualified name for resolution
@@ -341,6 +371,7 @@ impl LowerContext {
             interface_record_field_types: FxHashMap::default(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            unimplemented_defs: FxHashSet::default(),
             import_aliases: FxHashMap::default(),
             qualified_names: FxHashMap::default(),
             type_signatures: FxHashMap::default(),
@@ -2525,6 +2556,21 @@ impl LowerContext {
             .and_then(|info| info.field_names.clone())
     }
 
+    /// Record the `UNIMPLEMENTED_BUILTINS` that importing `module` just bound,
+    /// bare and under `qualifier`, so their uses warn (#38).
+    pub fn mark_unimplemented_imports(&mut self, module: &str, qualifier: &str) {
+        if !module.starts_with("Control.Concurrent") {
+            return;
+        }
+        for name in UNIMPLEMENTED_BUILTINS {
+            for spelled in [(*name).to_string(), format!("{qualifier}.{name}")] {
+                if let Some(id) = self.lookup_value(Symbol::intern(&spelled)) {
+                    self.unimplemented_defs.insert(id);
+                }
+            }
+        }
+    }
+
     /// Emits a warning if the given definition is a stub.
     /// Returns true if a warning was emitted.
     pub fn warn_if_stub(&mut self, def_id: DefId, name: &str, span: Span) -> bool {
@@ -2543,6 +2589,19 @@ impl LowerContext {
                 });
                 return true;
             }
+        }
+        // A builtin with no implementation: once per name.
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        if self.unimplemented_defs.contains(&def_id)
+            && !self.warnings.iter().any(
+                |w| matches!(w, crate::LowerWarning::NotImplemented { name: n, .. } if n == bare),
+            )
+        {
+            self.warnings.push(crate::LowerWarning::NotImplemented {
+                name: bare.to_string(),
+                span,
+            });
+            return true;
         }
         false
     }

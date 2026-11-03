@@ -1,0 +1,13 @@
+Just (Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf))
+Nothing
+3
+2
+1
+Just (Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf))
+Node (Node Leaf 2 Leaf) 3 (Node Leaf 4 Leaf)
+Node (Node Leaf 2 Leaf) 4 (Node Leaf 6 Leaf)
+Node (Node Leaf 10 Leaf) 20 (Node Leaf 30 Leaf)
+Nothing
+[Node Leaf 1 Leaf,Node Leaf 101 Leaf]
+([[3,2,1]],Just [2,1])
+(6,3)

@@ -23,11 +23,15 @@ fn citeproc_citation_record_beats_same_named_real_constructor() {
     // for pandoc-types' Text.Pandoc.Definition).
     std::fs::write(
         dep_dir.path().join("Defn.hs"),
-        "module Defn (Citation (..)) where\n\
-         data Citation = Citation\n\
-           { citationId :: String\n\
-           , citationHash :: Int\n\
-           }\n",
+        // `concat!`, not `\` continuations: those strip the leading spaces,
+        // and record fields at column 0 do not parse.
+        concat!(
+            "module Defn (Citation (..)) where\n",
+            "data Citation = Citation\n",
+            "  { citationId :: String\n",
+            "  , citationHash :: Int\n",
+            "  }\n",
+        ),
     )
     .unwrap();
 
@@ -35,20 +39,22 @@ fn citeproc_citation_record_beats_same_named_real_constructor() {
     // scope; the record construction must resolve to the citeproc stub.
     std::fs::write(
         app_dir.path().join("Main.hs"),
-        "module Main (main) where\n\
-         import Defn\n\
-         import Data.Text (Text)\n\
-         import qualified Citeproc\n\
-         mkCite :: [Citeproc.CitationItem Text] -> Citeproc.Citation Text\n\
-         mkCite items = Citeproc.Citation{\n\
-                              Citeproc.citationId = Nothing\n\
-                            , Citeproc.citationNoteNumber = Nothing\n\
-                            , Citeproc.citationItems = items\n\
-                            }\n\
-         normal :: Citeproc.CitationItemType\n\
-         normal = Citeproc.NormalCite\n\
-         main :: IO ()\n\
-         main = pure ()\n",
+        concat!(
+            "module Main (main) where\n",
+            "import Defn\n",
+            "import Data.Text (Text)\n",
+            "import qualified Citeproc\n",
+            "mkCite :: [Citeproc.CitationItem Text] -> Citeproc.Citation Text\n",
+            "mkCite items = Citeproc.Citation{\n",
+            "    Citeproc.citationId = Nothing\n",
+            "  , Citeproc.citationNoteNumber = Nothing\n",
+            "  , Citeproc.citationItems = items\n",
+            "  }\n",
+            "normal :: Citeproc.CitationItemType\n",
+            "normal = Citeproc.NormalCite\n",
+            "main :: IO ()\n",
+            "main = pure ()\n",
+        ),
     )
     .unwrap();
 

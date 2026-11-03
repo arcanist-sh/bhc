@@ -111,6 +111,23 @@ fn has_type_vars(t: &Ty) -> bool {
     }
 }
 
+/// `ty` with every `[] a` written `[a]` (`Ty::List`), the form the show
+/// descriptors recognise.
+fn list_spelled(ty: &Ty) -> Ty {
+    match ty {
+        Ty::App(f, a) => match f.as_ref() {
+            Ty::Con(c) if matches!(c.name.as_str(), "[]" | "List") => {
+                Ty::List(Box::new(list_spelled(a)))
+            }
+            _ => Ty::App(Box::new(list_spelled(f)), Box::new(list_spelled(a))),
+        },
+        Ty::Fun(a, r) => Ty::Fun(Box::new(list_spelled(a)), Box::new(list_spelled(r))),
+        Ty::List(e) => Ty::List(Box::new(list_spelled(e))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(list_spelled).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Metadata about a data constructor, used for code generation.
 #[derive(Clone, Debug)]
 pub struct ConstructorMeta {
@@ -7933,6 +7950,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.List.append" => self.lower_builtin_append(args[0], args[1]),
             "Data.Maybe.append" => self.lower_builtin_maybe_append(args[0], args[1]),
             "Data.List.concat" => self.lower_builtin_concat(args[0]),
+            // The builtin `Applicative []` instance (#63).
+            "Data.List.pure" => {
+                let x = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("pure: no value".to_string()))?;
+                let nil = self.build_nil()?;
+                Ok(Some(self.build_cons(x, nil.into())?.into()))
+            }
+            "Data.List.ap" => {
+                let fs = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("<*>: no functions".to_string()))?;
+                let xs = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("<*>: no list".to_string()))?;
+                self.list_product_values(fs, xs, true)
+            }
             // The builtin `Semigroup ()` / `Monoid ()`: every method is `()`,
             // and none forces its arguments (`_ <> _ = ()`).
             "Data.Unit.append" | "Data.Unit.empty" | "Data.Unit.concat" => {
@@ -11389,6 +11423,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("map expects a list".to_string())),
         };
+        // The list may be a thunk: a lambda parameter bound to a lazy
+        // argument, as in a list `Applicative` dictionary's `fmap` given a
+        // recursive call (`go n = fmap (n :) (go (n - 1))`; #66). A list is
+        // always a heap pointer, so forcing it is safe.
+        let list_ptr = self.build_force(list_ptr.into())?.into_pointer_value();
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -11446,21 +11485,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let cell = list_phi.as_basic_value().into_pointer_value();
         let head_ptr = self.extract_adt_field(cell, 2, 0)?;
 
-        // Call the function closure: fn_ptr(fn_ptr, head)
-        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let mapped_val = self
-            .builder()
-            .build_indirect_call(
-                fn_type,
-                closure_fn_ptr,
-                &[fn_ptr.into(), head_ptr.into()],
-                "mapped",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to call map fn: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("map function returned void".to_string()))?;
+        // Apply the function to the head. Through `call_closure1`, not a
+        // direct one-argument call: a function of two or more parameters
+        // (`map (+) xs`) must under-apply to a partial application; called
+        // directly it ran with its second argument read from garbage (#63).
+        let mapped_val = self.call_closure1(fn_ptr, head_ptr.into(), "map")?;
 
         // Build new cons cell
         let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
@@ -13102,6 +13131,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+        let list_ptr = self.value_to_ptr(self.build_force(list_ptr.into())?)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -13303,6 +13333,127 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(rev_acc.as_basic_value()))
     }
 
+    /// The list `Applicative`/`Monad` products, on lowered lists:
+    /// `fs <*> xs` (`apply`: each `f` applied to each `x`, in order) and
+    /// `xs >> ys` (not `apply`: `ys` once per element of `xs`). The builtin
+    /// `Applicative []` instance dispatches here (#63); before it, `<*>` at
+    /// a list called the list of functions as a closure.
+    ///
+    /// Both lists are walked to the end, so an infinite one does not
+    /// terminate, and `f x` is applied as each element is built.
+    fn list_product_values(
+        &mut self,
+        outer_val: BasicValueEnum<'ctx>,
+        inner_val: BasicValueEnum<'ctx>,
+        apply: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let outer_list = self.value_to_ptr(self.build_force(outer_val)?)?;
+        let inner_list = self.value_to_ptr(self.build_force(inner_val)?)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_zero = self.type_mapper().i64_type().const_zero();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
+        let nil = self.build_nil()?;
+        let block = |this: &Self, name: &str| this.llvm_ctx.append_basic_block(current_fn, name);
+        let outer_header = block(self, "lprod_outer_header");
+        let outer_body = block(self, "lprod_outer_body");
+        let outer_exit = block(self, "lprod_outer_exit");
+        let inner_header = block(self, "lprod_inner_header");
+        let inner_body = block(self, "lprod_inner_body");
+        let inner_exit = block(self, "lprod_inner_exit");
+        let br = |this: &Self, to| {
+            this.builder()
+                .build_unconditional_branch(to)
+                .map(|_| ())
+                .map_err(|e| CodegenError::Internal(format!("list product: branch: {e:?}")))
+        };
+        let phi = |this: &Self, name: &str| {
+            this.builder()
+                .build_phi(ptr_type, name)
+                .map_err(|e| CodegenError::Internal(format!("list product: phi: {e:?}")))
+        };
+        let current_block = |this: &Self| {
+            this.builder()
+                .get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("no current block".to_string()))
+        };
+        br(self, outer_header)?;
+
+        // Outer loop: one element of the outer list per iteration.
+        self.builder().position_at_end(outer_header);
+        let outer_acc = phi(self, "lprod_outer_acc")?;
+        let outer_cell = phi(self, "lprod_outer_cell")?;
+        let outer_cell_ptr = outer_cell.as_basic_value().into_pointer_value();
+        let tag = self.extract_adt_tag(outer_cell_ptr)?;
+        let done = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, i64_zero, "lprod_outer_done")
+            .map_err(|e| CodegenError::Internal(format!("list product: cmp: {e:?}")))?;
+        self.builder()
+            .build_conditional_branch(done, outer_exit, outer_body)
+            .map_err(|e| CodegenError::Internal(format!("list product: branch: {e:?}")))?;
+
+        self.builder().position_at_end(outer_body);
+        let outer_head = self.extract_adt_field(outer_cell_ptr, 2, 0)?;
+        let func = if apply {
+            Some(self.value_to_ptr(self.build_force(outer_head.into())?)?)
+        } else {
+            None
+        };
+        let outer_tail = self.extract_list_tail(outer_cell_ptr)?;
+        let outer_body_end = current_block(self)?;
+        br(self, inner_header)?;
+
+        // Inner loop: the whole inner list, consed onto the accumulator.
+        self.builder().position_at_end(inner_header);
+        let inner_acc = phi(self, "lprod_inner_acc")?;
+        let inner_cell = phi(self, "lprod_inner_cell")?;
+        let inner_cell_ptr = inner_cell.as_basic_value().into_pointer_value();
+        let tag = self.extract_adt_tag(inner_cell_ptr)?;
+        let done = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, i64_zero, "lprod_inner_done")
+            .map_err(|e| CodegenError::Internal(format!("list product: cmp: {e:?}")))?;
+        self.builder()
+            .build_conditional_branch(done, inner_exit, inner_body)
+            .map_err(|e| CodegenError::Internal(format!("list product: branch: {e:?}")))?;
+
+        self.builder().position_at_end(inner_body);
+        let inner_head = self.extract_adt_field(inner_cell_ptr, 2, 0)?;
+        let elem = match func {
+            Some(f) => self.call_closure1(f, inner_head.into(), "<*>")?,
+            None => inner_head.into(),
+        };
+        let consed = self.build_cons(elem, inner_acc.as_basic_value())?;
+        let inner_tail = self.extract_list_tail(inner_cell_ptr)?;
+        let inner_body_end = current_block(self)?;
+        br(self, inner_header)?;
+        inner_acc.add_incoming(&[
+            (&outer_acc.as_basic_value(), outer_body_end),
+            (&consed, inner_body_end),
+        ]);
+        inner_cell.add_incoming(&[(&inner_list, outer_body_end), (&inner_tail, inner_body_end)]);
+
+        self.builder().position_at_end(inner_exit);
+        br(self, outer_header)?;
+        outer_acc.add_incoming(&[
+            (&nil, entry_block),
+            (&inner_acc.as_basic_value(), inner_exit),
+        ]);
+        outer_cell.add_incoming(&[(&outer_list, entry_block), (&outer_tail, inner_exit)]);
+
+        self.builder().position_at_end(outer_exit);
+        let reversed = self.reverse_list(outer_acc.as_basic_value().into_pointer_value())?;
+        Ok(Some(reversed.into()))
+    }
+
     /// Lower `concatMap` - map and concatenate.
     /// concatMap f xs = concat (map f xs)
     fn lower_builtin_concat_map(
@@ -13336,6 +13487,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+        // The list may arrive unevaluated — a lambda parameter bound to a
+        // lazy argument (`let bnd m k = concatMap k m in bnd (g ys) k`) —
+        // and the loop reads its tag directly.
+        let list_ptr = self.value_to_ptr(self.build_force(list_ptr.into())?)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -13429,6 +13584,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| {
                 CodegenError::Internal("concatMap: function returned void".to_string())
             })?;
+        // `f`'s list may be a thunk as well (it is read the same way).
+        let inner_list_ptr = self.build_force(inner_list_ptr)?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -15754,6 +15911,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         action: BasicValueEnum<'ctx>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // The action may still be a thunk: a dictionary's `>>=` gets the
+        // recursive call of a `Monad m =>` function (`cnt g (n - 1) >>= k`)
+        // unevaluated, and calling the thunk as an action crashed (#63).
+        let action = self.build_force(action)?;
         let action_ptr = self.value_to_ptr(action)?;
         let fn_ptr = self.checked_closure_fn_ptr(action_ptr, "run IO action")?;
         let ptr_type = self.type_mapper().ptr_type();
@@ -18775,6 +18936,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "mconcat"
                         | "Data.List.append"
                         | "Data.List.concat"
+                        | "Data.List.pure"
+                        | "Data.List.ap"
                         | "Data.List.empty"
                         | "tail"
                         | "maybeToList"
@@ -29824,7 +29987,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn descriptor_from_ty(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
         match ty {
             Ty::Var(_) | Ty::Error => None,
-            _ => Some(self.build_show_descriptor(&Self::ty_only_expr(ty.clone()))),
+            // `[] ([] Int)` (a list monad's result, as the type checker
+            // spells it) described as `[[Int]]`: the inner lists printed as
+            // addresses.
+            _ => Some(self.build_show_descriptor(&Self::ty_only_expr(list_spelled(ty)))),
         }
     }
 
@@ -30891,13 +31057,79 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `mapM_`.
+    ///
+    /// Its own loop rather than `map`: `map` stops at a tail that is still a
+    /// thunk and leaves the rest for later, which `mapM_` never demands, so
+    /// over a lazily built list (a `Foldable`'s `foldr (:) []`, #63) only the
+    /// first actions ran. This forces each tail and walks on.
     fn lower_builtin_mapm_(
         &mut self,
         func_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_builtin_map(func_expr, list_expr)?;
-        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+        let err = |what: &str| CodegenError::Internal(format!("mapM_: {what}"));
+        let fn_ptr = match self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| err("no function"))?
+        {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => {
+                return Err(CodegenError::TypeError(
+                    "mapM_: function must be a closure".into(),
+                ))
+            }
+        };
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| err("no list"))?;
+        let list_ptr = self.build_force(list_val)?.into_pointer_value();
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| err("no block"))?;
+        let current_fn = entry_block.get_parent().ok_or_else(|| err("no function"))?;
+        let header = self.llvm_ctx.append_basic_block(current_fn, "mapm__header");
+        let body = self.llvm_ctx.append_basic_block(current_fn, "mapm__body");
+        let exit = self.llvm_ctx.append_basic_block(current_fn, "mapm__exit");
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+
+        self.builder().position_at_end(header);
+        let list_phi = self
+            .builder()
+            .build_phi(ptr_type, "mapm__list")
+            .map_err(|e| err(&format!("phi: {e:?}")))?;
+        let cell = list_phi.as_basic_value().into_pointer_value();
+        let tag = self.extract_adt_tag(cell)?;
+        let is_empty = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                i64_type.const_zero(),
+                "is_empty",
+            )
+            .map_err(|e| err(&format!("compare: {e:?}")))?;
+        self.builder()
+            .build_conditional_branch(is_empty, exit, body)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+
+        self.builder().position_at_end(body);
+        let head_ptr = self.extract_adt_field(cell, 2, 0)?;
+        self.call_closure1(fn_ptr, head_ptr.into(), "mapm_")?;
+        let tail = self.extract_list_tail(cell)?;
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| err("no block"))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| err(&format!("branch: {e:?}")))?;
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, body_end)]);
+
+        self.builder().position_at_end(exit);
+        Ok(Some(ptr_type.const_null().into()))
     }
 
     /// Lower `sequence`.
@@ -50171,8 +50403,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Populates the derived_show_fns/derived_eq_fns/derived_compare_fns dispatch tables and
     /// constructor_metadata.type_name from case alternatives in derived bindings.
     fn detect_derived_instance_methods(&mut self, bindings: &[Bind]) {
-        for bind in bindings {
-            if let Bind::NonRec(var, expr) = bind {
+        // A recursive derivation (`foldr`/`fmap` over `Node (Tree a) a (Tree
+        // a)`) is a one-binding `Rec` group: look inside those too, or it
+        // drops out of the dispatch tables.
+        let pairs: Vec<(&Var, &Expr)> = bindings
+            .iter()
+            .flat_map(|bind| match bind {
+                Bind::NonRec(var, expr) => vec![(var, expr.as_ref())],
+                Bind::Rec(group) => group.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+            })
+            .collect();
+        for (var, expr) in pairs {
+            {
                 let name = var.name.as_str();
                 // `$derived_showt_T` first: `$derived_show_` is its prefix.
                 if let Some(remainder) = name.strip_prefix("$derived_showt_") {
@@ -63287,6 +63529,8 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.List.append" => Some(2),
         "Data.Maybe.append" => Some(2),
         "Data.List.concat" => Some(1),
+        "Data.List.pure" => Some(1),
+        "Data.List.ap" => Some(2),
         "Data.Unit.append" => Some(2),
         "Data.Unit.empty" => Some(0),
         "Data.Unit.concat" => Some(1),

@@ -63,6 +63,7 @@ pub mod demand;
 pub mod escape;
 pub mod eval;
 pub mod monomorphize;
+pub mod numeric_specialize;
 pub mod pretty;
 pub mod simplify;
 pub mod specialize;

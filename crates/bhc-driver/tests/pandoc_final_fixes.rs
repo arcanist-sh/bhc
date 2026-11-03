@@ -81,15 +81,19 @@ fn unregistered_assoc_family_unifies_permissively() {
     let app_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dep_dir.path().join("Styles.hs"),
-        "module Styles (HasStyleName, getStyleName, ParaStyleName (..), ParStyle (..)) where\n\
-         newtype ParaStyleName = ParaStyleName String\n\
-         data ParStyle = ParStyle ParaStyleName\n\
-         class HasStyleName a where\n\
-           type StyleName a\n\
-           getStyleName :: a -> StyleName a\n\
-         instance HasStyleName ParStyle where\n\
-           type StyleName ParStyle = ParaStyleName\n\
-           getStyleName (ParStyle n) = n\n",
+        // `concat!`, not `\` continuations: those strip the leading spaces,
+        // and a class body at column 0 does not parse.
+        concat!(
+            "module Styles (HasStyleName, getStyleName, ParaStyleName (..), ParStyle (..)) where\n",
+            "newtype ParaStyleName = ParaStyleName String\n",
+            "data ParStyle = ParStyle ParaStyleName\n",
+            "class HasStyleName a where\n",
+            "  type StyleName a\n",
+            "  getStyleName :: a -> StyleName a\n",
+            "instance HasStyleName ParStyle where\n",
+            "  type StyleName ParStyle = ParaStyleName\n",
+            "  getStyleName (ParStyle n) = n\n",
+        ),
     )
     .unwrap();
     std::fs::write(

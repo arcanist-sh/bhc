@@ -14,6 +14,15 @@ data Pair a = Pair a a
 
 newtype Bag a = Bag [a] deriving Foldable
 
+-- Hand-written and recursive: its own `foldr` recurses through the builtin
+-- name, which must dispatch back to this instance (#66).
+data HTree a = HLeaf | HNode (HTree a) a (HTree a)
+
+instance Foldable HTree where
+  foldr _ z HLeaf = z
+  foldr f z (HNode l x r) = foldr f (f x (foldr f z r)) l
+
+
 newtype SBag a = SBag (Seq.Seq a) deriving Foldable
 
 instance Foldable Pair where
@@ -37,6 +46,8 @@ main = do
   print (sum (Pair 4 5 :: Pair Int), length (Pair 'a' 'b'))
   print (sum (Bag [1, 2, 3 :: Int]), length (Bag "ab"), null (Bag ""), toList (Bag "xy"))
   print (foldr (:) [] (Bag "abc"), foldr (:) [] (SBag (Seq.fromList "xyz")))
+  let ht = HNode (HNode HLeaf 1 HLeaf) 2 (HNode HLeaf (3 :: Int) HLeaf)
+  print (foldr (:) [] ht, sum ht, length ht, maximum ht, elem 3 ht)
   print (sum (Just 3 :: Maybe Int), length (Nothing :: Maybe Int))
   mapM_ print (Just 'z')
   print (sum [1, 2, 3 :: Int], length "abc", elem 'b' "abc")

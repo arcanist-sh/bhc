@@ -8287,6 +8287,13 @@ impl TyCtxt {
             if class_known {
                 self.check_value_def(method);
                 self.guide_instance_method_type(instance, method);
+            } else if let Some(scheme) = self.traversable_method_scheme(instance, method.name) {
+                // A hand-written `Traversable` instance's `traverse`: checked
+                // with its own `Applicative f` given, so `pure`/`<*>` inside
+                // resolve at that applicative, not at the container (#66).
+                let mut typed = method.clone();
+                typed.sig = Some(scheme);
+                self.check_value_def(&typed);
             } else if let Some(shape) = builtin_value_method_shape(instance, method.name)
                 .or_else(|| self.monad_family_method_shape(instance, method.name))
                 .map(|shape| own.apply(&shape))
@@ -8352,6 +8359,58 @@ impl TyCtxt {
     /// to the instance being defined. Only in the closure IO model
     /// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005), until checking these
     /// bodies is proven on the e2e suite and pandoc.
+    /// The scheme of a hand-written builtin-class method that needs one to be
+    /// checked: `Foldable`'s `foldr` (below), or `traverse` in an `instance
+    /// Traversable T`:
+    /// `forall f a b. Applicative f => (a -> f b) -> T a -> f (T b)`. Under
+    /// the closure IO model only, where `Applicative` is dictionary-passed
+    /// (hir-to-core gives the method that dictionary; #66).
+    fn traversable_method_scheme(
+        &mut self,
+        instance: &InstanceDef,
+        method: Symbol,
+    ) -> Option<Scheme> {
+        if instance.types.len() != 1 {
+            return None;
+        }
+        let t = instance.types[0].clone();
+        // `foldr :: (a -> b -> b) -> b -> T a -> b` of a hand-written
+        // `Foldable` instance: checked, so its recursive `foldr` has a
+        // container type to dispatch on (#66). No constraint, any IO model.
+        if instance.class.as_str() == "Foldable" && method.as_str() == "foldr" {
+            let a = self.fresh_ty_var_with_kind(Kind::Star);
+            let b = self.fresh_ty_var_with_kind(Kind::Star);
+            let fun = |x: Ty, y: Ty| Ty::Fun(Box::new(x), Box::new(y));
+            let (av, bv) = (Ty::Var(a.clone()), Ty::Var(b.clone()));
+            let ty = fun(
+                fun(av.clone(), fun(bv.clone(), bv.clone())),
+                fun(bv.clone(), fun(Ty::App(Box::new(t), Box::new(av)), bv)),
+            );
+            return Some(Scheme::poly(vec![a, b], ty));
+        }
+        if !crate::io_closure_mode()
+            || instance.class.as_str() != "Traversable"
+            || method.as_str() != "traverse"
+        {
+            return None;
+        }
+        let f = self.fresh_ty_var_with_kind(Kind::star_to_star());
+        let a = self.fresh_ty_var_with_kind(Kind::Star);
+        let b = self.fresh_ty_var_with_kind(Kind::Star);
+        let at = |c: &Ty, x: &TyVar| Ty::App(Box::new(c.clone()), Box::new(Ty::Var(x.clone())));
+        let fun = |x: Ty, y: Ty| Ty::Fun(Box::new(x), Box::new(y));
+        let f_ty = Ty::Var(f.clone());
+        let ty = fun(
+            fun(Ty::Var(a.clone()), at(&f_ty, &b)),
+            fun(
+                at(&t, &a),
+                Ty::App(Box::new(f_ty.clone()), Box::new(at(&t, &b))),
+            ),
+        );
+        let applicative = Constraint::new(Symbol::intern("Applicative"), f_ty, instance.span);
+        Some(Scheme::qualified(vec![f, a, b], vec![applicative], ty))
+    }
+
     fn monad_family_method_shape(&mut self, instance: &InstanceDef, method: Symbol) -> Option<Ty> {
         if !crate::io_closure_mode()
             || !matches!(instance.class.as_str(), "Functor" | "Applicative" | "Monad")

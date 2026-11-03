@@ -3824,7 +3824,12 @@ impl LowerContext {
     /// superclass is about it (`Monad m` out of `PandocMonad m`). The general
     /// lookup lets a dictionary registered without arguments fit any
     /// variable, which picks the instance context's `Monad (t m)` for `m`.
-    fn dict_known_for_var(&self, class: Symbol, want: &Ty, span: Span) -> Option<core::Expr> {
+    pub(crate) fn dict_known_for_var(
+        &self,
+        class: Symbol,
+        want: &Ty,
+        span: Span,
+    ) -> Option<core::Expr> {
         let direct = self
             .dict_scope_all
             .iter()
@@ -5639,6 +5644,23 @@ impl LowerContext {
                         // the inner monad, so a user transformer's `lift`
                         // takes that `Monad m` first. `select_monad_trans_method`
                         // supplies it at every use.
+                        // A hand-written `traverse` takes its `Applicative f`
+                        // (typeck checks it at `Applicative f => …`); every
+                        // traversal of the type passes it
+                        // (`lower_user_traversal`, #66).
+                        if bhc_types::io_closure_mode()
+                            && instance_def.class.as_str() == "Traversable"
+                            && method_def.name.as_str() == "traverse"
+                        {
+                            method_level.push(Constraint::new(
+                                Symbol::intern("Applicative"),
+                                Ty::Var(bhc_types::TyVar::new(
+                                    u32::MAX - 8,
+                                    bhc_types::Kind::star_to_star(),
+                                )),
+                                method_def.span,
+                            ));
+                        }
                         if !bhc_types::io_closure_mode()
                             && instance_def.class.as_str() == "MonadTrans"
                             && method_def.name.as_str() == "lift"

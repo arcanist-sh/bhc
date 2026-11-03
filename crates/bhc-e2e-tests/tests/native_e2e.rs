@@ -2362,6 +2362,18 @@ fn test_tier3_user_foldable_consumers() {
     run_native_test("tier3_io/user_foldable_consumers", Profile::Default);
 }
 
+// A hand-written `Traversable` instance used at Maybe, IO and lists (#66).
+//
+// Closure IO model only: the instance's `traverse` takes an `Applicative`
+// dictionary, and the eager model does not pass monad-family dictionaries.
+#[test]
+fn test_tier3_hand_written_traversable() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/hand_written_traversable", Profile::Default);
+}
+
 #[test]
 fn test_tier3_polymorphic_monad_traverse() {
     run_native_test("tier3_io/polymorphic_monad_traverse", Profile::Default);

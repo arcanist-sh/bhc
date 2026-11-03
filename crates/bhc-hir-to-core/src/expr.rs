@@ -4935,6 +4935,88 @@ fn field_traversal(
     Some(Some(core::Expr::Lam(y, Box::new(call), span)))
 }
 
+/// `traverse f c` (and `mapM`, `for`, `forM`, `sequenceA`, `sequence`) over a
+/// type with a hand-written `Traversable` instance: that instance's
+/// `traverse`, given the `Applicative` dictionary of the call's applicative
+/// (its first parameter; see the instance lowering). Closure IO model only,
+/// where the monad family is dictionary-passed (#66). `None` for lists,
+/// `Maybe`/`Either`, derived instances and types with no instance.
+fn lower_user_traversal(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    args: &[&hir::Expr],
+    head_ref: &DefRef,
+    monad_ty: &Ty,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    if !io_closure_mode() {
+        return Ok(None);
+    }
+    let (fn_pos, cont_pos) = match (name.as_str(), args.len()) {
+        ("traverse" | "mapM", 2) => (Some(0), 1),
+        ("for" | "forM", 2) => (Some(1), 0),
+        ("sequenceA" | "sequence", 1) => (None, 0),
+        _ => return Ok(None),
+    };
+    let container_ty = call_arg_ty(ctx, head_ref, args, cont_pos);
+    let Some(Ty::App(con_ty, _)) = container_ty else {
+        return Ok(None);
+    };
+    let Some(con) = applied_head_name(&con_ty) else {
+        return Ok(None);
+    };
+    if matches!(con.as_str(), "[]" | "List" | "Maybe" | "Either")
+        || ctx.derived_traversables.contains_key(&con)
+    {
+        return Ok(None);
+    }
+    let traverse = Symbol::intern("traverse");
+    let Some(method) = ctx
+        .class_registry()
+        .resolve_instance(Symbol::intern("Traversable"), &con_ty)
+        .and_then(|(inst, _)| inst.methods.get(&traverse).copied())
+        .and_then(|id| ctx.lookup_var(id).cloned())
+    else {
+        return Ok(None);
+    };
+    let applicative = Symbol::intern("Applicative");
+    let dict = match monad_ty {
+        // A variable applicative: the dictionary in scope, or one reached
+        // through a superclass (`Monad m =>`). Inside the instance itself the
+        // method's own dictionary is registered at a placeholder variable,
+        // not the occurrence's, so match by class.
+        Ty::Var(_) => ctx
+            .dict_known_for_var(applicative, monad_ty, head_ref.span)
+            .or_else(|| ctx.dict_in_scope_or_via_superclass(applicative, head_ref.span)),
+        _ => ctx.resolve_dictionary(
+            &bhc_types::Constraint::new(applicative, monad_ty.clone(), span),
+            span,
+        ),
+    };
+    let Some(dict) = dict else {
+        if std::env::var("BHC_DBG_TRAV").is_ok() {
+            eprintln!(
+                "trav {}: no Applicative dictionary at {monad_ty:?}",
+                name.as_str()
+            );
+        }
+        return Ok(None);
+    };
+    let func = match fn_pos {
+        Some(pos) => lower_expr(ctx, args[pos])?,
+        None => {
+            let v = ctx.fresh_var("$trav_id", Ty::Error, span);
+            core::Expr::Lam(v.clone(), Box::new(core::Expr::Var(v, span)), span)
+        }
+    };
+    let cont = lower_expr(ctx, args[cont_pos])?;
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    Ok(Some(app(
+        app(app(core::Expr::Var(method, span), dict), func),
+        cont,
+    )))
+}
+
 /// `traverse`/`mapM`/`for`/`forM`/`sequenceA`/`sequence` (and their `_`
 /// forms) over a container with a generated traversal
 /// ([`derived_traversal_fn`]): a stock-derived `Traversable` of this module
@@ -5752,6 +5834,9 @@ fn lower_foldable_consumer(
         )) => op,
         Some(_) => return Ok(None),
     };
+    if let ("foldr", 3) = (bare, args.len()) {
+        return lower_user_foldr(ctx, head_ref, args, span);
+    }
     let container_pos = match (bare, args.len()) {
         ("sum" | "product" | "length" | "null" | "maximum" | "minimum" | "toList", 1) => 0,
         ("elem" | "notElem" | "any" | "all" | "mapM_" | "traverse_", 2) => 1,
@@ -5791,6 +5876,44 @@ fn lower_foldable_consumer(
         result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
     }
     Ok(Some(result))
+}
+
+/// `foldr f z c` over a type with a hand-written `Foldable` instance: that
+/// instance's `foldr`. Codegen's builtin walks lists, and derived instances
+/// (`$derived_foldr_*`), which it dispatches itself; anything else it walked
+/// as a list, including the recursive `foldr` inside the instance (#66).
+/// `None` for lists, newtypes, derived instances and types with none.
+fn lower_user_foldr(
+    ctx: &mut LowerContext,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Some(Ty::App(con_ty, _)) = call_arg_ty(ctx, head_ref, args, 2) else {
+        return Ok(None);
+    };
+    let Some(con) = applied_head_name(&con_ty) else {
+        return Ok(None);
+    };
+    if matches!(con.as_str(), "[]" | "List") || ctx.is_newtype_name(con) {
+        return Ok(None);
+    }
+    let foldr = Symbol::intern("foldr");
+    let Some(method) = ctx
+        .class_registry()
+        .resolve_instance(Symbol::intern("Foldable"), &con_ty)
+        .and_then(|(inst, _)| inst.methods.get(&foldr).copied())
+        .and_then(|id| ctx.lookup_var(id).cloned())
+        .filter(|v| !v.name.as_str().starts_with("$derived_foldr_"))
+    else {
+        return Ok(None);
+    };
+    let mut call = core::Expr::Var(method, span);
+    for arg in args {
+        let a = lower_expr(ctx, arg)?;
+        call = core::Expr::App(Box::new(call), Box::new(a), span);
+    }
+    Ok(Some(call))
 }
 
 /// Whether `ty` is `T a` for a `T` that is not the list type, so a
@@ -6028,6 +6151,9 @@ fn lower_monadic_traversal_spine_inner(
             name.as_str(),
             applied_head_name(&monad_ty)
         );
+    }
+    if let Some(e) = lower_user_traversal(ctx, name, args, head_ref, &monad_ty, span)? {
+        return Ok(Some(e));
     }
     if let Some(e) = lower_generated_traversal(ctx, name, args, head_ref, &monad_ty, span)? {
         return Ok(Some(e));

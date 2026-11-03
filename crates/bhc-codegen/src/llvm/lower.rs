@@ -11423,6 +11423,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("map expects a list".to_string())),
         };
+        // The list may be a thunk: a lambda parameter bound to a lazy
+        // argument, as in a list `Applicative` dictionary's `fmap` given a
+        // recursive call (`go n = fmap (n :) (go (n - 1))`; #66). A list is
+        // always a heap pointer, so forcing it is safe.
+        let list_ptr = self.build_force(list_ptr.into())?.into_pointer_value();
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();

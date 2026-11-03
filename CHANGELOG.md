@@ -58,6 +58,9 @@ monad that is a type variable, and class-polymorphic functions at `Integer`,
 - A polymorphic recursive fold that returns an accumulator used at an
   unboxed type (`foldT (+) 0 tree`) prints an address (#64); in the default
   IO model, a recursive `Monad m =>` function at `IO` does too (#65).
+- WebAssembly: an `IO` function passed as an argument does not run, so a
+  traversal over a derived `Traversable` is wrong under `--target=wasi`
+  (#68).
 
 ## [0.2.24] - 2026-10-31
 

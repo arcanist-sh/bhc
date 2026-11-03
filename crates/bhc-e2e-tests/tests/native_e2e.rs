@@ -2374,6 +2374,12 @@ fn test_tier3_hand_written_traversable() {
     run_native_test("tier3_io/hand_written_traversable", Profile::Default);
 }
 
+// IO functions used as values (#68; the same fixture runs under WASM).
+#[test]
+fn test_tier3_io_function_values() {
+    run_native_test("tier3_io/io_function_values", Profile::Default);
+}
+
 #[test]
 fn test_tier3_polymorphic_monad_traverse() {
     run_native_test("tier3_io/polymorphic_monad_traverse", Profile::Default);

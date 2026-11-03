@@ -155,12 +155,15 @@ impl E2ERunner {
             )));
         }
 
-        // Create work directory
+        // Create work directory. Keyed by profile too: one fixture run at
+        // several profiles (`arithmetic` at default/numeric/edge) in parallel
+        // shared a directory, and one test read another's half-written module.
         let test_work_dir = self
             .config
             .work_dir
             .join(&test_case.name)
-            .join(self.config.backend.to_string());
+            .join(self.config.backend.to_string())
+            .join(self.config.profile.to_string());
         std::fs::create_dir_all(&test_work_dir)?;
 
         // Copy fixture data files (input.txt, etc.) to work directory

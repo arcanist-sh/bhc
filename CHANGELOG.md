@@ -6,6 +6,15 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- WebAssembly: `IO` functions used as values run. `m >>= k` with a
+  continuation that is not a lambda (`>>= print`) applies it; `print`,
+  `putStrLn`, `putStr`, `return` and `pure` can be passed as functions; and
+  an inlined function parameter bound to a top-level function is called.
+  A traversal over a derived `Traversable` is correct under `--target=wasi`
+  again (#68).
+
 ## [0.2.25] - 2026-11-03
 
 Type classes over containers and numbers: `Foldable`/`Traversable` for user

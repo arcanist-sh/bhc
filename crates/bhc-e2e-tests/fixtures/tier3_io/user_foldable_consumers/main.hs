@@ -6,12 +6,15 @@
 -- whole subtrees instead of folding into them.
 import Control.Monad (forM_)
 import Data.Foldable (toList)
+import qualified Data.Sequence as Seq
 
 data Tree a = Leaf | Node (Tree a) a (Tree a) deriving Foldable
 
 data Pair a = Pair a a
 
 newtype Bag a = Bag [a] deriving Foldable
+
+newtype SBag a = SBag (Seq.Seq a) deriving Foldable
 
 instance Foldable Pair where
   foldr f z (Pair x y) = f x (f y z)
@@ -33,6 +36,7 @@ main = do
   forM_ t print
   print (sum (Pair 4 5 :: Pair Int), length (Pair 'a' 'b'))
   print (sum (Bag [1, 2, 3 :: Int]), length (Bag "ab"), null (Bag ""), toList (Bag "xy"))
+  print (foldr (:) [] (Bag "abc"), foldr (:) [] (SBag (Seq.fromList "xyz")))
   print (sum (Just 3 :: Maybe Int), length (Nothing :: Maybe Int))
   mapM_ print (Just 'z')
   print (sum [1, 2, 3 :: Int], length "abc", elem 'b' "abc")

@@ -3149,14 +3149,18 @@ impl DerivingContext {
             arity: 1,
         };
 
-        // f inner z
-        let result = core::Expr::App(
-            Box::new(core::Expr::App(
-                Box::new(core::Expr::Var(f_var.clone(), span)),
-                Box::new(core::Expr::Var(inner_var.clone(), span)),
-                span,
-            )),
-            Box::new(core::Expr::Var(z_var.clone(), span)),
+        // The field folded into `z` by its type: `f inner z` when it is the
+        // parameter, `foldr f z inner` through a container of it
+        // (`newtype Many a = Many (Seq a)`), which applying `f` to the whole
+        // field got wrong (#66).
+        let result = self.fold_foldable_field(
+            &field_ty,
+            core::Expr::Var(inner_var.clone(), span),
+            core::Expr::Var(z_var.clone(), span),
+            type_param,
+            newtype_def.name,
+            &f_var,
+            &foldr_var,
             span,
         );
 
@@ -3188,7 +3192,8 @@ impl DerivingContext {
 
         Some(DerivedInstance {
             instance,
-            bindings: vec![Bind::NonRec(foldr_var, Box::new(foldr_body))],
+            // Recursive when the field mentions the newtype itself.
+            bindings: vec![Bind::Rec(vec![(foldr_var, Box::new(foldr_body))])],
         })
     }
 

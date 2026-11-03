@@ -5615,8 +5615,9 @@ fn foldable_list(
         return None;
     }
     // A newtype is its field at runtime, which the builtins already walk
-    // (pandoc's `Many a = Many (Seq a)`); its derived `foldr` hands `f` the
-    // whole field, so going through it made a list holding the `Seq`.
+    // (pandoc's `Many a = Many (Seq a)`), so it keeps them. (Its derived
+    // `foldr` used to hand `f` the whole field; routing `Many` through it
+    // crashed pandoc's HTML writer.)
     if head
         .as_deref()
         .is_some_and(|h| ctx.is_newtype_name(Symbol::intern(h)))

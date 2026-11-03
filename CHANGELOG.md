@@ -6,6 +6,59 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.25] - 2026-11-03
+
+Type classes over containers and numbers: `Foldable`/`Traversable` for user
+types (derived and hand-written), the list `Applicative`, traversals at a
+monad that is a type variable, and class-polymorphic functions at `Integer`,
+`Double` and `String`, including ones imported from another module.
+
+### Added
+
+- Class-polymorphic functions (`sq :: Num a => a -> a`, `Show a =>`, `Ord a
+  =>`, …) get a specialized copy at each representation-sensitive type they
+  are used at (`Integer`, `Double`, `Float`, `Rational`, `Text`, `String`,
+  lists): top-level, `let`/`where`-bound, and imported from another module at
+  the numeric types. They used machine-int arithmetic at every type (#57).
+- Hand-written `Traversable` instances: `traverse` is checked at
+  `Applicative f => (a -> f b) -> T a -> f (T b)` and every traversal of the
+  type runs the instance, at `Maybe`, `IO`, lists and a variable monad.
+  Closure IO model (`BHC_IO_MODEL=closure`) only (#66).
+- Using an unimplemented concurrency primitive (`forkIO`, `MVar`, `Chan`
+  operations) is a compile-time warning; they still abort at run time (#38).
+
+### Fixed
+
+- `Foldable` for user types: `sum`, `product`, `length`, `null`, `maximum`,
+  `minimum`, `elem`, `any`, `all`, `toList`, `mapM_` and `forM_` work over
+  derived, hand-written and newtype `Foldable` instances and `Maybe`; derived
+  `foldr` recurses into nested fields and folds through a newtype's
+  container field; a hand-written recursive `foldr` dispatches to its
+  instance instead of walking the value as a list (#63, #66).
+- Traversals: derived `traverse` over recursive and nested fields at any
+  applicative (#53); `traverse`/`mapM`/`for` inside a `Monad m =>` function
+  take `>>=`/`pure` from the dictionary instead of segfaulting (#63);
+  `mapM_` runs every action (#63).
+- The list `Applicative`: `<*>`, `liftA2`/`liftM2` at `Maybe`, `Either` and
+  lists, `map` over functions of several arguments, and `for` at `IO` (#63).
+  A recursive `Applicative f =>` function at lists no longer segfaults (#66).
+- `Integer`: `let` in a list comprehension, operator chains under an
+  annotation (`2 ^ 64 + 5 :: Integer`) and literals beyond 64 bits (#57).
+- The closure IO model generalizes local functions over `Num`/`Eq`/`Ord`/
+  `Show` variables, and runs a thunked action passed to a dictionary's `>>=`
+  (#57, #63).
+- `Data.Monoid`/`Data.Semigroup`: names from the bundled modules shadow the
+  builtin stubs, and `Endo` is real (#60).
+- WebAssembly: `getArgs`/`getProgName` read WASI argv, an unsupported
+  `foreign import` is a compile error instead of returning 0, and `[String]`
+  shows quoted (#41).
+
+### Known issues
+
+- A polymorphic recursive fold that returns an accumulator used at an
+  unboxed type (`foldT (+) 0 tree`) prints an address (#64); in the default
+  IO model, a recursive `Monad m =>` function at `IO` does too (#65).
+
 ## [0.2.24] - 2026-10-31
 
 A correctness release: around fifty issue fixes in laziness, `Integer`,
@@ -344,7 +397,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...HEAD
+[0.2.25]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...v0.2.25
 [0.2.24]: https://github.com/arcanist-sh/bhc/compare/v0.2.23...v0.2.24
 [0.2.23]: https://github.com/arcanist-sh/bhc/compare/v0.2.22...v0.2.23
 [0.2.22]: https://github.com/arcanist-sh/bhc/releases/tag/v0.2.22

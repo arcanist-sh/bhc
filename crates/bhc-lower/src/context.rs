@@ -2556,7 +2556,7 @@ impl LowerContext {
             .and_then(|info| info.field_names.clone())
     }
 
-    /// Record the [`UNIMPLEMENTED_BUILTINS`] that importing `module` just bound,
+    /// Record the `UNIMPLEMENTED_BUILTINS` that importing `module` just bound,
     /// bare and under `qualifier`, so their uses warn (#38).
     pub fn mark_unimplemented_imports(&mut self, module: &str, qualifier: &str) {
         if !module.starts_with("Control.Concurrent") {

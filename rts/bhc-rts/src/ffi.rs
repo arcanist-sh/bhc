@@ -2386,7 +2386,7 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///      container's ascending list (a Tuple2 for Map) and `child2` holds the
 ///      container's to-list function pointer. Shown as `fromList [...]`.
 ///   18=type argument `i` of the enclosing derived show (`child1` holds `i`):
-///      a placeholder in a TEMPLATE, replaced by [`resolve_show_desc`]. Shown
+///      a placeholder in a TEMPLATE, replaced by `resolve_show_desc`. Shown
 ///      as an `Int` if it survives (no type arguments were known).
 ///   19=Adt with type arguments: `child1` holds the type's derived
 ///      `$derived_showt_*` function (`fn(env, targs, value) -> [Char]`) and

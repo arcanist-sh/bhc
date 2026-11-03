@@ -7691,19 +7691,6 @@ pub(crate) fn expand_transformer_synonyms(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fresh_var() {
-        let mut ctx = LowerContext::new();
-        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
-        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
-        assert_ne!(v1.id, v2.id);
-    }
-}
-
 /// Spell every list type as `Ty::List`. A resolved type can carry the
 /// constructor form `[] a` (`App(Con "[]", a)`) where instance heads and
 /// declared types use `Ty::List`, and the two never match: `MonadReader
@@ -7731,5 +7718,18 @@ pub(crate) fn canonical_list_spelling(ty: &Ty) -> Ty {
         Ty::Tuple(es) => Ty::Tuple(es.iter().map(canonical_list_spelling).collect()),
         Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(canonical_list_spelling(b))),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fresh_var() {
+        let mut ctx = LowerContext::new();
+        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
+        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
+        assert_ne!(v1.id, v2.id);
     }
 }

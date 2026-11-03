@@ -27,11 +27,13 @@ fn nested_pattern_case_with_many_alternatives_compiles() {
             "  f (Just (Left {i})) = {i}\n  f (Just (Right {i})) = {i} + 100\n"
         ));
     }
+    // `\` continuations strip leading whitespace, so the `where` is indented
+    // with an explicit space: at column 0 it is a parse error.
     let src = format!(
         "module ManyAlts (g) where\n\
          g :: Maybe (Either Int Int) -> Int\n\
-         g x = f x\n\
-          where\n\
+         g x = f x\n \
+         where\n\
          {alts}  f _ = -1\n"
     );
     let hs = dir.path().join("ManyAlts.hs");

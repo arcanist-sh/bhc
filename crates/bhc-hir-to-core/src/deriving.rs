@@ -3706,6 +3706,41 @@ impl Default for DerivingContext {
     }
 }
 
+/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
+/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
+fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
+    match ty {
+        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
+            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
+            None => ty.clone(),
+        },
+        Ty::App(f, a) => Ty::App(
+            Box::new(mark_type_params(f, params)),
+            Box::new(mark_type_params(a, params)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(mark_type_params(a, params)),
+            Box::new(mark_type_params(b, params)),
+        ),
+        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
+        _ => ty.clone(),
+    }
+}
+
+/// Whether `ty` mentions a `$targ<i>` marker.
+fn mentions_type_param_marker(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
+        Ty::App(f, a) | Ty::Fun(f, a) => {
+            mentions_type_param_marker(f) || mentions_type_param_marker(a)
+        }
+        Ty::List(a) => mentions_type_param_marker(a),
+        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4216,40 +4251,5 @@ mod tests {
             .instance
             .methods
             .contains_key(&Symbol::intern("traverse")));
-    }
-}
-
-/// `ty` with each occurrence of the `i`-th of `params` replaced by the marker
-/// constructor `$targ<i>` (see `DerivingContext::show_targs`).
-fn mark_type_params(ty: &Ty, params: &[TyVar]) -> Ty {
-    match ty {
-        Ty::Var(v) => match params.iter().position(|p| p.id == v.id) {
-            Some(i) => Ty::Con(TyCon::new(Symbol::intern(&format!("$targ{i}")), Kind::Star)),
-            None => ty.clone(),
-        },
-        Ty::App(f, a) => Ty::App(
-            Box::new(mark_type_params(f, params)),
-            Box::new(mark_type_params(a, params)),
-        ),
-        Ty::Fun(a, b) => Ty::Fun(
-            Box::new(mark_type_params(a, params)),
-            Box::new(mark_type_params(b, params)),
-        ),
-        Ty::List(a) => Ty::List(Box::new(mark_type_params(a, params))),
-        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| mark_type_params(t, params)).collect()),
-        _ => ty.clone(),
-    }
-}
-
-/// Whether `ty` mentions a `$targ<i>` marker.
-fn mentions_type_param_marker(ty: &Ty) -> bool {
-    match ty {
-        Ty::Con(c) => c.name.as_str().starts_with("$targ"),
-        Ty::App(f, a) | Ty::Fun(f, a) => {
-            mentions_type_param_marker(f) || mentions_type_param_marker(a)
-        }
-        Ty::List(a) => mentions_type_param_marker(a),
-        Ty::Tuple(ts) => ts.iter().any(mentions_type_param_marker),
-        _ => false,
     }
 }

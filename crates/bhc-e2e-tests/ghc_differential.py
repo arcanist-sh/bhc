@@ -175,8 +175,11 @@ def main():
     print(f"ghc: {GHC}")
     print(f"fixtures: {fix}\n")
 
+    # Both spellings: multi-module fixtures use Main.hs, and a case-sensitive
+    # file system (Linux CI) does not match it with a main.hs pattern.
     dirs = sorted({os.path.dirname(p)
-                   for p in glob.glob(f"{fix}/**/main.hs", recursive=True)})
+                   for name in ("main.hs", "Main.hs")
+                   for p in glob.glob(f"{fix}/**/{name}", recursive=True)})
     if not dirs:
         # A flat directory of standalone probes rather than fixture dirs.
         dirs = sorted({os.path.dirname(p) for p in glob.glob(f"{fix}/*.hs")})

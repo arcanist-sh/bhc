@@ -68,17 +68,7 @@ META = {"expected.txt", "stdin.txt", "test.toml"}
 #
 # Nothing belongs here that has not been diagnosed. "It fails and I do not know
 # why" is a red build, not an entry.
-KNOWN_FAILURES = {
-    "tier3_io/stdin_echo":
-        "native stdin read path segfaults; pre-existing, see the #[ignore] on "
-        "test_tier3_milestone_d_csv_parser_native",
-    "tier3_io/stdin_readln":
-        "same native stdin read path",
-    "tier3_io/hand_written_traversable":
-        "closure IO model only (#66): the instance's traverse takes an "
-        "Applicative dictionary, which the default eager model does not pass; "
-        "native_e2e.rs runs it under BHC_IO_MODEL=closure",
-}
+KNOWN_FAILURES = {}
 
 
 def find_ghc():

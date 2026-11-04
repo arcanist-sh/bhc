@@ -1193,6 +1193,11 @@ mod tests {
 
     #[test]
     fn free_and_transformer_predicates() {
+        // Under the closure IO model transformers are library types, so
+        // `mentions_transformer` is false by design.
+        if bhc_types::io_closure_mode() {
+            return;
+        }
         assert!(has_free_tyvar(&state_t(var(55))));
         assert!(!has_free_tyvar(&state_t(stes_inner())));
         assert!(mentions_transformer(&state_t(stes_inner())));
@@ -1300,7 +1305,11 @@ mod tests {
         nts.insert(Symbol::intern("AppM"), (vec![a], underlying));
         // `AppM Int` unfolds to `ExceptT String (StateT Int IO) Int`.
         let unfolded = unfold_newtypes(&app(con("AppM"), con("Int")), &nts, 0);
-        assert!(mentions_transformer(&unfolded));
+        // False by design under the closure IO model (library transformers).
+        assert_eq!(
+            mentions_transformer(&unfolded),
+            !bhc_types::io_closure_mode()
+        );
         assert!(!has_free_tyvar(&unfolded));
         let expected = app(
             app(con("ExceptT"), con("String")),

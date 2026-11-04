@@ -100,7 +100,7 @@ Plain Haskell 2010 + MultiParamTypeClasses + FunctionalDependencies + FlexibleIn
 - separate compilation (`-c`, package DB, the pandoc harness) compiles them into the DB
   like parsec.
 
-The old path stays the default until Phase 5.
+The old path stayed the default until Phase 5.
 
 **Phase 3 — make it work as ordinary code.** With the flag on, typeck registers none of
 the transformer types/classes, hir-to-core treats them as user monads, codegen never sees
@@ -255,6 +255,17 @@ mode.
 
 The default-mode pandoc DB must be rebuilt (interface version 5) before default-mode
 probes can be compared again.
+
+## Phase 5 status (2026-11-04): default flipped, deletion pending
+
+Closure is the default IO model for native code (`bhc_types::select_io_model_for_target`).
+WASM stays on eager, because its suite still has 10 failures under closure, and
+`BHC_IO_MODEL` overrides either way. The library is embedded in the driver
+(`TRANSFORMER_LIBRARY`), so an installed compiler has it too.
+
+The second half of Phase 5, deleting the eager transformer code, waits until WASM moves
+to closure and one release has shipped with the new default.
+
 
 ## Risks
 

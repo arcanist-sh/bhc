@@ -52,8 +52,8 @@ pub fn compile_native(
         let stderr = String::from_utf8_lossy(&result.stderr);
         let stdout = String::from_utf8_lossy(&result.stdout);
         return Err(E2EError::CompileError(format!(
-            "Compilation failed:\nstdout: {}\nstderr: {}",
-            stdout, stderr
+            "Compilation failed ({}):\nstdout: {}\nstderr: {}",
+            result.status, stdout, stderr
         )));
     }
 

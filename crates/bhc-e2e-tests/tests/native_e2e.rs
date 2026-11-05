@@ -2392,3 +2392,37 @@ fn test_tier3_transformer_lift_run_except_native() {
     }
     run_native_test("tier3_io/transformer_lift_run_except", Profile::Default);
 }
+
+/// Threads, `MVar`s and `Chan`s run under the closure IO model only (#38).
+#[test]
+fn test_tier3_concurrent_mvar_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_mvar", Profile::Default);
+}
+
+#[test]
+fn test_tier3_concurrent_chan_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_chan", Profile::Default);
+}
+
+#[test]
+fn test_tier3_concurrent_threads_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_threads", Profile::Default);
+}
+
+#[test]
+fn test_tier3_forever_exception_native() {
+    // Under the eager model a throw does not end `forever`.
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/forever_exception", Profile::Default);
+}

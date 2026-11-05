@@ -65,6 +65,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 // FFI entry points for C interop
+pub mod concurrent;
 pub mod ffi;
 
 // Re-export RTS components

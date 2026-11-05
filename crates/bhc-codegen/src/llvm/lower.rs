@@ -7394,6 +7394,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "divMod" => self.lower_builtin_divmod(args[0], args[1]),
             "quotRem" => self.lower_builtin_quotrem(args[0], args[1]),
 
+            // Concurrency (closure IO model; rts/bhc-rts/src/concurrent.rs)
+            "forkIO" | "forkOS" | "myThreadId" | "killThread" | "threadDelay" | "newEmptyMVar"
+            | "newMVar" | "takeMVar" | "readMVar" | "putMVar" | "tryTakeMVar" | "tryPutMVar"
+            | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar" | "newChan" | "readChan"
+            | "writeChan"
+                if crate::io_closure_mode() =>
+            {
+                self.lower_builtin_concurrency(name, args)
+            }
+
             // IORef operations
             "newIORef" => self.lower_builtin_new_ioref(args[0]),
             "readIORef" => self.lower_builtin_read_ioref(args[0]),
@@ -15874,7 +15884,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.current_builtin_ty = saved;
                 value_monad.is_none()
             }
-            "return" | "pure" => self.value_monad_of_ty(head_ty).is_none(),
+            "return" | "pure" | "forever" => self.value_monad_of_ty(head_ty).is_none(),
             _ => crate::is_io_primitive(name),
         }
     }
@@ -19165,6 +19175,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let a = self
                 .lower_io_run(action_expr)?
                 .ok_or_else(|| CodegenError::Internal(">>=: action has no value".to_string()))?;
+            self.emit_io_exn_guard()?;
             let k = self
                 .lower_expr(func_expr)?
                 .ok_or_else(|| CodegenError::Internal(">>=: function has no value".to_string()))?;
@@ -19226,6 +19237,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Closure IO model (run mode): run both actions in order.
         if crate::io_closure_mode() {
             self.lower_io_run(action1_expr)?;
+            self.emit_io_exn_guard()?;
             return self.lower_io_run(action2_expr);
         }
         // Execute the first action (result is discarded)
@@ -27531,6 +27543,178 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
+    /// Call a concurrency function of the RTS, declaring it on first use. Every
+    /// argument and any result is a pointer.
+    fn call_concurrency_rts(
+        &mut self,
+        symbol: &str,
+        args: &[PointerValue<'ctx>],
+        returns_value: bool,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let function = match self.module.get_function(symbol) {
+            Some(function) => function,
+            None => {
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    args.iter().map(|_| ptr_type.into()).collect();
+                let fn_type = if returns_value {
+                    ptr_type.fn_type(&params, false)
+                } else {
+                    self.llvm_ctx.void_type().fn_type(&params, false)
+                };
+                self.module.add_function(symbol, fn_type)
+            }
+        };
+        let call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            args.iter().map(|arg| (*arg).into()).collect();
+        let call = self
+            .builder()
+            .build_call(function, &call_args, "")
+            .map_err(|e| CodegenError::Internal(format!("{symbol} call failed: {e:?}")))?;
+        if returns_value {
+            call.try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal(format!("{symbol}: returned void")))
+        } else {
+            Ok(ptr_type.const_null().into())
+        }
+    }
+
+    /// Lower a concurrency handle (`MVar`, `Chan`, `ThreadId`), which a lazy
+    /// binding may still hold as a thunk. It is always a heap object, so forcing
+    /// is safe.
+    fn lower_concurrency_handle(&mut self, expr: &Expr) -> CodegenResult<PointerValue<'ctx>> {
+        let value = self.lower_expr(expr)?.ok_or_else(|| {
+            CodegenError::Internal("concurrency: handle has no value".to_string())
+        })?;
+        let forced = self.build_force(value)?;
+        self.value_to_ptr(forced)
+    }
+
+    /// Lower a value stored in an `MVar` or a `Chan`, or an action to fork.
+    fn lower_concurrency_value(&mut self, expr: &Expr) -> CodegenResult<PointerValue<'ctx>> {
+        let value = self.lower_expr(expr)?.ok_or_else(|| {
+            CodegenError::Internal("concurrency: argument has no value".to_string())
+        })?;
+        self.value_to_ptr(value)
+    }
+
+    /// Run `f value`, for a function `f :: a -> IO b` passed to `withMVar` and
+    /// friends.
+    fn run_applied_action(
+        &mut self,
+        func: PointerValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_ptr = self.checked_closure_fn_ptr(func, "apply a function to an MVar's value")?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let action = self
+            .builder()
+            .build_indirect_call(fn_type, fn_ptr, &[func.into(), value.into()], "mvar_apply")
+            .map_err(|e| CodegenError::Internal(format!("MVar apply failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("MVar apply: returned void".to_string()))?;
+        self.run_io_action(action)
+    }
+
+    /// Lower a `Control.Concurrent` builtin in run mode, under the closure IO
+    /// model. See `rts/bhc-rts/src/concurrent.rs` for what the calls do (#38).
+    fn lower_builtin_concurrency(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = match name {
+            "forkIO" | "forkOS" => {
+                let action = self.lower_concurrency_value(args[0])?;
+                self.call_concurrency_rts("bhc_fork_io", &[action], true)?
+            }
+            "myThreadId" => self.call_concurrency_rts("bhc_my_thread_id", &[], true)?,
+            "killThread" => {
+                let thread = self.lower_concurrency_handle(args[0])?;
+                self.call_concurrency_rts("bhc_kill_thread", &[thread], false)?
+            }
+            "threadDelay" => {
+                let micros = self.lower_concurrency_value(args[0])?;
+                self.call_concurrency_rts("bhc_thread_delay", &[micros], false)?
+            }
+            "newEmptyMVar" => self.call_concurrency_rts("bhc_new_empty_mvar", &[], true)?,
+            "newMVar" => {
+                let value = self.lower_concurrency_value(args[0])?;
+                self.call_concurrency_rts("bhc_new_mvar", &[value], true)?
+            }
+            "takeMVar" | "readMVar" | "tryTakeMVar" | "readChan" => {
+                let symbol = match name {
+                    "takeMVar" => "bhc_take_mvar",
+                    "readMVar" => "bhc_read_mvar",
+                    "tryTakeMVar" => "bhc_try_take_mvar",
+                    _ => "bhc_read_chan",
+                };
+                let handle = self.lower_concurrency_handle(args[0])?;
+                self.call_concurrency_rts(symbol, &[handle], true)?
+            }
+            "putMVar" | "writeChan" => {
+                let symbol = if name == "putMVar" {
+                    "bhc_put_mvar"
+                } else {
+                    "bhc_write_chan"
+                };
+                let handle = self.lower_concurrency_handle(args[0])?;
+                let value = self.lower_concurrency_value(args[1])?;
+                self.call_concurrency_rts(symbol, &[handle, value], false)?
+            }
+            "tryPutMVar" => {
+                let mvar = self.lower_concurrency_handle(args[0])?;
+                let value = self.lower_concurrency_value(args[1])?;
+                self.call_concurrency_rts("bhc_try_put_mvar", &[mvar, value], true)?
+            }
+            "swapMVar" => {
+                let mvar = self.lower_concurrency_handle(args[0])?;
+                let new = self.lower_concurrency_value(args[1])?;
+                let old = self.call_concurrency_rts("bhc_take_mvar", &[mvar], true)?;
+                self.call_concurrency_rts("bhc_put_mvar", &[mvar, new], false)?;
+                old
+            }
+            "newChan" => self.call_concurrency_rts("bhc_new_chan", &[], true)?,
+            "modifyMVar_" | "modifyMVar" | "withMVar" => {
+                let mvar = self.lower_concurrency_handle(args[0])?;
+                let func = self.lower_concurrency_handle(args[1])?;
+                let old = self.call_concurrency_rts("bhc_take_mvar", &[mvar], true)?;
+                let returned = self.run_applied_action(func, old)?;
+                let old_ptr = old.into_pointer_value();
+                let returned_ptr = self.value_to_ptr(returned)?;
+                match name {
+                    "modifyMVar_" => self.call_concurrency_rts(
+                        "bhc_mvar_finish",
+                        &[mvar, old_ptr, returned_ptr],
+                        false,
+                    )?,
+                    "withMVar" => {
+                        self.call_concurrency_rts(
+                            "bhc_mvar_finish",
+                            &[mvar, old_ptr, old_ptr],
+                            false,
+                        )?;
+                        returned
+                    }
+                    _ => self.call_concurrency_rts(
+                        "bhc_mvar_finish_pair",
+                        &[mvar, old_ptr, returned_ptr],
+                        true,
+                    )?,
+                }
+            }
+            _ => {
+                return Err(CodegenError::Internal(format!(
+                    "{name} is not a concurrency builtin"
+                )))
+            }
+        };
+        Ok(Some(result))
+    }
+
     /// Lower `modifyIORef ref f` — read, apply f, write back.
     fn lower_builtin_modify_ioref(
         &mut self,
@@ -31483,7 +31667,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(loop_block)
             .map_err(|e| CodegenError::Internal(format!("forever: branch failed: {:?}", e)))?;
         self.builder().position_at_end(loop_block);
-        let _ = self.lower_expr(action_expr)?;
+        if crate::io_closure_mode() {
+            // Evaluating an action only builds it, so the body must be run. A
+            // throw is the one way out of the loop.
+            let _ = self.lower_io_run(action_expr)?;
+            self.emit_io_exn_guard()?;
+        } else {
+            let _ = self.lower_expr(action_expr)?;
+        }
         self.builder()
             .build_unconditional_branch(loop_block)
             .map_err(|e| CodegenError::Internal(format!("forever: branch failed: {:?}", e)))?;
@@ -63134,6 +63325,21 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "toRational" => Some(1),
         "fromRational" => Some(1),
         "recip" => Some(1),
+        // Concurrency runs under the closure IO model. Under the eager model these
+        // have no arity, so a use compiles to a stub that aborts at run time.
+        "forkIO" | "forkOS" | "killThread" | "threadDelay" | "newMVar" | "takeMVar"
+        | "readMVar" | "tryTakeMVar" | "readChan"
+            if crate::io_closure_mode() =>
+        {
+            Some(1)
+        }
+        "myThreadId" | "newEmptyMVar" | "newChan" if crate::io_closure_mode() => Some(0),
+        "putMVar" | "tryPutMVar" | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar"
+        | "writeChan"
+            if crate::io_closure_mode() =>
+        {
+            Some(2)
+        }
         "newIORef" => Some(1),
         "readIORef" => Some(1),
         "writeIORef" => Some(2),

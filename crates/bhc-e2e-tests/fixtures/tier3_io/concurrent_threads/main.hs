@@ -1,12 +1,14 @@
 -- Scheduling (#38): delays wake in order, killThread stops a sleeping, blocked
--- or not yet started thread, and the program ends when main does.
+-- or not yet started thread, and the program ends when main does. The two delays
+-- are far apart because starting a thread can take tens of milliseconds on a
+-- loaded machine, and the second delay only begins once its thread runs.
 import Control.Concurrent
 import Control.Monad
 
 main :: IO ()
 main = do
   out <- newChan
-  _ <- forkIO (threadDelay 60000 >> writeChan out "slow")
+  _ <- forkIO (threadDelay 1000000 >> writeChan out "slow")
   _ <- forkIO (threadDelay 10000 >> writeChan out "fast")
   readChan out >>= putStrLn
   readChan out >>= putStrLn

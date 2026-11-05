@@ -8026,6 +8026,56 @@ impl TyCtxt {
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
             .collect();
 
+        // `filterM` and `zipWithM` return a list in any monad. Typed fresh when
+        // imported, `print` could not see the list and printed an address (#73).
+        let monad = TyVar::new(994, Kind::star_to_star());
+        let elem_a = TyVar::new_star(993);
+        let elem_b = TyVar::new_star(992);
+        let elem_c = TyVar::new_star(991);
+        let in_monad = |ty: Ty| Ty::App(Box::new(Ty::Var(monad.clone())), Box::new(ty));
+        let list_of = |v: &TyVar| Ty::List(Box::new(Ty::Var(v.clone())));
+        let filter_m = Scheme::poly(
+            vec![monad.clone(), elem_a.clone()],
+            Ty::fun(
+                Ty::fun(
+                    Ty::Var(elem_a.clone()),
+                    in_monad(self.builtins.bool_ty.clone()),
+                ),
+                Ty::fun(list_of(&elem_a), in_monad(list_of(&elem_a))),
+            ),
+        );
+        let zip_with_m = Scheme::poly(
+            vec![
+                monad.clone(),
+                elem_a.clone(),
+                elem_b.clone(),
+                elem_c.clone(),
+            ],
+            Ty::fun(
+                Ty::fun(
+                    Ty::Var(elem_a.clone()),
+                    Ty::fun(Ty::Var(elem_b.clone()), in_monad(Ty::Var(elem_c.clone()))),
+                ),
+                Ty::fun(
+                    list_of(&elem_a),
+                    Ty::fun(list_of(&elem_b), in_monad(list_of(&elem_c))),
+                ),
+            ),
+        );
+        for def_info in defs.values() {
+            if !matches!(def_info.kind, DefKind::Value)
+                || def_info.type_scheme.is_some()
+                || local_value_ids.contains(&def_info.id)
+            {
+                continue;
+            }
+            match def_info.name.as_str() {
+                "filterM" => self.env.insert_global(def_info.id, filter_m.clone()),
+                "zipWithM" => self.env.insert_global(def_info.id, zip_with_m.clone()),
+                _ => {}
+            }
+        }
+
         // Builtin values whose by-NAME scheme is exact but whose DefId does not
         // carry it. The lowering pass and `register_primitive_ops` number
         // their builtin lists independently and the lists have drifted apart,

@@ -527,6 +527,7 @@ impl<'src> Parser<'src> {
             "==" | "/=" | "<" | "<=" | ">" | ">=" | "`elem`" | "`notElem`" => (4, Assoc::None),
             "<$>" | "<*>" | "<*" | "*>" => (4, Assoc::Left),
             "<$" => (4, Assoc::Left),
+            ">=>" | "<=<" => (1, Assoc::Right),
             "<|>" => (3, Assoc::Left),
             "&&" => (3, Assoc::Right),
             // Control.Arrow: `infixr 3 ***, &&&` and `infixr 2 +++, |||`.

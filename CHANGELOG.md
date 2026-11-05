@@ -33,6 +33,17 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `try` catches. It was the identity, so the exception stayed pending and the
+  result was `Right`; it now returns `Left` for the exception type it is used at,
+  when that type is known (#70).
+- `show` and `print` of an `IOException`, `ErrorCall` or `SomeException` print its
+  text, where they printed an address, and `userError` shows as `user error (…)`.
+  An uncaught exception reports `program: message` (#72).
+- `evaluate`, `bracket_`, `>=>`, `<=<` and `<$` at builtin functors work, and `>=>`
+  and `<=<` have their fixity, `infixr 1`. They
+  aborted with `stub: … not implemented` (#71).
+- The results of `zipWithM` and `filterM` print as lists, where they printed an
+  address (#73), and `print ()` prints `()`, where it printed an empty line.
 - `forever` runs its body under the closure IO model, and a thrown exception ends
   it.
 - Under the closure IO model, a thrown exception stops the rest of a `do` block:

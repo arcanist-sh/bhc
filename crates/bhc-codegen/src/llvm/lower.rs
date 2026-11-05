@@ -6946,11 +6946,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Without it pandoc's `handleOptInfo` — `E.handle (handleError .
             // Left) $ …` — aborted on a stub.
             "handle" => self.lower_builtin_catch(args[1], args[0]),
-            "try" => self.lower_builtin_try(args[0]),
+            "try" => match Self::try_result_in_io(&self.current_builtin_ty) {
+                Some(exception_ty) => {
+                    let tag = Self::exception_tag_of_ty(exception_ty);
+                    self.lower_builtin_try_typed(args[0], tag)
+                }
+                None => self.lower_builtin_try(args[0]),
+            },
             // System.IO.Error: IOException-only try/catch (exception tag 1).
             "tryIOError" => self.lower_builtin_try_typed(args[0], 1),
             "catchIOError" => self.lower_builtin_catch_tagged(args[0], args[1], Some(1)),
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
+            "bracket_" => self.lower_builtin_bracket_(args[0], args[1], args[2]),
+            "evaluate" => self.lower_builtin_evaluate(args[0]),
+            "<$" => self.lower_builtin_replace(args[0], args[1]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
             "mask" if args.len() == 1 => self.lower_builtin_mask(args[0]),
@@ -15721,6 +15730,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let msg_ptr = self.value_to_ptr(msg_val)?;
 
+        // An `IOException`, `ErrorCall` or `SomeException` already is an
+        // exception object, and wrapping it would hide its tag from a handler.
+        let thrown_is_exception_object = matches!(
+            &self.current_builtin_ty,
+            Ty::Fun(a, _) if Self::is_exception_object_ty(a)
+        ) || Self::is_user_error_call(msg_expr);
+
         // Wrap in SomeException with tag 0 (generic)
         let make_exc_fn = self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
             CodegenError::Internal("bhc_make_some_exception not declared".to_string())
@@ -15728,6 +15744,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let i64_type = self.llvm_context().i64_type();
         let tag_val = i64_type.const_int(0, false);
+
+        if thrown_is_exception_object {
+            let throw_fn = self
+                .functions
+                .get(&VarId::new(1000080))
+                .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
+            let result = self
+                .builder()
+                .build_call(*throw_fn, &[msg_ptr.into()], "throw_result")
+                .map_err(|e| CodegenError::Internal(format!("throw failed: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
+            return Ok(Some(result));
+        }
 
         let some_exc = self
             .builder()
@@ -15885,6 +15916,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 value_monad.is_none()
             }
             "return" | "pure" | "forever" => self.value_monad_of_ty(head_ty).is_none(),
+            // `try` also names Parsec's, which is not an IO action.
+            "try" => Self::try_result_in_io(head_ty).is_some(),
             _ => crate::is_io_primitive(name),
         }
     }
@@ -16174,6 +16207,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// The `e` of a `try` typed `_ -> IO (Either e a)`, the one form of `try` that
+    /// is `Control.Exception`'s.
+    fn try_result_in_io(ty: &Ty) -> Option<&Ty> {
+        let Ty::Fun(_, result) = ty else { return None };
+        let Ty::App(io, either_ty) = result.as_ref() else {
+            return None;
+        };
+        if !matches!(io.as_ref(), Ty::Con(c) if c.name.as_str() == "IO") {
+            return None;
+        }
+        let Ty::App(either_e, _) = either_ty.as_ref() else {
+            return None;
+        };
+        let Ty::App(either, exception) = either_e.as_ref() else {
+            return None;
+        };
+        matches!(either.as_ref(), Ty::Con(c) if c.name.as_str() == "Either")
+            .then_some(exception.as_ref())
+    }
+
+    /// The RTS exception tag for handling exceptions of type `ty`: 1 for
+    /// `IOException`, 2 for `ErrorCall`, 3 for `SomeException` (everything, kept
+    /// whole so it can be shown) and 0 for anything else (everything, unwrapped).
+    fn exception_tag_of_ty(ty: &Ty) -> u64 {
+        match ty {
+            Ty::Con(c) if matches!(c.name.as_str(), "IOException" | "IOError") => 1,
+            Ty::Con(c) if c.name.as_str() == "ErrorCall" => 2,
+            Ty::Con(c) if c.name.as_str() == "SomeException" => 3,
+            _ => 0,
+        }
+    }
+
+    /// Whether `ty` is an exception type whose values are RTS exception objects,
+    /// so that `bhc_show_exception` reads them.
+    fn is_exception_object_ty(ty: &Ty) -> bool {
+        Self::exception_tag_of_ty(ty) != 0
+    }
+
     /// Infer the exception type tag from the handler expression's parameter type.
     ///
     /// Returns 0 (catch-all) for most cases, 1 for IOException, 2 for ErrorCall.
@@ -16186,6 +16257,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     1 // EXC_TAG_IO_EXCEPTION
                 } else if ty_name.contains("ErrorCall") {
                     2 // EXC_TAG_ERROR_CALL
+                } else if ty_name.contains("SomeException") {
+                    3 // EXC_TAG_WHOLE_EXCEPTION
                 } else {
                     0 // EXC_TAG_SOME_EXCEPTION (catch-all)
                 }
@@ -16278,6 +16351,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result.into()))
     }
 
+    /// Whether `expr` is a call of `userError`.
+    fn is_user_error_call(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::App(f, _, _)
+                if matches!(f.as_ref(), Expr::Var(v, _) if v.name.as_str() == "userError")
+        )
+    }
+
     /// Lower `userError` - create an IOException from a String.
     fn lower_builtin_user_error(
         &mut self,
@@ -16288,8 +16370,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("userError: no value".to_string()))?;
         let msg_ptr = self.value_to_ptr(msg_val)?;
 
-        // Convert char list to C-string
+        // Convert char list to C-string, as `show` will print it
         let cstr_ptr = self.char_list_to_cstring(msg_ptr)?;
+        let wrap_fn = match self.module.get_function("bhc_user_error_text") {
+            Some(function) => function,
+            None => {
+                let ptr_type = self.type_mapper().ptr_type();
+                let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+                self.module.add_function("bhc_user_error_text", fn_type)
+            }
+        };
+        let cstr_ptr = self
+            .builder()
+            .build_call(wrap_fn, &[cstr_ptr.into()], "user_error_text")
+            .map_err(|e| CodegenError::Internal(format!("userError failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("userError: returned void".to_string()))?;
 
         // Create IOException (tag 1)
         let make_exc_fn = self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
@@ -16361,6 +16458,86 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("try: returned void".to_string()))?;
         Ok(Some(result))
+    }
+
+    /// Lower `bracket_ before after body`: `before >> (body `finally` after)`.
+    /// If `before` throws, neither of the others runs.
+    fn lower_builtin_bracket_(
+        &mut self,
+        before: &Expr,
+        after: &Expr,
+        body: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if crate::io_closure_mode() {
+            self.lower_io_run(before)?;
+        } else {
+            self.lower_expr(before)?;
+        }
+        self.emit_io_exn_guard()?;
+        self.lower_builtin_finally(body, after)
+    }
+
+    /// Lower `evaluate x`: force `x` when the action runs, so that a thrown
+    /// `error` is raised here, inside any enclosing `try` or `catch`.
+    fn lower_builtin_evaluate(
+        &mut self,
+        value: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let lowered = self
+            .lower_expr(value)?
+            .ok_or_else(|| CodegenError::Internal("evaluate: no value".to_string()))?;
+        // A scalar in a pointer cannot be told from a thunk at a polymorphic
+        // type (#64), so only force what is known to be a heap value.
+        let forced = if self.is_known_heap_expr(value) {
+            self.build_force(lowered)?
+        } else {
+            lowered
+        };
+        Ok(Some(forced))
+    }
+
+    /// Whether `expr` evaluates to a heap object or a thunk of one, by its type.
+    fn is_known_heap_expr(&self, expr: &Expr) -> bool {
+        match expr.ty() {
+            Ty::List(_) | Ty::Tuple(_) => true,
+            Ty::Con(c) => !matches!(
+                c.name.as_str(),
+                "Int" | "Double" | "Float" | "Char" | "Word" | "Bool"
+            ),
+            Ty::App(..) => true,
+            _ => false,
+        }
+    }
+
+    /// Lower `x <$ m`, for a functor without a `<$` of its own: it is
+    /// `fmap (const x) m`, and `fmap` knows every builtin functor.
+    fn lower_builtin_replace(
+        &mut self,
+        value: &Expr,
+        functor: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let span = bhc_span::Span::default();
+        let fmap = Var {
+            name: Symbol::intern("fmap"),
+            id: VarId::new(usize::MAX - 41),
+            ty: Ty::Error,
+        };
+        let ignored = Var {
+            name: Symbol::intern("_replaced"),
+            id: VarId::new(usize::MAX - 42),
+            ty: Ty::Error,
+        };
+        let constant = Expr::Lam(ignored, Box::new(value.clone()), span);
+        let applied = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::Var(fmap, span)),
+                Box::new(constant),
+                span,
+            )),
+            Box::new(functor.clone()),
+            span,
+        );
+        self.lower_expr(&applied)
     }
 
     /// Lower `bracket` - acquire/use/release with exception safety.
@@ -16971,6 +17148,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         val_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if matches!(&self.current_builtin_ty, Ty::Fun(a, _) if Self::is_exception_object_ty(a)) {
+            let display = Var {
+                name: Symbol::intern("displayException"),
+                id: VarId::new(usize::MAX - 43),
+                ty: Ty::Error,
+            };
+            let text = Expr::App(
+                Box::new(Expr::Var(display, bhc_span::Span::default())),
+                Box::new(val_expr.clone()),
+                bhc_span::Span::default(),
+            );
+            return self.lower_builtin_put_str_ln(&text);
+        }
+        // `()` has no heap object to read, so it is printed from its type.
+        if matches!(&self.current_builtin_ty, Ty::Fun(a, _)
+            if matches!(a.as_ref(), Ty::Tuple(items) if items.is_empty()))
+        {
+            self.lower_expr(val_expr)?;
+            let text = Expr::Lit(
+                Literal::String(Symbol::intern("()")),
+                Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Char"),
+                    bhc_types::Kind::Star,
+                )))),
+                bhc_span::Span::default(),
+            );
+            return self.lower_builtin_put_str_ln(&text);
+        }
         // Get the type of the expression to decide how to print. For a bare
         // pattern-bound variable whose type is erased, recover the constructor
         // field type recorded at case-binding so a non-Int field (e.g. Bool)
@@ -29261,6 +29466,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     fn lower_builtin_show(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if matches!(&self.current_builtin_ty, Ty::Fun(a, _) if Self::is_exception_object_ty(a)) {
+            return self.lower_builtin_display_exception(expr);
+        }
         // The type checker's resolved argument type, when hir-to-core recorded
         // a ground one on this `show`, beats the expression's own (often
         // erased or approximate) type.
@@ -63247,6 +63455,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "tryIOError" => Some(1),
         "catchIOError" => Some(2),
         "bracket" => Some(3),
+        "bracket_" => Some(3),
+        "evaluate" => Some(1),
+        "<$" => Some(2),
         "finally" | "onException" => Some(2),
         "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
         "getMaskingState" => Some(0),

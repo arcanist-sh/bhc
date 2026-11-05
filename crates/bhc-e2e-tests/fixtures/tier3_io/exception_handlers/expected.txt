@@ -1,0 +1,14 @@
+caught user error (a)
+handled user error (b)
+1
+body
+user error (c)
+acq
+rel
+2
+b1
+b2
+b3
+on-exc
+user error (d)
+5

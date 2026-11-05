@@ -8037,6 +8037,27 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     return hir::Expr::App(Box::new(fmapped), Box::new(action_core), *span);
                 }
             }
+            // `f >=> g` IS `\x -> f x >>= g`, and `<=<` is the same flipped. The
+            // lambda's parameter is spelled so no source name can capture it.
+            if matches!(op.name.as_str(), ">=>" | "<=<") && operator_is_builtin(ctx, op.name) {
+                let (first, second) = if op.name.as_str() == ">=>" {
+                    (lhs, rhs)
+                } else {
+                    (rhs, lhs)
+                };
+                let param = bhc_intern::Ident::new(Symbol::intern("kleisli$arg"));
+                let call_first =
+                    ast::Expr::App(first.clone(), Box::new(ast::Expr::Var(param, *span)), *span);
+                let bind = ast::Expr::Infix(
+                    Box::new(call_first),
+                    bhc_intern::Ident::new(Symbol::intern(">>=")),
+                    second.clone(),
+                    *span,
+                );
+                let lambda =
+                    ast::Expr::Lam(vec![ast::Pat::Var(param, *span)], Box::new(bind), *span);
+                return lower_expr(ctx, &lambda);
+            }
             if matches!(op.name.as_str(), "$" | "$!") && operator_is_builtin(ctx, op.name) {
                 let f = lower_expr(ctx, lhs);
                 let a = lower_expr(ctx, rhs);

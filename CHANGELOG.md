@@ -6,6 +6,17 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Control.Concurrent` runs on native code: `forkIO`, `killThread`,
+  `threadDelay`, `myThreadId`, `MVar` and `Chan` operations. Threads take turns:
+  one runs until it blocks, sleeps or ends, so a thread that never blocks starves
+  the others. When every thread is blocked, the program reports `thread blocked
+  indefinitely in an MVar operation` and exits with status 1. `killThread` does
+  not run the killed thread's `finally` handlers, and `throwTo` still aborts. The
+  eager IO model and WebAssembly still warn at compile time and abort at run
+  time (#38).
+
 ### Changed
 
 - The closure IO model is now the default for native code: `IO` is an ordinary
@@ -22,6 +33,10 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `forever` runs its body under the closure IO model, and a thrown exception ends
+  it.
+- Under the closure IO model, a thrown exception stops the rest of a `do` block:
+  an action after the throw, such as `writeIORef`, no longer runs.
 - `bhc check` finds the transformer library modules a program imports.
 
 - WebAssembly: `IO` functions used as values run. `m >>= k` with a

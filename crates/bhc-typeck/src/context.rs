@@ -214,6 +214,22 @@ fn alpha_key(scheme: &Scheme) -> String {
     out
 }
 
+/// `IO ty`.
+fn io_of(ctx: &TyCtxt, ty: Ty) -> Ty {
+    Ty::App(Box::new(Ty::Con(ctx.builtins.io_con.clone())), Box::new(ty))
+}
+
+/// `name a`, for a type constructor of one argument (`MVar a`, `Chan a`).
+fn unary_con(name: &str, a: &TyVar) -> Ty {
+    Ty::App(
+        Box::new(Ty::Con(TyCon::new(
+            Symbol::intern(name),
+            Kind::star_to_star(),
+        ))),
+        Box::new(Ty::Var(a.clone())),
+    )
+}
+
 impl TyCtxt {
     /// Create a new type checking context for the given file.
     #[must_use]
@@ -3684,6 +3700,126 @@ impl TyCtxt {
                     );
                     Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(io_a, io_b))
                 }
+                // forkOS :: IO () -> IO ThreadId, like `forkIO`
+                "forkOS" => {
+                    let io_a = io_of(self, Ty::Var(a.clone()));
+                    let thread = Ty::Con(TyCon::new(Symbol::intern("ThreadId"), Kind::Star));
+                    let io_thread = io_of(self, thread);
+                    Scheme::poly(vec![a.clone()], Ty::fun(io_a, io_thread))
+                }
+                // myThreadId :: IO ThreadId
+                "myThreadId" => {
+                    let thread = Ty::Con(TyCon::new(Symbol::intern("ThreadId"), Kind::Star));
+                    Scheme::mono(io_of(self, thread))
+                }
+                // killThread :: ThreadId -> IO ()
+                "killThread" => {
+                    let thread = Ty::Con(TyCon::new(Symbol::intern("ThreadId"), Kind::Star));
+                    Scheme::mono(Ty::fun(thread, io_of(self, Ty::unit())))
+                }
+                // newEmptyMVar :: IO (MVar a)
+                "newEmptyMVar" => {
+                    Scheme::poly(vec![a.clone()], io_of(self, unary_con("MVar", &a)))
+                }
+                // newMVar :: a -> IO (MVar a)
+                "newMVar" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), io_of(self, unary_con("MVar", &a))),
+                ),
+                // takeMVar, readMVar :: MVar a -> IO a
+                "takeMVar" | "readMVar" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(unary_con("MVar", &a), io_of(self, Ty::Var(a.clone()))),
+                ),
+                // putMVar :: MVar a -> a -> IO ()
+                "putMVar" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        unary_con("MVar", &a),
+                        Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::unit())),
+                    ),
+                ),
+                // swapMVar :: MVar a -> a -> IO a
+                "swapMVar" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        unary_con("MVar", &a),
+                        Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::Var(a.clone()))),
+                    ),
+                ),
+                // tryPutMVar :: MVar a -> a -> IO Bool
+                "tryPutMVar" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        unary_con("MVar", &a),
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            io_of(self, self.builtins.bool_ty.clone()),
+                        ),
+                    ),
+                ),
+                // tryTakeMVar :: MVar a -> IO (Maybe a)
+                "tryTakeMVar" => {
+                    let maybe_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(unary_con("MVar", &a), io_of(self, maybe_a)),
+                    )
+                }
+                // modifyMVar_ :: MVar a -> (a -> IO a) -> IO ()
+                "modifyMVar_" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        unary_con("MVar", &a),
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::Var(a.clone()))),
+                            io_of(self, Ty::unit()),
+                        ),
+                    ),
+                ),
+                // modifyMVar :: MVar a -> (a -> IO (a, b)) -> IO b
+                "modifyMVar" => {
+                    let pair = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(b.clone())]);
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(
+                            unary_con("MVar", &a),
+                            Ty::fun(
+                                Ty::fun(Ty::Var(a.clone()), io_of(self, pair)),
+                                io_of(self, Ty::Var(b.clone())),
+                            ),
+                        ),
+                    )
+                }
+                // withMVar :: MVar a -> (a -> IO b) -> IO b
+                "withMVar" => Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        unary_con("MVar", &a),
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::Var(b.clone()))),
+                            io_of(self, Ty::Var(b.clone())),
+                        ),
+                    ),
+                ),
+                // newChan :: IO (Chan a)
+                "newChan" => Scheme::poly(vec![a.clone()], io_of(self, unary_con("Chan", &a))),
+                // readChan :: Chan a -> IO a
+                "readChan" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(unary_con("Chan", &a), io_of(self, Ty::Var(a.clone()))),
+                ),
+                // writeChan :: Chan a -> a -> IO ()
+                "writeChan" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        unary_con("Chan", &a),
+                        Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::unit())),
+                    ),
+                ),
                 // threadDelay :: Int -> IO ()
                 "threadDelay" => {
                     let io_unit = Ty::App(

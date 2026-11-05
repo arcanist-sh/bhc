@@ -1,0 +1,13 @@
+43
+hello
+7.0
+6
+5500
+11000
+5501!
+5501
+Just 7
+Nothing
+(True,False)
+caught
+9

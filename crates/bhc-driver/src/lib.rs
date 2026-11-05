@@ -6300,6 +6300,7 @@ impl Compiler {
             "Control.Applicative",
             "Control.Exception",
             "Control.Concurrent",
+            "Control.Concurrent.Chan",
             "Control.Concurrent.MVar",
             "Control.Concurrent.STM",
             "Control.DeepSeq",

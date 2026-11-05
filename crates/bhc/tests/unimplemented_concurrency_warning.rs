@@ -1,10 +1,12 @@
-//! Using a `Control.Concurrent` primitive warns at compile time (#38).
+//! Using a concurrency primitive that would abort at run time warns at compile
+//! time (#38).
 //!
-//! Threads, `MVar`s and `Chan`s type-check but are not wired to the runtime
-//! scheduler, so a call aborts at run time. Lowering reports each one used,
-//! once per name, as `LowerWarning::NotImplemented`. It stays a warning: a
-//! module that merely mentions them (pandoc's `Text.Pandoc.Process`) must
-//! still compile. A user's own function of the same name is not flagged.
+//! Lowering reports each one used, once per name, as
+//! `LowerWarning::NotImplemented`. It stays a warning: a module that merely
+//! mentions them (pandoc's `Text.Pandoc.Process`) must still compile. Threads,
+//! `MVar`s and `Chan`s run under the closure IO model, so they warn only under
+//! the eager model; `throwTo` warns under both. A user's own function of the
+//! same name is not flagged.
 
 use bhc_lower::{LowerConfig, LowerContext, LowerWarning};
 use bhc_parser::parse_module;
@@ -36,6 +38,16 @@ fn not_implemented_warnings(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// The warnings expected for `names`: only `throwTo` under the closure model.
+fn expected<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    let eager = std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager");
+    names
+        .iter()
+        .copied()
+        .filter(|name| eager || *name == "throwTo")
+        .collect()
+}
+
 #[test]
 fn concurrency_primitives_warn_once_each() {
     let names = not_implemented_warnings(concat!(
@@ -43,10 +55,15 @@ fn concurrency_primitives_warn_once_each() {
         "main = do\n",
         "  mv <- newEmptyMVar\n",
         "  _ <- forkIO (putMVar mv (42 :: Int))\n",
-        "  _ <- forkIO (putMVar mv 43)\n",
+        "  t <- forkIO (putMVar mv 43)\n",
+        "  throwTo t (userError \"x\")\n",
+        "  throwTo t (userError \"y\")\n",
         "  takeMVar mv >>= print\n",
     ));
-    assert_eq!(names, ["newEmptyMVar", "forkIO", "putMVar", "takeMVar"]);
+    assert_eq!(
+        names,
+        expected(&["newEmptyMVar", "forkIO", "putMVar", "throwTo", "takeMVar"])
+    );
 }
 
 #[test]
@@ -55,7 +72,7 @@ fn qualified_concurrency_primitives_warn() {
         "import qualified Control.Concurrent.MVar as MV\n",
         "main = MV.newEmptyMVar >>= \\v -> MV.putMVar v (1 :: Int)\n",
     ));
-    assert_eq!(names, ["newEmptyMVar", "putMVar"]);
+    assert_eq!(names, expected(&["newEmptyMVar", "putMVar"]));
 }
 
 #[test]

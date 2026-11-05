@@ -70,10 +70,11 @@ impl DefKind {
     }
 }
 
-/// Builtins that type-check but abort at run time: `Control.Concurrent`'s
-/// threads, `MVar`s and `Chan`s are not wired to the runtime scheduler yet
-/// (#38). Using one is a warning rather than an error, so a module that only
-/// mentions them (pandoc's `Text.Pandoc.Process`) still compiles.
+/// Builtins that type-check but abort at run time. Threads, `MVar`s and `Chan`s
+/// run only under the closure IO model, so the eager model (and with it
+/// WebAssembly) reports them all (#38). Using one is a warning rather than an
+/// error, so a module that merely mentions them (pandoc's `Text.Pandoc.Process`)
+/// still compiles.
 const UNIMPLEMENTED_BUILTINS: &[&str] = &[
     "forkIO",
     "forkOS",
@@ -96,6 +97,9 @@ const UNIMPLEMENTED_BUILTINS: &[&str] = &[
     "readChan",
     "writeChan",
 ];
+
+/// The [`UNIMPLEMENTED_BUILTINS`] that abort under the closure IO model too.
+const UNIMPLEMENTED_UNDER_CLOSURE: &[&str] = &["throwTo"];
 
 /// Every builtin definition has a DefId below this; the first user or
 /// imported definition is allocated at it (see `define_builtins`).
@@ -825,6 +829,13 @@ impl LowerContext {
             "modifyMVar",
             "modifyMVar_",
             "withMVar",
+            "swapMVar",
+            "tryTakeMVar",
+            "tryPutMVar",
+            "forkOS",
+            "newChan",
+            "readChan",
+            "writeChan",
             "newIORef",
             "readIORef",
             "writeIORef",
@@ -2563,6 +2574,9 @@ impl LowerContext {
             return;
         }
         for name in UNIMPLEMENTED_BUILTINS {
+            if bhc_types::io_closure_mode() && !UNIMPLEMENTED_UNDER_CLOSURE.contains(name) {
+                continue;
+            }
             for spelled in [(*name).to_string(), format!("{qualifier}.{name}")] {
                 if let Some(id) = self.lookup_value(Symbol::intern(&spelled)) {
                     self.unimplemented_defs.insert(id);

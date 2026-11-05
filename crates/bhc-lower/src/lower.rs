@@ -977,6 +977,7 @@ fn register_standard_module_exports(
             "readChan",
             "writeChan",
         ],
+        "Control.Concurrent.Chan" => &["Chan", "newChan", "readChan", "writeChan"],
         "Control.Concurrent.MVar" => &[
             "MVar",
             "newMVar",
@@ -987,6 +988,9 @@ fn register_standard_module_exports(
             "modifyMVar",
             "modifyMVar_",
             "withMVar",
+            "tryTakeMVar",
+            "tryPutMVar",
+            "swapMVar",
         ],
         "Data.Foldable" => &[
             "fold",

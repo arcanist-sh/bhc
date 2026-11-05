@@ -3085,6 +3085,29 @@ fn bhc_exception_pending() -> bool {
     BHC_EXCEPTION.with(|cell| cell.get().is_some())
 }
 
+/// Whether a Haskell exception is pending on this thread, for the concurrency
+/// primitives, which must not block while one propagates.
+pub(crate) fn exception_pending() -> bool {
+    bhc_exception_pending()
+}
+
+/// End a forked thread's pending exception: report it on stderr and clear it.
+/// Unlike [`bhc_handle_uncaught_exception`], the program keeps running.
+pub(crate) fn report_thread_exception() {
+    let Some(exc) = BHC_EXCEPTION.with(|cell| cell.replace(None)) else {
+        return;
+    };
+    let msg_ptr = bhc_show_exception(exc);
+    if msg_ptr.is_null() {
+        eprintln!("<<exception>>");
+    } else {
+        eprintln!(
+            "{}",
+            unsafe { CStr::from_ptr(msg_ptr as *const c_char) }.to_string_lossy()
+        );
+    }
+}
+
 /// C-ABI probe for compiled code: 1 if a Haskell exception is pending
 /// (thrown and not yet caught), else 0. Codegen emits this check at
 /// IO-bind boundaries so a thrown sentinel short-circuits the rest of a

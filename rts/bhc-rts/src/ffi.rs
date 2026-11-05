@@ -3097,12 +3097,13 @@ pub(crate) fn report_thread_exception() {
     let Some(exc) = BHC_EXCEPTION.with(|cell| cell.replace(None)) else {
         return;
     };
+    let program = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
     let msg_ptr = bhc_show_exception(exc);
     if msg_ptr.is_null() {
-        eprintln!("<<exception>>");
+        eprintln!("{program}: <<exception>>");
     } else {
         eprintln!(
-            "{}",
+            "{program}: {}",
             unsafe { CStr::from_ptr(msg_ptr as *const c_char) }.to_string_lossy()
         );
     }
@@ -3135,6 +3136,31 @@ const EXC_TAG_SOME_EXCEPTION: i64 = 0;
 const EXC_TAG_IO_EXCEPTION: i64 = 1;
 /// Exception type tag for ErrorCall.
 const EXC_TAG_ERROR_CALL: i64 = 2;
+/// A handler for `SomeException`: catches everything, and is given the whole
+/// exception object, which `show` can read whatever was thrown.
+const EXC_TAG_WHOLE_EXCEPTION: i64 = 3;
+
+/// The value a handler or `Left` receives for `exc`. An `IOException` or
+/// `ErrorCall` is the exception object itself, so it can be shown and rethrown;
+/// any other thrown value is unwrapped to what was thrown.
+fn exception_value(exc: *mut u8, type_tag: i64) -> *mut u8 {
+    let tag = bhc_exc_get_tag(exc);
+    if type_tag == EXC_TAG_WHOLE_EXCEPTION
+        || tag == EXC_TAG_IO_EXCEPTION
+        || tag == EXC_TAG_ERROR_CALL
+    {
+        exc
+    } else {
+        bhc_exc_get_payload(exc)
+    }
+}
+
+/// Whether a handler for `type_tag` catches `exc`.
+fn exception_matches(exc: *mut u8, type_tag: i64) -> bool {
+    type_tag == EXC_TAG_SOME_EXCEPTION
+        || type_tag == EXC_TAG_WHOLE_EXCEPTION
+        || bhc_exc_get_tag(exc) == type_tag
+}
 
 /// Allocate a SomeException struct with the given type tag and payload.
 ///
@@ -3160,6 +3186,19 @@ pub extern "C" fn bhc_make_some_exception(type_tag: i64, payload: *mut u8) -> *m
         *(ptr.add(8) as *mut *mut u8) = payload;
     }
     ptr
+}
+
+/// The text of `userError msg`, as GHC shows it: `user error (msg)`.
+///
+/// # Safety
+///
+/// `msg` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_user_error_text(msg: *const c_char) -> *mut u8 {
+    let msg = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
+    CString::new(format!("user error ({msg})"))
+        .map(|text| text.into_raw() as *mut u8)
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Get the type tag from a SomeException pointer.
@@ -3264,7 +3303,8 @@ pub extern "C" fn bhc_handle_uncaught_exception() {
                 .unwrap_or("<invalid utf8>")
                 .to_string()
         };
-        eprintln!("{}", msg);
+        let program = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
+        eprintln!("{program}: {msg}");
         bhc_shutdown();
         std::process::exit(1);
     }
@@ -3307,12 +3347,8 @@ pub extern "C" fn bhc_catch_typed(
     match thrown {
         Some(exc_ptr) => {
             // Get the tag of the thrown exception
-            let exc_tag = bhc_exc_get_tag(exc_ptr);
-            let payload = bhc_exc_get_payload(exc_ptr);
-
-            if type_tag == EXC_TAG_SOME_EXCEPTION || exc_tag == type_tag {
-                // Tag matches (or catch-all) — invoke handler with payload
-                handler_fn(handler_env, payload)
+            if exception_matches(exc_ptr, type_tag) {
+                handler_fn(handler_env, exception_value(exc_ptr, type_tag))
             } else {
                 // Tag doesn't match — re-throw the exception
                 BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
@@ -3359,8 +3395,8 @@ pub extern "C" fn bhc_try_typed(
     let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
     match thrown {
         Some(exc_ptr) => {
-            if type_tag == EXC_TAG_SOME_EXCEPTION || bhc_exc_get_tag(exc_ptr) == type_tag {
-                unsafe { alloc_con1(0, bhc_exc_get_payload(exc_ptr)) }
+            if exception_matches(exc_ptr, type_tag) {
+                unsafe { alloc_con1(0, exception_value(exc_ptr, type_tag)) }
             } else {
                 BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
                 BHC_EXCEPTION_SENTINEL
@@ -5883,8 +5919,9 @@ mod tests {
             let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, 88usize as *mut u8);
             bhc_throw(exc)
         }
+        // An `IOException` reaches its handler whole, so it can be shown.
         extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
-            exc
+            bhc_exc_get_payload(exc)
         }
         // Catch IOException — should match
         let result = bhc_catch_typed(
@@ -5926,8 +5963,9 @@ mod tests {
             let exc = bhc_make_some_exception(EXC_TAG_ERROR_CALL, 55usize as *mut u8);
             bhc_throw(exc)
         }
+        // An `ErrorCall` reaches its handler whole, so it can be shown.
         extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
-            exc
+            bhc_exc_get_payload(exc)
         }
         // Catch all (tag=0) — should match any exception type
         let result = bhc_catch_typed(

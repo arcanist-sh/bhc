@@ -2426,3 +2426,23 @@ fn test_tier3_forever_exception_native() {
     }
     run_native_test("tier3_io/forever_exception", Profile::Default);
 }
+
+#[test]
+fn test_tier3_exception_try_native() {
+    run_native_test("tier3_io/exception_try", Profile::Default);
+}
+
+#[test]
+fn test_tier3_exception_handlers_native() {
+    run_native_test("tier3_io/exception_handlers", Profile::Default);
+}
+
+#[test]
+fn test_tier3_functor_replace_kleisli_native() {
+    run_native_test("tier3_io/functor_replace_kleisli", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monadic_list_results_native() {
+    run_native_test("tier3_io/monadic_list_results", Profile::Default);
+}

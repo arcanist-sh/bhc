@@ -579,10 +579,15 @@ fn test_tier3_derive_read_wasm() {
 // Derived Traversable: traverse/mapM reduce to the derived Functor (fmap)/map
 // in the eager IO model — the effect runs as each element is evaluated.
 #[test]
-#[ignore = "wasm: an IO function passed as an argument does not run, which the \
-            generated derived traversals (#53) rely on (#68)"]
 fn test_tier3_derive_traversable_wasm() {
     run_wasm_test("tier3_io/derive_traversable", Profile::Default);
+}
+
+// IO functions as values: a builtin as `>>=`'s continuation, a top-level IO
+// function passed to a higher-order one, an inlined parameter applied (#68).
+#[test]
+fn test_tier3_io_function_values_wasm() {
+    run_wasm_test("tier3_io/io_function_values", Profile::Default);
 }
 
 // Derived Generic + Control.DeepSeq: force/id are identities and seq/deepseq

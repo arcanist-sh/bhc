@@ -1020,7 +1020,7 @@ pub fn emit_matmul_swap_suggestion(
 }
 
 /// Pretty-print a type.
-fn pretty_ty(ty: &Ty) -> String {
+pub(crate) fn pretty_ty(ty: &Ty) -> String {
     match ty {
         Ty::Var(v) => pretty_tyvar(v),
         Ty::Con(c) => c.name.as_str().to_string(),

@@ -457,7 +457,7 @@ fn test_tier3_system_env_io_native() {
 /// `StateT` loses the error value in the handler, a separate known gap.
 #[test]
 fn test_tier3_monad_error_statet_newtype_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/monad_error_statet_newtype", Profile::Default);
@@ -482,7 +482,7 @@ fn test_tier3_text_concat_map_native() {
 /// `fmap` cannot see the container inside a generic instance.
 #[test]
 fn test_tier3_traversable_instance_fmap_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/traversable_instance_fmap", Profile::Default);
@@ -507,7 +507,7 @@ fn test_tier3_integer_conversions_native() {
 /// list comparison need.
 #[test]
 fn test_tier3_list_difference_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/list_difference", Profile::Default);
@@ -517,7 +517,7 @@ fn test_tier3_list_difference_native() {
 /// class argument is fixed only by a functional dependency.
 #[test]
 fn test_tier3_constrained_fn_composed_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/constrained_fn_composed", Profile::Default);
@@ -527,7 +527,7 @@ fn test_tier3_constrained_fn_composed_native() {
 /// State cannot dispatch a method of a class generic in the state.
 #[test]
 fn test_tier3_monadstate_generic_state_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/monadstate_generic_state", Profile::Default);
@@ -537,7 +537,7 @@ fn test_tier3_monadstate_generic_state_native() {
 /// comparison needs.
 #[test]
 fn test_tier3_list_eq_by_contents_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/list_eq_by_contents", Profile::Default);
@@ -677,7 +677,7 @@ fn test_tier3_instance_context_hop_native() {
 /// transformer over a polymorphic inner monad at all.
 #[test]
 fn test_tier3_fundep_reader_list_env_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/fundep_reader_list_env", Profile::Default);
@@ -687,7 +687,7 @@ fn test_tier3_fundep_reader_list_env_native() {
 /// transformer over a polymorphic inner monad at all.
 #[test]
 fn test_tier3_instance_context_bind_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/instance_context_bind", Profile::Default);
@@ -697,7 +697,7 @@ fn test_tier3_instance_context_bind_native() {
 /// value-class variables.
 #[test]
 fn test_tier3_local_value_class_mono_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/local_value_class_mono", Profile::Default);
@@ -712,7 +712,7 @@ fn test_tier3_foreign_import_io_native() {
 /// operators, so an Integer pattern field cannot be told from an Int.
 #[test]
 fn test_tier3_numeric_typing_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/numeric_typing", Profile::Default);
@@ -1430,7 +1430,7 @@ fn test_tier2_layout_explicit_semicolons() {
 /// value (`fmap sequence . mapM f`) at all.
 #[test]
 fn test_tier2_nested_sequence_future() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier2_functions/nested_sequence_future", Profile::Default);
@@ -1440,7 +1440,7 @@ fn test_tier2_nested_sequence_future() {
 /// the rewrite keys on, so the combinators still stub there.
 #[test]
 fn test_tier2_arrow_function_combinators() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test(
@@ -1692,7 +1692,7 @@ fn test_tier2_nested_where_multiclause() {
 /// value (`map totalWidth cells`) at all.
 #[test]
 fn test_tier2_let_alias_class_arg() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier2_functions/let_alias_class_arg", Profile::Default);
@@ -2368,13 +2368,27 @@ fn test_tier3_user_foldable_consumers() {
 // dictionary, and the eager model does not pass monad-family dictionaries.
 #[test]
 fn test_tier3_hand_written_traversable() {
-    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/hand_written_traversable", Profile::Default);
 }
 
+// IO functions used as values (#68; the same fixture runs under WASM).
+#[test]
+fn test_tier3_io_function_values() {
+    run_native_test("tier3_io/io_function_values", Profile::Default);
+}
+
 #[test]
 fn test_tier3_polymorphic_monad_traverse() {
     run_native_test("tier3_io/polymorphic_monad_traverse", Profile::Default);
+}
+
+#[test]
+fn test_tier3_transformer_lift_run_except_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/transformer_lift_run_except", Profile::Default);
 }

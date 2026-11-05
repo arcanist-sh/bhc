@@ -64,18 +64,40 @@ pub use dyn_tensor::{dyn_tensor_of, dyn_tensor_tycon, shape_witness_of, shape_wi
 pub use nat::TyNat;
 pub use ty_list::TyList;
 
-/// Whether the closure IO model is enabled (`BHC_IO_MODEL=closure`).
+/// The IO model, fixed once per process; see [`io_closure_mode`].
+static IO_CLOSURE_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The IO model asked for in the environment: `BHC_IO_MODEL=eager` or
+/// `=closure`, `None` when unset (or unrecognised).
+fn io_model_from_env() -> Option<bool> {
+    match std::env::var("BHC_IO_MODEL").as_deref() {
+        Ok("closure") => Some(true),
+        Ok("eager") => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the closure IO model is in force: the default for native code.
 ///
 /// Under it an `IO a` value is an action closure that performs its effects
 /// only when run, and the monad transformers are the ordinary Haskell library
 /// in `stdlib/bhc-transformers/hs` instead of compiler builtins
-/// (spec/BHC-BRIEF-0005, Phases 0-3). The default model performs an IO
-/// expression's effects when it is evaluated. Every compiler stage reads this
-/// one switch so they cannot disagree.
+/// (spec/BHC-BRIEF-0005). The eager model (`BHC_IO_MODEL=eager`, and the
+/// default for WebAssembly, see [`select_io_model_for_target`]) performs an
+/// IO expression's effects when it is evaluated. Every compiler stage reads
+/// this one switch so they cannot disagree.
 #[must_use]
 pub fn io_closure_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
+    *IO_CLOSURE_MODE.get_or_init(|| io_model_from_env().unwrap_or(true))
+}
+
+/// Fix the IO model for a compilation to `target_triple` before any stage
+/// asks for it. `BHC_IO_MODEL` wins; otherwise WebAssembly targets use the
+/// eager model, whose monad rewrite the WASM backend is built on, and every
+/// other target the closure model. A no-op once the model has been read.
+pub fn select_io_model_for_target(target_triple: Option<&str>) {
+    let wasm = target_triple.is_some_and(|t| t.contains("wasm"));
+    let _ = IO_CLOSURE_MODE.set(io_model_from_env().unwrap_or(!wasm));
 }
 
 /// Every type, constructor, class and value that `stdlib/bhc-transformers/hs`

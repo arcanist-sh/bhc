@@ -73,7 +73,7 @@ pub use kind_check::KindEnv;
 use bhc_diagnostics::Diagnostic;
 use bhc_hir::{DefId, Module};
 use bhc_intern::Symbol;
-use bhc_span::{FileId, Span};
+use bhc_span::{FileId, FullSpan, Span};
 use bhc_types::{Scheme, Ty, TyVar};
 use rustc_hash::FxHashMap;
 
@@ -868,6 +868,46 @@ pub fn type_check_module_with_imports(
     } else {
         Ok(ctx.into_typed_module(hir.clone()))
     }
+}
+
+/// The error for a program whose `main` is not an `IO` action, if it has one.
+///
+/// In module `Main`, `main` must be an `IO` action. Under the closure IO model
+/// the entry point runs it, so `main = 42` crashed at run time instead of being
+/// rejected. Conservative: only a type that is plainly not an action is an
+/// error; a variable, an application or an alias passes.
+///
+/// This is a rule about programs that get compiled and run by their entry
+/// point, so it is separate from type checking: the interpreter and the
+/// playground evaluate `main` and show its value, and `main = 1 + 2` is a
+/// valid input for them.
+#[must_use]
+pub fn main_action_error(typed: &TypedModule, file_id: FileId) -> Option<Diagnostic> {
+    let hir = &typed.hir;
+    if hir.name.as_str() != "Main" {
+        return None;
+    }
+    let def = hir.items.iter().find_map(|item| match item {
+        bhc_hir::Item::Value(def) if def.name.as_str() == "main" => Some(def),
+        _ => None,
+    })?;
+    let ty = &typed.def_schemes.get(&def.id)?.ty;
+    let not_an_action = match ty {
+        Ty::Con(c) => matches!(
+            c.name.as_str(),
+            "Int" | "Integer" | "Double" | "Float" | "Char" | "Bool" | "String" | "Text"
+        ),
+        Ty::List(_) | Ty::Tuple(_) | Ty::Fun(..) => true,
+        _ => false,
+    };
+    not_an_action.then(|| {
+        Diagnostic::error(format!(
+            "`main` must be an `IO` action, but it has type `{}`",
+            diagnostics::pretty_ty(ty)
+        ))
+        .with_code("E0001")
+        .with_label(FullSpan::new(file_id, def.span), "expected `IO t`")
+    })
 }
 
 #[cfg(test)]

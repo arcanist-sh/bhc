@@ -3462,6 +3462,16 @@ impl<'a> WasmLowering<'a> {
                         return Ok(true);
                     }
                 }
+                // Bound to anything else (`f` inlined as a top-level function
+                // like `double`, or another application): call that, with
+                // these arguments. Left as the parameter's name, the head was
+                // neither a local nor a known function and lowered as 0, so
+                // `f a >>= k` inside an inlined `tb f a` never called `f` (#68).
+                if !matches!(&bound, Expr::Var(b, _) if b.id == var.id) {
+                    let app = args.iter().fold(bound, |acc, a| papp(acc, (*a).clone()));
+                    self.lower_expr(&app, instrs, locals, local_count, is_main)?;
+                    return Ok(true);
+                }
                 return Ok(false);
             }
             // A non-recursive top-level function: inline its body.
@@ -4933,10 +4943,13 @@ impl<'a> WasmLowering<'a> {
                     // Evaluate the lambda body
                     self.lower_expr(body, instrs, locals, local_count, is_main)?;
                 } else {
-                    // No lambda — just sequence (drop first result, evaluate second)
-                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
-                    self.lower_expr(args[1], instrs, locals, local_count, is_main)?;
+                    // Not a lambda (`m >>= print`, `f a >>= k` with `k` a
+                    // parameter): bind through `\x -> k x`. Sequencing the two
+                    // dropped the result and never applied `k` (#68).
+                    let x = pv("bind_x", self.fresh_id());
+                    let lam = plam(x.clone(), papp(args[1].clone(), pev(&x)));
+                    let bind = papp(papp(func_expr.clone(), args[0].clone()), lam);
+                    self.lower_expr(&bind, instrs, locals, local_count, is_main)?;
                 }
             }
 
@@ -11309,6 +11322,10 @@ fn operator_arity(name: &str) -> Option<usize> {
             "succ" | "pred" | "negate" | "abs" | "fromEnum" | "toEnum" | "not" | "chr" | "ord" => {
                 Some(1)
             }
+            // IO builtins passed as functions (`m >>= print`, `mapM_
+            // putStrLn`, a traversal's `pure`): unknown as values, they were
+            // lowered as 0 and the call through them trapped (#68).
+            "print" | "putStrLn" | "putStr" | "return" | "pure" => Some(1),
             _ => None,
         },
     }

@@ -418,6 +418,9 @@ impl Compiler {
     ///
     /// Returns an error if the session cannot be created.
     pub fn new(options: Options) -> CompileResult<Self> {
+        // Closure IO model for native code, eager for WebAssembly, unless
+        // `BHC_IO_MODEL` says otherwise.
+        bhc_types::select_io_model_for_target(options.target_triple.as_deref());
         let session = bhc_session::create_session(options)?;
         Ok(Self {
             session,
@@ -482,6 +485,18 @@ impl Compiler {
     ///
     /// Returns an error if parsing, lowering, or type checking fails.
     pub fn check_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<()> {
+        // Imports of the transformers library (closure IO model) are source
+        // the user did not list: check them first, reporting only this file.
+        let library =
+            self.imported_library_modules(std::slice::from_ref(&path.as_ref().to_path_buf()))?;
+        if !library.is_empty() {
+            let target = path.as_ref().to_path_buf();
+            let mut all = library;
+            all.push(target.clone());
+            let report: rustc_hash::FxHashSet<Utf8PathBuf> = std::iter::once(target).collect();
+            let results = self.check_files_ordered_reporting(&all, Some(&report))?;
+            return results.into_iter().next().map_or(Ok(()), |(_, r)| r);
+        }
         let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
         let file_id = FileId::new(0);
 
@@ -495,7 +510,7 @@ impl Compiler {
         let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 3: Type check
-        let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
+        let _typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
 
         Ok(())
     }
@@ -533,7 +548,7 @@ impl Compiler {
         let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 2b: Type check HIR
-        let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+        let typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
         self.callbacks
             .on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
 
@@ -856,7 +871,7 @@ impl Compiler {
         debug!(module = %unit.module_name, items = hir.items.len(), "HIR lowering complete");
 
         // Phase 2b: Type check HIR
-        let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+        let typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
         self.callbacks
             .on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
 
@@ -1492,6 +1507,23 @@ impl Compiler {
                 Err(CompileError::TypeError(diagnostics.len()))
             }
         }
+    }
+
+    /// Type check a module of a program that will be compiled, not interpreted:
+    /// [`type_check`](Self::type_check) plus the rule that `main` is an action.
+    fn type_check_program(
+        &self,
+        hir: &HirModule,
+        file_id: FileId,
+        lower_ctx: &LowerContext,
+    ) -> CompileResult<TypedModule> {
+        let typed = self.type_check(hir, file_id, lower_ctx)?;
+        if let Some(diag) = bhc_typeck::main_action_error(&typed, file_id) {
+            eprintln!("Type errors:");
+            eprintln!("  1: {}", diag.message);
+            return Err(CompileError::TypeError(1));
+        }
+        Ok(typed)
     }
 
     /// Lower HIR to Core IR.
@@ -2261,7 +2293,7 @@ impl Compiler {
         debug!(module = %unit.module_name, items = hir.items.len(), "HIR lowering complete");
 
         // Phase 2b: Type check HIR
-        let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+        let typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
         self.callbacks
             .on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
 
@@ -3226,8 +3258,13 @@ impl Compiler {
             &imported_aliases,
         ) {
             Ok(typed) => {
+                let main_error = bhc_typeck::main_action_error(&typed, file_id);
                 typed_module = Some(typed);
-                None
+                main_error.map(|diag| {
+                    eprintln!("Type errors in {module_name}:");
+                    eprintln!("  1: {}", diag.message);
+                    1
+                })
             }
             Err(diagnostics) => {
                 eprintln!("Type errors in {module_name}:");
@@ -5482,6 +5519,30 @@ impl Compiler {
         }
     }
 
+    /// The transformers library sources (closure IO model) that `paths` import
+    /// and do not list themselves. Empty under `-c`, where they come from a
+    /// package database instead.
+    fn imported_library_modules(&self, paths: &[Utf8PathBuf]) -> CompileResult<Vec<Utf8PathBuf>> {
+        let mut found = Vec::new();
+        if self.session.options.compile_only {
+            return Ok(found);
+        }
+        let Some(lib_dir) = transformer_library_dir() else {
+            return Ok(found);
+        };
+        for path in paths {
+            if path.starts_with(&lib_dir) {
+                continue;
+            }
+            for module in self.discover_modules(path, std::slice::from_ref(&lib_dir))? {
+                if !paths.contains(&module) && !found.contains(&module) {
+                    found.push(module);
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Compile multiple source files in dependency order.
     ///
     /// This method parses all files to extract import dependencies, computes a
@@ -5505,17 +5566,8 @@ impl Compiler {
 
         // The transformers library (closure IO model) is source the user did
         // not list: add the library modules the given files import.
-        if let Some(lib_dir) = transformer_library_dir() {
-            if !self.session.options.compile_only {
-                let given = paths.clone();
-                for path in &given {
-                    for found in self.discover_modules(path, std::slice::from_ref(&lib_dir))? {
-                        if !paths.contains(&found) {
-                            paths.insert(0, found);
-                        }
-                    }
-                }
-            }
+        for found in self.imported_library_modules(&paths)? {
+            paths.insert(0, found);
         }
 
         if paths.len() <= 1 {
@@ -5640,7 +5692,7 @@ impl Compiler {
                     let file_id = FileId::new(0);
                     if let Ok(ast) = self.parse(&unit2, file_id) {
                         let (hir, lower_ctx) = self.lower_with_registry(&ast, &registry)?;
-                        let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+                        let typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
                         let class_params: std::collections::HashMap<String, usize> = lower_ctx
                             .all_class_param_counts()
                             .iter()
@@ -5731,7 +5783,7 @@ impl Compiler {
                 .on_phase_start(CompilePhase::CoreLower, mod_name);
             let ast = self.parse(&unit, file_id)?;
             let (hir, lower_ctx) = self.lower_with_registry(&ast, &registry)?;
-            let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+            let typed = self.type_check_program(&hir, file_id, &lower_ctx)?;
 
             let imported_constructors = self.build_imported_constructor_map(&registry, &lower_ctx);
             let core = self.core_lower_with_constructors(
@@ -6588,6 +6640,19 @@ impl Compiler {
             return Ok(Vec::new());
         }
 
+        // The transformers library modules these files import are checked
+        // with them but never reported.
+        let library = self.imported_library_modules(paths)?;
+        if !library.is_empty() {
+            let report: rustc_hash::FxHashSet<Utf8PathBuf> = match report_only {
+                Some(set) => set.clone(),
+                None => paths.iter().cloned().collect(),
+            };
+            let mut all = library;
+            all.extend_from_slice(paths);
+            return self.check_files_ordered_reporting(&all, Some(&report));
+        }
+
         // Whether a given source path should appear in the reported results.
         let should_report = |p: &Utf8PathBuf| report_only.is_none_or(|s| s.contains(p));
 
@@ -7427,20 +7492,161 @@ const BUNDLED_LIBRARY: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// A directory holding the bundled library sources, written on first use.
-///
-/// Named after a hash of the sources, so a compiler with different sources
-/// never reads stale files, and installed compilers need no source tree.
-fn bundled_library_dir() -> std::io::Result<Utf8PathBuf> {
+/// The transformers library, bundled into the compiler as Haskell source:
+/// `(relative path, source)`. Installed compilers have no source tree, and
+/// under the closure IO model (the native default) these modules are ordinary
+/// library code rather than builtins (spec/BHC-BRIEF-0005).
+const TRANSFORMER_LIBRARY: &[(&str, &str)] = &[
+    (
+        "BHC/Control/Monad/Cont.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Cont.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Except.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Except.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Identity.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Identity.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Maybe.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Maybe.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Reader.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Reader.hs"),
+    ),
+    (
+        "BHC/Control/Monad/RWS.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/RWS.hs"),
+    ),
+    (
+        "BHC/Control/Monad/State.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/State.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Trans.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Trans.hs"),
+    ),
+    (
+        "BHC/Control/Monad/Writer.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/BHC/Control/Monad/Writer.hs"),
+    ),
+    (
+        "Control/Monad/Error/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Error/Class.hs"),
+    ),
+    (
+        "Control/Monad/Except.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Except.hs"),
+    ),
+    (
+        "Control/Monad/Identity.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Identity.hs"),
+    ),
+    (
+        "Control/Monad/IO/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/IO/Class.hs"),
+    ),
+    (
+        "Control/Monad/Reader.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Reader.hs"),
+    ),
+    (
+        "Control/Monad/Reader/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Reader/Class.hs"),
+    ),
+    (
+        "Control/Monad/RWS.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/RWS.hs"),
+    ),
+    (
+        "Control/Monad/RWS/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/RWS/Strict.hs"),
+    ),
+    (
+        "Control/Monad/State.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/State.hs"),
+    ),
+    (
+        "Control/Monad/State/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/State/Class.hs"),
+    ),
+    (
+        "Control/Monad/State/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/State/Strict.hs"),
+    ),
+    (
+        "Control/Monad/Trans.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Class.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Except.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Except.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Maybe.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Maybe.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Reader.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Reader.hs"),
+    ),
+    (
+        "Control/Monad/Trans/RWS/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/RWS/Strict.hs"),
+    ),
+    (
+        "Control/Monad/Trans/State.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/State.hs"),
+    ),
+    (
+        "Control/Monad/Trans/State/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/State/Strict.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Writer.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Writer.hs"),
+    ),
+    (
+        "Control/Monad/Trans/Writer/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Trans/Writer/Strict.hs"),
+    ),
+    (
+        "Control/Monad/Writer.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Writer.hs"),
+    ),
+    (
+        "Control/Monad/Writer/Class.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Writer/Class.hs"),
+    ),
+    (
+        "Control/Monad/Writer/Strict.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Control/Monad/Writer/Strict.hs"),
+    ),
+    (
+        "Data/Functor/Identity.hs",
+        include_str!("../../../stdlib/bhc-transformers/hs/Data/Functor/Identity.hs"),
+    ),
+];
+
+/// Write `sources` (`(relative path, contents)`) under a temp directory named
+/// `prefix` plus a hash of them, and return that directory. A compiler with
+/// different sources never reads stale files, and an existing identical file
+/// is left alone.
+fn materialize_sources(prefix: &str, sources: &[(&str, &str)]) -> std::io::Result<Utf8PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for entry in BUNDLED_LIBRARY {
-        entry.hash(&mut hasher);
-    }
+    sources.hash(&mut hasher);
     let temp = Utf8PathBuf::from_path_buf(std::env::temp_dir())
         .map_err(|p| std::io::Error::other(format!("non-UTF-8 temp dir {}", p.display())))?;
-    let dir = temp.join(format!("bhc-lib-{:016x}", hasher.finish()));
-    for (_, rel, source) in BUNDLED_LIBRARY {
+    let dir = temp.join(format!("{prefix}-{:016x}", hasher.finish()));
+    for (rel, source) in sources {
         let path = dir.join(rel);
         if std::fs::read_to_string(&path).is_ok_and(|s| s == *source) {
             continue;
@@ -7459,12 +7665,19 @@ fn bundled_library_dir() -> std::io::Result<Utf8PathBuf> {
     Ok(dir)
 }
 
+/// A directory holding the bundled library sources, written on first use.
+fn bundled_library_dir() -> std::io::Result<Utf8PathBuf> {
+    let sources: Vec<(&str, &str)> = BUNDLED_LIBRARY
+        .iter()
+        .map(|(_, rel, source)| (*rel, *source))
+        .collect();
+    materialize_sources("bhc-lib", &sources)
+}
+
 /// The directory holding the transformers library sources, when the closure
-/// IO model is on.
-///
-/// `BHC_TRANSFORMERS_PATH` overrides it; otherwise it is the in-tree
-/// `stdlib/bhc-transformers/hs`. Installed compilers do not ship the sources
-/// yet, so outside a checkout the override is required.
+/// IO model is on: `BHC_TRANSFORMERS_PATH`, else the copy bundled into the
+/// compiler. The bundled copy is used in a checkout too, so the test suites
+/// exercise what an installed compiler does.
 fn transformer_library_dir() -> Option<Utf8PathBuf> {
     if !bhc_types::io_closure_mode() {
         return None;
@@ -7472,9 +7685,13 @@ fn transformer_library_dir() -> Option<Utf8PathBuf> {
     if let Ok(p) = std::env::var("BHC_TRANSFORMERS_PATH") {
         return Some(Utf8PathBuf::from(p));
     }
-    let in_tree =
-        Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/bhc-transformers/hs");
-    in_tree.is_dir().then_some(in_tree)
+    match materialize_sources("bhc-transformers", TRANSFORMER_LIBRARY) {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not write the bundled transformers library");
+            None
+        }
+    }
 }
 
 /// Append the transformers library directory (closure IO model only) after
@@ -7591,7 +7808,7 @@ exposed-modules: Data.Text Data.Text.Internal
             .with_callbacks(tracker);
 
         // Compile a simple module
-        let _ = compiler.compile_source("Test", "main = 42");
+        let _ = compiler.compile_source("Test", "module Test where\nmain = 42");
 
         // Get phases from the compiler's callback (we need to access it through the Arc)
         // Since we can't easily get the tracker back, we'll verify the compiler works
@@ -7607,7 +7824,7 @@ exposed-modules: Data.Text Data.Text.Internal
             .unwrap();
 
         // Should compile without running tensor IR phases
-        let result = compiler.compile_source("Test", "main = 42");
+        let result = compiler.compile_source("Test", "module Test where\nmain = 42");
         assert!(
             result.is_ok(),
             "Default profile should compile successfully: {:?}",
@@ -7624,7 +7841,7 @@ exposed-modules: Data.Text Data.Text.Internal
             .unwrap();
 
         // Should compile, running tensor IR and loop IR phases
-        let result = compiler.compile_source("Test", "main = 42");
+        let result = compiler.compile_source("Test", "module Test where\nmain = 42");
         assert!(
             result.is_ok(),
             "Numeric profile should compile successfully"
@@ -7690,7 +7907,7 @@ exposed-modules: Data.Text Data.Text.Internal
             });
 
         // Compile a simple numeric module
-        let result = compiler.compile_source("NumericTest", "main = 42");
+        let result = compiler.compile_source("NumericTest", "module NumericTest where\nmain = 42");
         assert!(
             result.is_ok(),
             "Numeric profile should compile successfully"
@@ -7710,7 +7927,8 @@ exposed-modules: Data.Text Data.Text.Internal
             .unwrap();
 
         // A simple literal that doesn't escape should compile
-        let result = compiler.compile_source("EmbeddedTest", "main = 42");
+        let result =
+            compiler.compile_source("EmbeddedTest", "module EmbeddedTest where\nmain = 42");
         assert!(
             result.is_ok(),
             "Simple literal should compile in Embedded profile"
@@ -7729,7 +7947,8 @@ exposed-modules: Data.Text Data.Text.Internal
         // Note: The exact syntax depends on how the parser/type checker handles this.
         // This test verifies the integration point exists - a more thorough test
         // would require programs that definitively escape.
-        let result = compiler.compile_source("EscapeTest", "main = \\x -> x");
+        let result =
+            compiler.compile_source("EscapeTest", "module EscapeTest where\nmain = \\x -> x");
         // For now, just verify it doesn't panic - actual escape detection depends on
         // more complex programs that create heap allocations.
         assert!(
@@ -7911,8 +8130,7 @@ exposed-modules: Data.Text Data.Text.Internal
             .build()
             .unwrap();
 
-        // Compile main = 42 to an executable
-        let result = compiler.compile_source("Test", "main = 42");
+        let result = compiler.compile_source("Test", "main = pure ()");
         assert!(
             result.is_ok(),
             "Should compile to executable: {:?}",
@@ -7926,9 +8144,8 @@ exposed-modules: Data.Text Data.Text.Internal
             exe_path
         );
 
-        // Run the executable and check exit code.
-        // Haskell semantics: main's value is discarded; the C entry-point
-        // wrapper returns 0 unless exitWith is called.
+        // Run the executable and check exit code: the C entry-point wrapper
+        // returns 0 unless exitWith is called.
         let output = Command::new(&exe_path)
             .output()
             .expect("failed to run executable");

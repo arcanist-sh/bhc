@@ -6,6 +6,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.26] - 2026-11-05
+
+Native code now uses the closure IO model by default, so monad transformers are
+ordinary Haskell and native output matches GHC across the differential suite.
+`Control.Concurrent` runs for the first time, and `try` and exception `show` now
+work.
+
 ### Added
 
 - `Control.Concurrent` runs on native code: `forkIO`, `killThread`,
@@ -22,8 +29,9 @@ All notable changes to BHC are recorded here. The format follows
 - The closure IO model is now the default for native code: `IO` is an ordinary
   action closure and monad transformers are the Haskell library in
   `stdlib/bhc-transformers`, embedded in the compiler so an installed `bhc`
-  finds them. Against GHC on the differential suite, 376 of 376 comparable
-  fixtures now agree, with no known failures. IO-heavy loops run slower (one
+  finds them. Against GHC on the differential suite, all 385 comparable
+  fixtures now agree, with no known failures, and transformer stacks such as
+  `lift get` through `ReaderT` and `runExcept` work (#37). IO-heavy loops run slower (one
   measured loop went from 3.7 s to 6.6 s); pure and list code does not change.
   WebAssembly stays on the eager model, and `BHC_IO_MODEL=eager` selects the old
   path on native. The eager transformer code will be removed in a later release.
@@ -39,9 +47,9 @@ All notable changes to BHC are recorded here. The format follows
 - `show` and `print` of an `IOException`, `ErrorCall` or `SomeException` print its
   text, where they printed an address, and `userError` shows as `user error (…)`.
   An uncaught exception reports `program: message` (#72).
-- `evaluate`, `bracket_`, `>=>`, `<=<` and `<$` at builtin functors work, and `>=>`
-  and `<=<` have their fixity, `infixr 1`. They
-  aborted with `stub: … not implemented` (#71).
+- `evaluate`, `bracket_`, `>=>`, `<=<` and `<$` at builtin functors work, where they
+  aborted with `stub: … not implemented`. `>=>` and `<=<` also have their fixity,
+  `infixr 1` (#71).
 - The results of `zipWithM` and `filterM` print as lists, where they printed an
   address (#73), and `print ()` prints `()`, where it printed an empty line.
 - `forever` runs its body under the closure IO model, and a thrown exception ends
@@ -49,13 +57,23 @@ All notable changes to BHC are recorded here. The format follows
 - Under the closure IO model, a thrown exception stops the rest of a `do` block:
   an action after the throw, such as `writeIORef`, no longer runs.
 - `bhc check` finds the transformer library modules a program imports.
-
 - WebAssembly: `IO` functions used as values run. `m >>= k` with a
   continuation that is not a lambda (`>>= print`) applies it; `print`,
   `putStrLn`, `putStr`, `return` and `pure` can be passed as functions; and
   an inlined function parameter bound to a top-level function is called.
   A traversal over a derived `Traversable` is correct under `--target=wasi`
   again (#68).
+
+### Known issues
+
+- Runtime errors in pure code (`div` by zero, `head []`) abort instead of throwing
+  an exception that `try` or `catch` can see (#76).
+- A polymorphic recursive fold that returns an accumulator used at an unboxed
+  type (`foldT (+) 0 tree`) prints an address (#64).
+- With `BHC_IO_MODEL=eager`, a recursive `Monad m =>` function at `IO` prints an
+  address (#65).
+- Threads take turns, so one that never blocks starves the others; `killThread`
+  does not run handlers, and `throwTo` still aborts (#75).
 
 ## [0.2.25] - 2026-11-03
 
@@ -451,7 +469,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...HEAD
+[0.2.26]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...v0.2.26
 [0.2.25]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...v0.2.25
 [0.2.24]: https://github.com/arcanist-sh/bhc/compare/v0.2.23...v0.2.24
 [0.2.23]: https://github.com/arcanist-sh/bhc/compare/v0.2.22...v0.2.23

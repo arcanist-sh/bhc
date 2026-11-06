@@ -6,6 +6,12 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.27] - 2026-11-06
+
+A correctness release. `div` and `mod` on negative `Int`s gave wrong answers, and
+division by zero gave a garbage number; both are fixed, and runtime errors in pure
+code are now exceptions that `try` and `catch` can see.
+
 ### Fixed
 
 - `div` and `mod` round toward negative infinity. They truncated, so
@@ -19,6 +25,17 @@ All notable changes to BHC are recorded here. The format follows
 - `x % y` at `Integer` reads its operands, where it read their addresses, and a
   zero denominator throws `Ratio has zero denominator`.
 - The `ErrorCall` constructor works, where it aborted as a stub.
+
+### Known issues
+
+- A negated literal under `quot` or `rem` in a tuple annotated `Integer` crashes
+  `print` (#78).
+- A polymorphic recursive fold that returns an accumulator used at an unboxed
+  type (`foldT (+) 0 tree`) prints an address (#64).
+- With `BHC_IO_MODEL=eager`, a recursive `Monad m =>` function at `IO` prints an
+  address (#65).
+- Threads take turns, so one that never blocks starves the others; `killThread`
+  does not run handlers, and `throwTo` still aborts (#75).
 
 ## [0.2.26] - 2026-11-05
 
@@ -483,7 +500,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.27...HEAD
+[0.2.27]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...v0.2.27
 [0.2.26]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...v0.2.26
 [0.2.25]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...v0.2.25
 [0.2.24]: https://github.com/arcanist-sh/bhc/compare/v0.2.23...v0.2.24

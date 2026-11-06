@@ -3,10 +3,9 @@
 //!
 //! Lowering reports each one used, once per name, as
 //! `LowerWarning::NotImplemented`. It stays a warning: a module that merely
-//! mentions them (pandoc's `Text.Pandoc.Process`) must still compile. Threads,
-//! `MVar`s and `Chan`s run under the closure IO model, so they warn only under
-//! the eager model; `throwTo` warns under both. A user's own function of the
-//! same name is not flagged.
+//! mentions them (pandoc's `Text.Pandoc.Process`) must still compile. They all
+//! run under the closure IO model, so they warn only under the eager model. A
+//! user's own function of the same name is not flagged.
 
 use bhc_lower::{LowerConfig, LowerContext, LowerWarning};
 use bhc_parser::parse_module;
@@ -38,14 +37,10 @@ fn not_implemented_warnings(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The warnings expected for `names`: only `throwTo` under the closure model.
+/// The warnings expected for `names`: none under the closure model.
 fn expected<'a>(names: &[&'a str]) -> Vec<&'a str> {
     let eager = std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager");
-    names
-        .iter()
-        .copied()
-        .filter(|name| eager || *name == "throwTo")
-        .collect()
+    names.iter().copied().filter(|_| eager).collect()
 }
 
 #[test]

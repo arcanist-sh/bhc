@@ -3717,6 +3717,17 @@ impl TyCtxt {
                     let thread = Ty::Con(TyCon::new(Symbol::intern("ThreadId"), Kind::Star));
                     Scheme::mono(Ty::fun(thread, io_of(self, Ty::unit())))
                 }
+                // throwTo :: Exception e => ThreadId -> e -> IO ()
+                "throwTo" => {
+                    let thread = Ty::Con(TyCon::new(Symbol::intern("ThreadId"), Kind::Star));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            thread,
+                            Ty::fun(Ty::Var(a.clone()), io_of(self, Ty::unit())),
+                        ),
+                    )
+                }
                 // newEmptyMVar :: IO (MVar a)
                 "newEmptyMVar" => {
                     Scheme::poly(vec![a.clone()], io_of(self, unary_con("MVar", &a)))

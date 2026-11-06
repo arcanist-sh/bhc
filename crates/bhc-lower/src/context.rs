@@ -98,9 +98,6 @@ const UNIMPLEMENTED_BUILTINS: &[&str] = &[
     "writeChan",
 ];
 
-/// The [`UNIMPLEMENTED_BUILTINS`] that abort under the closure IO model too.
-const UNIMPLEMENTED_UNDER_CLOSURE: &[&str] = &["throwTo"];
-
 /// Every builtin definition has a DefId below this; the first user or
 /// imported definition is allocated at it (see `define_builtins`).
 pub const BUILTIN_DEF_LIMIT: usize = 12323;
@@ -2570,13 +2567,11 @@ impl LowerContext {
     /// Record the `UNIMPLEMENTED_BUILTINS` that importing `module` just bound,
     /// bare and under `qualifier`, so their uses warn (#38).
     pub fn mark_unimplemented_imports(&mut self, module: &str, qualifier: &str) {
-        if !module.starts_with("Control.Concurrent") {
+        // They all run under the closure IO model.
+        if !module.starts_with("Control.Concurrent") || bhc_types::io_closure_mode() {
             return;
         }
         for name in UNIMPLEMENTED_BUILTINS {
-            if bhc_types::io_closure_mode() && !UNIMPLEMENTED_UNDER_CLOSURE.contains(name) {
-                continue;
-            }
             for spelled in [(*name).to_string(), format!("{qualifier}.{name}")] {
                 if let Some(id) = self.lookup_value(Symbol::intern(&spelled)) {
                     self.unimplemented_defs.insert(id);

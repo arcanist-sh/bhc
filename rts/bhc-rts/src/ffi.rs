@@ -3110,12 +3110,46 @@ pub(crate) fn exception_pending() -> bool {
     bhc_exception_pending()
 }
 
+/// Raise `exception` in this thread, for `throwTo`. An exception that is
+/// already propagating wins.
+pub(crate) fn raise_async(exception: *mut u8) {
+    if !bhc_exception_pending() {
+        bhc_throw(exception);
+    }
+}
+
+/// A new `ThreadKilled`, which `killThread` throws.
+pub(crate) fn thread_killed() -> *mut u8 {
+    let text = CString::new(THREAD_KILLED_TEXT)
+        .unwrap_or_default()
+        .into_raw() as *mut u8;
+    bhc_make_some_exception(EXC_TAG_ASYNC_EXCEPTION, text)
+}
+
+/// How `ThreadKilled` shows.
+const THREAD_KILLED_TEXT: &str = "thread killed";
+
+/// Whether `exc` is `ThreadKilled`, which ends a forked thread silently.
+fn is_thread_killed(exc: *mut u8) -> bool {
+    if bhc_exc_get_tag(exc) != EXC_TAG_ASYNC_EXCEPTION {
+        return false;
+    }
+    let text = bhc_exc_get_payload(exc);
+    !text.is_null()
+        && unsafe { CStr::from_ptr(text as *const c_char) }.to_bytes()
+            == THREAD_KILLED_TEXT.as_bytes()
+}
+
 /// End a forked thread's pending exception: report it on stderr and clear it.
-/// Unlike [`bhc_handle_uncaught_exception`], the program keeps running.
+/// Unlike [`bhc_handle_uncaught_exception`], the program keeps running. As in
+/// GHC, `ThreadKilled` is not reported.
 pub(crate) fn report_thread_exception() {
     let Some(exc) = BHC_EXCEPTION.with(|cell| cell.replace(None)) else {
         return;
     };
+    if is_thread_killed(exc) {
+        return;
+    }
     let program = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
     let msg_ptr = bhc_show_exception(exc);
     if msg_ptr.is_null() {
@@ -3160,6 +3194,8 @@ const EXC_TAG_ERROR_CALL: i64 = 2;
 const EXC_TAG_WHOLE_EXCEPTION: i64 = 3;
 /// `ArithException`, with its text as a C-string payload.
 const EXC_TAG_ARITH_EXCEPTION: i64 = 4;
+/// `AsyncException` (`ThreadKilled`), with its text as a C-string payload.
+const EXC_TAG_ASYNC_EXCEPTION: i64 = 5;
 
 /// Throw an `ArithException`. The caller returns a placeholder, which the pending
 /// exception stops from being used, as with every other throw.
@@ -3177,6 +3213,7 @@ fn exception_value(exc: *mut u8, type_tag: i64) -> *mut u8 {
         || tag == EXC_TAG_IO_EXCEPTION
         || tag == EXC_TAG_ERROR_CALL
         || tag == EXC_TAG_ARITH_EXCEPTION
+        || tag == EXC_TAG_ASYNC_EXCEPTION
     {
         exc
     } else {
@@ -3293,7 +3330,10 @@ pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
     // `PandocError` crashed instead of reporting). Report those generically
     // rather than guessing at a layout we do not own.
     let msg = match tag {
-        EXC_TAG_IO_EXCEPTION | EXC_TAG_ERROR_CALL | EXC_TAG_ARITH_EXCEPTION => {
+        EXC_TAG_IO_EXCEPTION
+        | EXC_TAG_ERROR_CALL
+        | EXC_TAG_ARITH_EXCEPTION
+        | EXC_TAG_ASYNC_EXCEPTION => {
             if payload.is_null() {
                 "<null>".to_string()
             } else {

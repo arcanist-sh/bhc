@@ -10,13 +10,16 @@
 //!
 //! * Scheduling is cooperative: a thread that never blocks keeps the baton, and
 //!   a blocking system call (`getLine`) stops every thread.
-//! * `killThread` removes a thread that is not running, so its `finally`
-//!   handlers do not run.
+//! * `throwTo` and `killThread` reach a thread where it next runs: the
+//!   other thread is always parked, blocked or waiting for the baton, so the
+//!   exception is raised as it returns from there, and its handlers run.
+//!   `mask` does not defer them.
 //! * An RTS panic in a forked thread aborts the program. A thrown exception
-//!   ends only that thread, and is reported on stderr as GHC does.
+//!   ends only that thread, and is reported on stderr as GHC does, except
+//!   `ThreadKilled`.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -54,6 +57,15 @@ pub struct Chan {
     readers: VecDeque<u64>,
 }
 
+/// Where a parked thread waits, so an exception thrown to it can take it out.
+#[derive(Clone, Copy)]
+enum Blocked {
+    Take(*mut MVar),
+    Put(*mut MVar),
+    ReadChan(*mut Chan),
+    Sleep,
+}
+
 /// A `ThreadId`, with the header of an evaluated heap object.
 #[repr(C)]
 pub struct ThreadIdObject {
@@ -71,7 +83,11 @@ struct Sched {
     wakers: HashMap<u64, Arc<Condvar>>,
     /// Values handed to a thread that blocked in `takeMVar`/`readChan`.
     delivered: HashMap<u64, *mut u8>,
-    killed: HashSet<u64>,
+    /// Threads waiting in an `MVar`, a `Chan` or `threadDelay`.
+    blocked: HashMap<u64, Blocked>,
+    /// Exceptions thrown to a thread that has not run since, raised when it
+    /// next gets the baton.
+    interrupts: HashMap<u64, *mut u8>,
 }
 
 // SAFETY: the raw pointers are Haskell values, which stay valid because the
@@ -98,7 +114,8 @@ fn lock() -> Guard {
             sleepers: Vec::new(),
             wakers,
             delivered: HashMap::new(),
-            killed: HashSet::new(),
+            blocked: HashMap::new(),
+            interrupts: HashMap::new(),
         });
     }
     guard
@@ -117,6 +134,7 @@ fn next_runnable(s: &mut Sched) -> Option<u64> {
         while i < s.sleepers.len() {
             if s.sleepers[i].0 <= now {
                 let (_, thread) = s.sleepers.remove(i);
+                s.blocked.remove(&thread);
                 s.run_queue.push_back(thread);
             } else {
                 i += 1;
@@ -152,13 +170,11 @@ fn hand_off(s: &mut Sched) {
 
 /// Wait until this thread holds the baton.
 fn wait_for_baton(mut guard: Guard, me: u64) -> Guard {
-    let Some(waker) = sched(&mut guard).wakers.get(&me).cloned() else {
-        // Killed before it first ran: it never gets the baton.
-        drop(guard);
-        loop {
-            std::thread::park();
-        }
-    };
+    let waker = sched(&mut guard)
+        .wakers
+        .get(&me)
+        .cloned()
+        .expect("a live thread has a waker");
     while sched(&mut guard).current != me {
         guard = waker.wait(guard).unwrap_or_else(|e| e.into_inner());
     }
@@ -171,14 +187,35 @@ fn park(mut guard: Guard, me: u64) -> Guard {
     wait_for_baton(guard, me)
 }
 
+/// Park this thread where `blocked` says until it is woken. Returns `false` if
+/// it was woken by an exception thrown to it, which is then pending.
+fn park_blocked(mut guard: Guard, me: u64, blocked: Blocked) -> (Guard, bool) {
+    sched(&mut guard).blocked.insert(me, blocked);
+    let mut guard = park(guard, me);
+    let s = sched(&mut guard);
+    s.blocked.remove(&me);
+    if let Some(exception) = s.interrupts.remove(&me) {
+        s.delivered.remove(&me);
+        crate::ffi::raise_async(exception);
+        return (guard, false);
+    }
+    (guard, true)
+}
+
 fn me() -> u64 {
     THIS_THREAD.with(Cell::get)
+}
+
+/// Make a blocked thread runnable.
+fn wake(s: &mut Sched, thread: u64) {
+    s.blocked.remove(&thread);
+    s.run_queue.push_back(thread);
 }
 
 /// Give a blocked thread its value and make it runnable.
 fn wake_with(s: &mut Sched, thread: u64, value: *mut u8) {
     s.delivered.insert(thread, value);
-    s.run_queue.push_back(thread);
+    wake(s, thread);
 }
 
 /// Run an IO action closure: force it, then call its code with the closure as
@@ -216,9 +253,15 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
         .spawn(move || {
             let action = action;
             THIS_THREAD.with(|t| t.set(id));
-            drop(wait_for_baton(lock(), id));
-            // SAFETY: the caller of `bhc_fork_io` guarantees the closure.
-            unsafe { run_action(action.0) };
+            let mut guard = wait_for_baton(lock(), id);
+            let interrupt = sched(&mut guard).interrupts.remove(&id);
+            drop(guard);
+            match interrupt {
+                // Thrown to before it first ran: it ends at once.
+                Some(exception) => crate::ffi::raise_async(exception),
+                // SAFETY: the caller of `bhc_fork_io` guarantees the closure.
+                None => unsafe { run_action(action.0) },
+            }
             crate::ffi::report_thread_exception();
             let mut guard = lock();
             let s = sched(&mut guard);
@@ -254,40 +297,60 @@ pub extern "C" fn bhc_thread_delay(micros: i64) {
     let mut guard = lock();
     let wake_at = Instant::now() + Duration::from_micros(micros.max(0).unsigned_abs());
     sched(&mut guard).sleepers.push((wake_at, me));
-    drop(park(guard, me));
+    drop(park_blocked(guard, me, Blocked::Sleep));
 }
 
-/// `killThread`. The target is parked, because only the caller runs, so it is
-/// simply never scheduled again. Killing yourself ends the thread here.
+/// `throwTo`: raise `exception` in `thread`. Thrown to itself, it is a
+/// `throwIO`. Any other live thread is parked, because only the caller runs:
+/// a blocked one is taken out of its `MVar`, `Chan` or sleep and made
+/// runnable, and it raises the exception when it next runs, so its handlers
+/// run as in GHC. A finished thread ignores it.
+///
+/// # Safety
+///
+/// `thread` must be a pointer returned by `bhc_fork_io` or `bhc_my_thread_id`,
+/// and `exception` an exception object.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_throw_to(thread: *mut u8, exception: *mut u8) {
+    if crate::ffi::exception_pending() {
+        return;
+    }
+    let target = unsafe { (*(thread as *const ThreadIdObject)).id };
+    if target == me() {
+        crate::ffi::raise_async(exception);
+        return;
+    }
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    if !s.wakers.contains_key(&target) {
+        return;
+    }
+    s.interrupts.entry(target).or_insert(exception);
+    let Some(blocked) = s.blocked.remove(&target) else {
+        // Runnable, or not started yet: it raises it when it gets the baton.
+        return;
+    };
+    // SAFETY: a blocked thread's `MVar` or `Chan` stays allocated, and the
+    // lock guards its fields.
+    unsafe {
+        match blocked {
+            Blocked::Take(m) => (*m).waiters.retain(|w| w.thread != target),
+            Blocked::Put(m) => (*m).putters.retain(|(t, _)| *t != target),
+            Blocked::ReadChan(c) => (*c).readers.retain(|t| *t != target),
+            Blocked::Sleep => s.sleepers.retain(|(_, t)| *t != target),
+        }
+    }
+    s.run_queue.push_back(target);
+}
+
+/// `killThread`: `throwTo` with `ThreadKilled`.
 ///
 /// # Safety
 ///
 /// `thread` must be a pointer returned by `bhc_fork_io` or `bhc_my_thread_id`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_kill_thread(thread: *mut u8) {
-    let target = unsafe { (*(thread as *const ThreadIdObject)).id };
-    let caller = me();
-    let mut guard = lock();
-    let s = sched(&mut guard);
-    if target != caller {
-        if s.wakers.remove(&target).is_some() {
-            s.killed.insert(target);
-            s.run_queue.retain(|t| *t != target);
-            s.sleepers.retain(|(_, t)| *t != target);
-            s.delivered.remove(&target);
-        }
-        return;
-    }
-    if caller == MAIN_THREAD {
-        let _ = std::io::stdout().flush();
-        std::process::exit(0);
-    }
-    s.wakers.remove(&caller);
-    hand_off(s);
-    drop(guard);
-    loop {
-        std::thread::park();
-    }
+    unsafe { bhc_throw_to(thread, crate::ffi::thread_killed()) }
 }
 
 /// `newEmptyMVar`.
@@ -317,14 +380,10 @@ pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
 
 /// After the value left a full `MVar`: the first blocked `putMVar` fills it.
 fn refill(s: &mut Sched, m: &mut MVar) {
-    while let Some((thread, value)) = m.putters.pop_front() {
-        if s.killed.contains(&thread) {
-            continue;
-        }
+    if let Some((thread, value)) = m.putters.pop_front() {
         m.full = true;
         m.value = value;
-        s.run_queue.push_back(thread);
-        return;
+        wake(s, thread);
     }
 }
 
@@ -351,7 +410,10 @@ unsafe fn take_or_read(mvar: *mut u8, is_read: bool) -> *mut u8 {
         thread: me,
         is_read,
     });
-    let mut guard = park(guard, me);
+    let (mut guard, woken) = park_blocked(guard, me, Blocked::Take(m));
+    if !woken {
+        return std::ptr::null_mut();
+    }
     sched(&mut guard)
         .delivered
         .remove(&me)
@@ -384,9 +446,6 @@ fn fill(s: &mut Sched, m: &mut MVar, value: *mut u8) {
     let mut taker = None;
     let mut rest = VecDeque::new();
     while let Some(waiter) = m.waiters.pop_front() {
-        if s.killed.contains(&waiter.thread) {
-            continue;
-        }
         if waiter.is_read {
             wake_with(s, waiter.thread, value);
         } else if taker.is_none() {
@@ -420,7 +479,7 @@ pub unsafe extern "C" fn bhc_put_mvar(mvar: *mut u8, value: *mut u8) {
     let m = unsafe { &mut *(mvar as *mut MVar) };
     if m.full {
         m.putters.push_back((me, value));
-        drop(park(guard, me));
+        drop(park_blocked(guard, me, Blocked::Put(m)));
     } else {
         fill(sched(&mut guard), m, value);
     }
@@ -548,13 +607,10 @@ pub unsafe extern "C" fn bhc_write_chan(chan: *mut u8, value: *mut u8) {
     // SAFETY: the caller passes a `Chan`, and the lock guards its fields.
     let c = unsafe { &mut *(chan as *mut Chan) };
     let s = sched(&mut guard);
-    while let Some(thread) = c.readers.pop_front() {
-        if !s.killed.contains(&thread) {
-            wake_with(s, thread, value);
-            return;
-        }
+    match c.readers.pop_front() {
+        Some(thread) => wake_with(s, thread, value),
+        None => c.items.push_back(value),
     }
-    c.items.push_back(value);
 }
 
 /// `readChan`: the oldest item, waiting until there is one.
@@ -575,7 +631,10 @@ pub unsafe extern "C" fn bhc_read_chan(chan: *mut u8) -> *mut u8 {
         return value;
     }
     c.readers.push_back(me);
-    let mut guard = park(guard, me);
+    let (mut guard, woken) = park_blocked(guard, me, Blocked::ReadChan(c));
+    if !woken {
+        return std::ptr::null_mut();
+    }
     sched(&mut guard)
         .delivered
         .remove(&me)

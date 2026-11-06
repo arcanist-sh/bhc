@@ -6,7 +6,17 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `throwTo`, which aborted at run time, raises its exception in the other
+  thread (#75).
+
 ### Fixed
+
+- `killThread` runs the killed thread's `finally`, `bracket` and `catch`
+  handlers. It used to drop the thread without them. An uncaught
+  `ThreadKilled` ends a forked thread without a message, and the main thread
+  with status 1, as in GHC (#75).
 
 - `quot`, `rem`, `quotRem`, `divMod`, `gcd` and `lcm` work at `Integer`. Their types
   were pinned to `Int`, so a negated literal operand under `quot` or `rem` crashed

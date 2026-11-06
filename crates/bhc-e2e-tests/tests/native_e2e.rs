@@ -2446,3 +2446,8 @@ fn test_tier3_functor_replace_kleisli_native() {
 fn test_tier3_monadic_list_results_native() {
     run_native_test("tier3_io/monadic_list_results", Profile::Default);
 }
+
+#[test]
+fn test_tier3_runtime_errors_native() {
+    run_native_test("tier3_io/runtime_errors", Profile::Default);
+}

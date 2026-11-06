@@ -70,6 +70,13 @@ use bhc_types::Ty;
 /// collides with a real one — and above the builtin range, so
 /// `is_saturated_builtin` does not mistake one for a compiled function.
 const SYNTHETIC_BUILTIN_BASE: usize = 900_000_000;
+
+/// The RTS exception tag of `ErrorCall` (`EXC_TAG_ERROR_CALL` in `bhc-rts`).
+const EXC_TAG_ERROR_CALL: u64 = 2;
+
+/// The RTS exception tag of `ArithException` (`EXC_TAG_ARITH_EXCEPTION` in
+/// `bhc-rts`).
+const EXC_TAG_ARITH_EXCEPTION: u64 = 4;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::types::{BasicType, BasicTypeEnum};
@@ -3511,6 +3518,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000607), int_mod);
+
+        // bhc_integer_quot(ptr, ptr) -> ptr and bhc_integer_rem(ptr, ptr) -> ptr
+        let integer_quot_type = self.type_mapper().ptr_type().fn_type(
+            &[
+                self.type_mapper().ptr_type().into(),
+                self.type_mapper().ptr_type().into(),
+            ],
+            false,
+        );
+        let integer_quot =
+            self.module
+                .llvm_module()
+                .add_function("bhc_integer_quot", integer_quot_type, None);
+        self.functions.insert(VarId::new(1000690), integer_quot);
+        let integer_rem =
+            self.module
+                .llvm_module()
+                .add_function("bhc_integer_rem", integer_quot_type, None);
+        self.functions.insert(VarId::new(1000691), integer_rem);
         // bhc_integer_negate(ptr) -> ptr
         let int_negate = self.module.llvm_module().add_function(
             "bhc_integer_negate",
@@ -6993,6 +7019,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromException" => self.lower_builtin_from_exception(args[0]),
             "displayException" => self.lower_builtin_display_exception(args[0]),
             "userError" => self.lower_builtin_user_error(args[0]),
+            "ErrorCall" => self.lower_builtin_error_call(args[0]),
             "ioError" => self.lower_builtin_throw(args[0]),
 
             // Misc
@@ -8793,16 +8820,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("head_empty_error", "head: empty list");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Cons case: extract head (field 0)
         self.builder().position_at_end(cons_block);
@@ -8862,16 +8880,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("tail_empty_error", "tail: empty list");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Cons case: extract tail (field 1)
         self.builder().position_at_end(cons_block);
@@ -12753,16 +12762,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("last_error", "last: empty list");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Loop header
         self.builder().position_at_end(loop_header);
@@ -12865,16 +12865,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("init_error", "init: empty list");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Loop header
         self.builder().position_at_end(loop_header);
@@ -13083,16 +13074,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("index_error", "!!: index too large");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Loop body: decrement index, continue with tail
         self.builder().position_at_end(loop_body);
@@ -13911,16 +13893,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("fromJust_error", "fromJust: Nothing");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
 
         // Just case: extract value
         self.builder().position_at_end(just_block);
@@ -15702,18 +15675,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let error_msg = self
             .module
             .add_global_string("undefined_error", "undefined");
-        let error_fn = self
-            .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
-
-        self.builder()
-            .build_call(*error_fn, &[error_msg.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
-
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.emit_throw_and_return(EXC_TAG_ERROR_CALL, error_msg)?;
         self.start_unreachable_block("after_undefined")?;
 
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
@@ -16207,6 +16169,154 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// Throw an exception with the C string `message`, and leave the enclosing
+    /// function with a placeholder result, the way `error` does: the pending
+    /// exception stops the code that follows at its next check.
+    ///
+    /// Ends the current block.
+    fn emit_throw_and_return(&self, tag: u64, message: PointerValue<'ctx>) -> CodegenResult<()> {
+        let make_exc_fn = *self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
+            CodegenError::Internal("bhc_make_some_exception not declared".to_string())
+        })?;
+        let throw_fn = *self
+            .functions
+            .get(&VarId::new(1000080))
+            .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
+        let tag_val = self.llvm_context().i64_type().const_int(tag, false);
+        let exception = self
+            .builder()
+            .build_call(make_exc_fn, &[tag_val.into(), message.into()], "exc")
+            .map_err(|e| CodegenError::Internal(format!("exception failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("exception: returned void".to_string()))?;
+        self.builder()
+            .build_call(throw_fn, &[exception.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("throw failed: {e:?}")))?;
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("throw: no function".to_string()))?;
+        let result = match current_fn.get_type().get_return_type() {
+            Some(inkwell::types::BasicTypeEnum::PointerType(t)) => Some(t.const_null().into()),
+            Some(inkwell::types::BasicTypeEnum::IntType(t)) => Some(t.const_zero().into()),
+            Some(inkwell::types::BasicTypeEnum::FloatType(t)) => Some(t.const_zero().into()),
+            _ => None,
+        };
+        let result: Option<BasicValueEnum<'ctx>> = result;
+        let returned = match &result {
+            Some(value) => self.builder().build_return(Some(value)),
+            None => self.builder().build_return(None),
+        };
+        returned.map_err(|e| CodegenError::Internal(format!("throw return: {e:?}")))?;
+        Ok(())
+    }
+
+    /// Throw `divide by zero` here if `divisor` is 0 (#76). A literal divisor
+    /// other than 0 needs no check.
+    /// `div`, `mod`, `quot` or `rem` of two machine integers, throwing `divide by
+    /// zero` for a zero divisor.
+    fn build_int_division(
+        &self,
+        op: PrimOp,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        self.emit_divisor_check(rhs)?;
+        let fail = |e| CodegenError::Internal(format!("division: {e:?}"));
+        let quotient = self
+            .builder()
+            .build_int_signed_div(lhs, rhs, "quot")
+            .map_err(fail)?;
+        let remainder = self
+            .builder()
+            .build_int_signed_rem(lhs, rhs, "rem")
+            .map_err(fail)?;
+        Ok(match op {
+            PrimOp::Quot => quotient,
+            PrimOp::Rem => remainder,
+            PrimOp::Div => self.build_floor_correction(quotient, remainder, rhs)?.0,
+            _ => self.build_floor_correction(quotient, remainder, rhs)?.1,
+        })
+    }
+
+    /// `div` rounds toward negative infinity, and `mod` takes the divisor's sign,
+    /// where the machine's `quot` and `rem` truncate. Given the truncated results,
+    /// this corrects them: `(-7) div 2` is -4, not -3, and `(-7) mod 2` is 1.
+    fn build_floor_correction(
+        &self,
+        quotient: IntValue<'ctx>,
+        remainder: IntValue<'ctx>,
+        divisor: IntValue<'ctx>,
+    ) -> CodegenResult<(IntValue<'ctx>, IntValue<'ctx>)> {
+        let fail = |e| CodegenError::Internal(format!("floor division: {e:?}"));
+        let zero = remainder.get_type().const_zero();
+        let builder = self.builder();
+        let inexact = builder
+            .build_int_compare(inkwell::IntPredicate::NE, remainder, zero, "div_inexact")
+            .map_err(fail)?;
+        let signs = builder
+            .build_xor(remainder, divisor, "div_signs")
+            .map_err(fail)?;
+        let differ = builder
+            .build_int_compare(inkwell::IntPredicate::SLT, signs, zero, "div_differ")
+            .map_err(fail)?;
+        let adjust = builder
+            .build_and(inexact, differ, "div_adjust")
+            .map_err(fail)?;
+        let one = quotient.get_type().const_int(1, false);
+        let lowered = builder
+            .build_int_sub(quotient, one, "div_lower")
+            .map_err(fail)?;
+        let shifted = builder
+            .build_int_add(remainder, divisor, "mod_shift")
+            .map_err(fail)?;
+        let floor_quotient = builder
+            .build_select(adjust, lowered, quotient, "div_floor")
+            .map_err(fail)?
+            .into_int_value();
+        let floor_remainder = builder
+            .build_select(adjust, shifted, remainder, "mod_floor")
+            .map_err(fail)?
+            .into_int_value();
+        Ok((floor_quotient, floor_remainder))
+    }
+
+    fn emit_divisor_check(&self, divisor: IntValue<'ctx>) -> CodegenResult<()> {
+        if divisor.get_zero_extended_constant().is_some_and(|v| v != 0) {
+            return Ok(());
+        }
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("div: no function".to_string()))?;
+        let is_zero = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                divisor,
+                divisor.get_type().const_zero(),
+                "divisor_is_zero",
+            )
+            .map_err(|e| CodegenError::Internal(format!("div check: {e:?}")))?;
+        let zero_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "div_zero");
+        let ok_block = self.llvm_context().append_basic_block(current_fn, "div_ok");
+        self.builder()
+            .build_conditional_branch(is_zero, zero_block, ok_block)
+            .map_err(|e| CodegenError::Internal(format!("div branch: {e:?}")))?;
+        self.builder().position_at_end(zero_block);
+        let message = self
+            .module
+            .add_global_string("div_zero_error", "divide by zero");
+        self.emit_throw_and_return(EXC_TAG_ARITH_EXCEPTION, message)?;
+        self.builder().position_at_end(ok_block);
+        Ok(())
+    }
+
     /// The `e` of a `try` typed `_ -> IO (Either e a)`, the one form of `try` that
     /// is `Control.Exception`'s.
     fn try_result_in_io(ty: &Ty) -> Option<&Ty> {
@@ -16229,12 +16339,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// The RTS exception tag for handling exceptions of type `ty`: 1 for
     /// `IOException`, 2 for `ErrorCall`, 3 for `SomeException` (everything, kept
-    /// whole so it can be shown) and 0 for anything else (everything, unwrapped).
+    /// whole so it can be shown), 4 for `ArithException` and 0 for anything else
+    /// (everything, unwrapped).
     fn exception_tag_of_ty(ty: &Ty) -> u64 {
         match ty {
             Ty::Con(c) if matches!(c.name.as_str(), "IOException" | "IOError") => 1,
             Ty::Con(c) if c.name.as_str() == "ErrorCall" => 2,
             Ty::Con(c) if c.name.as_str() == "SomeException" => 3,
+            Ty::Con(c) if c.name.as_str() == "ArithException" => EXC_TAG_ARITH_EXCEPTION,
             _ => 0,
         }
     }
@@ -16259,6 +16371,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     2 // EXC_TAG_ERROR_CALL
                 } else if ty_name.contains("SomeException") {
                     3 // EXC_TAG_WHOLE_EXCEPTION
+                } else if ty_name.contains("ArithException") {
+                    EXC_TAG_ARITH_EXCEPTION
                 } else {
                     0 // EXC_TAG_SOME_EXCEPTION (catch-all)
                 }
@@ -16351,12 +16465,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result.into()))
     }
 
-    /// Whether `expr` is a call of `userError`.
+    /// Lower the constructor `ErrorCall msg`, an exception object like `userError`'s.
+    fn lower_builtin_error_call(
+        &mut self,
+        msg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let msg_val = self
+            .lower_expr(msg_expr)?
+            .ok_or_else(|| CodegenError::Internal("ErrorCall: no value".to_string()))?;
+        let msg_ptr = self.value_to_ptr(msg_val)?;
+        let cstr_ptr = self.char_list_to_cstring(msg_ptr)?;
+        let make_exc_fn = *self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
+            CodegenError::Internal("bhc_make_some_exception not declared".to_string())
+        })?;
+        let tag_val = self
+            .llvm_context()
+            .i64_type()
+            .const_int(EXC_TAG_ERROR_CALL, false);
+        Ok(self
+            .builder()
+            .build_call(
+                make_exc_fn,
+                &[tag_val.into(), cstr_ptr.into()],
+                "error_call",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ErrorCall failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
+    }
+
+    /// Whether `expr` is a call of `userError` or `ErrorCall`, which build an
+    /// exception object.
     fn is_user_error_call(expr: &Expr) -> bool {
         matches!(
             expr,
             Expr::App(f, _, _)
-                if matches!(f.as_ref(), Expr::Var(v, _) if v.name.as_str() == "userError")
+                if matches!(
+                    f.as_ref(),
+                    Expr::Var(v, _) if matches!(v.name.as_str(), "userError" | "ErrorCall")
+                )
         )
     }
 
@@ -26883,8 +27030,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let denom = self
             .lower_expr(denom_expr)?
             .ok_or_else(|| CodegenError::Internal("%: no denominator".to_string()))?;
-        let num_int = self.coerce_to_int(num)?;
-        let denom_int = self.coerce_to_int(denom)?;
+        // An `Integer` operand is a bignum pointer, not a pointer-encoded `Int`.
+        let num_int = if self.is_integer_expr(num_expr) {
+            self.integer_value_to_int(num)?
+        } else {
+            self.coerce_to_int(num)?
+        };
+        let denom_int = if self.is_integer_expr(denom_expr) {
+            self.integer_value_to_int(denom)?
+        } else {
+            self.coerce_to_int(denom)?
+        };
         let rts_fn = *self
             .functions
             .get(&VarId::new(1000900))
@@ -26894,6 +27050,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(rts_fn, &[num_int.into(), denom_int.into()], "rational_make")
             .map_err(|e| CodegenError::Internal(format!("rational_make call: {:?}", e)))?;
         Ok(result.try_as_basic_value().basic())
+    }
+
+    /// The machine integer of a value that is a boxed `Integer`.
+    fn integer_value_to_int(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let symbol = "bhc_integer_to_i64";
+        let function = match self.module.get_function(symbol) {
+            Some(function) => function,
+            None => {
+                let ptr_type = self.type_mapper().ptr_type();
+                let fn_type = self
+                    .type_mapper()
+                    .i64_type()
+                    .fn_type(&[ptr_type.into()], false);
+                self.module.add_function(symbol, fn_type)
+            }
+        };
+        let pointer = self.value_to_ptr(value)?;
+        let forced = self.build_force(pointer.into())?;
+        self.builder()
+            .build_call(function, &[forced.into()], "integer_to_int")
+            .map_err(|e| CodegenError::Internal(format!("{symbol}: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .map(|v| v.into_int_value())
+            .ok_or_else(|| CodegenError::Internal(format!("{symbol}: returned void")))
     }
 
     /// Lower a unary Rational RTS operation (numerator, denominator, negate, abs, signum, recip).
@@ -27517,6 +27701,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // d = floor(a/b), m = a - d*b
         let i64_type = self.type_mapper().i64_type();
 
+        self.emit_divisor_check(b_int)?;
+
         // Compute truncated quotient and remainder
         let q = self
             .builder()
@@ -27589,6 +27775,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("quotRem: no b".to_string()))?;
         let a_int = self.coerce_to_int(a_val)?;
         let b_int = self.coerce_to_int(b_val)?;
+
+        self.emit_divisor_check(b_int)?;
 
         let q = self
             .builder()
@@ -48958,8 +49146,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             PrimOp::Mul => (1000605, "bhc_integer_mul"),
             PrimOp::Div => (1000606, "bhc_integer_div"),
             PrimOp::Mod => (1000607, "bhc_integer_mod"),
-            PrimOp::Rem => (1000607, "bhc_integer_mod"), // rem == mod for Integer
-            PrimOp::Quot => (1000606, "bhc_integer_div"), // quot == div for Integer
+            // These truncate, where `div` and `mod` round down.
+            PrimOp::Rem => (1000691, "bhc_integer_rem"),
+            PrimOp::Quot => (1000690, "bhc_integer_quot"),
             PrimOp::Negate => (1000608, "bhc_integer_negate"),
             PrimOp::Eq => (1000612, "bhc_integer_eq"),
             PrimOp::Ne => (1000612, "bhc_integer_eq"), // negate result
@@ -56204,16 +56393,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Unbox arguments
                 let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
                 let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
-
                 let result = match op {
                     PrimOp::Add => self.builder().build_int_add(lhs, rhs, "add"),
                     PrimOp::Sub => self.builder().build_int_sub(lhs, rhs, "sub"),
                     PrimOp::Mul => self.builder().build_int_mul(lhs, rhs, "mul"),
-                    PrimOp::Div | PrimOp::Quot => {
-                        self.builder().build_int_signed_div(lhs, rhs, "div")
-                    }
-                    PrimOp::Mod | PrimOp::Rem => {
-                        self.builder().build_int_signed_rem(lhs, rhs, "rem")
+                    PrimOp::Div | PrimOp::Quot | PrimOp::Mod | PrimOp::Rem => {
+                        Ok(self.build_int_division(op, lhs, rhs)?)
                     }
                     // `/` reaching the unboxed-integer path still divides as
                     // fractions: convert both sides to f64 and back.
@@ -57189,8 +57374,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     PrimOp::Add => self.builder().build_int_add(l, r, "add"),
                     PrimOp::Sub => self.builder().build_int_sub(l, r, "sub"),
                     PrimOp::Mul => self.builder().build_int_mul(l, r, "mul"),
-                    PrimOp::Div | PrimOp::Quot => self.builder().build_int_signed_div(l, r, "div"),
-                    PrimOp::Mod | PrimOp::Rem => self.builder().build_int_signed_rem(l, r, "rem"),
+                    PrimOp::Div | PrimOp::Quot | PrimOp::Mod | PrimOp::Rem => {
+                        Ok(self.build_int_division(op, l, r)?)
+                    }
                     _ => return Err(CodegenError::Internal("invalid arith op".to_string())),
                 };
                 result
@@ -57232,8 +57418,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     PrimOp::Add => self.builder().build_int_add(l, r, "add"),
                     PrimOp::Sub => self.builder().build_int_sub(l, r, "sub"),
                     PrimOp::Mul => self.builder().build_int_mul(l, r, "mul"),
-                    PrimOp::Div | PrimOp::Quot => self.builder().build_int_signed_div(l, r, "div"),
-                    PrimOp::Mod | PrimOp::Rem => self.builder().build_int_signed_rem(l, r, "rem"),
+                    PrimOp::Div | PrimOp::Quot | PrimOp::Mod | PrimOp::Rem => {
+                        Ok(self.build_int_division(op, l, r)?)
+                    }
                     _ => return Err(CodegenError::Internal("invalid arith op".to_string())),
                 };
                 let int_result = result.map_err(|e| {
@@ -63469,6 +63656,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "fromException" => Some(1),
         "displayException" => Some(1),
         "userError" => Some(1),
+        "ErrorCall" => Some(1),
         "ioError" => Some(1),
 
         // Misc

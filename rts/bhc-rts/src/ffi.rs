@@ -5314,6 +5314,15 @@ pub extern "C" fn bhc_integer_gcd(a: *const u8, b: *const u8) -> *mut u8 {
     Box::into_raw(Box::new(a.gcd(b))) as *mut u8
 }
 
+/// Least common multiple of two BigInts, non-negative like `lcm`.
+#[no_mangle]
+pub extern "C" fn bhc_integer_lcm(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_integer::Integer;
+    Box::into_raw(Box::new(a.lcm(b))) as *mut u8
+}
+
 /// Equality check for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {

@@ -8083,6 +8083,8 @@ impl TyCtxt {
         // list put at that number: `liftA2` got an unrelated stub's
         // `forall a. a`, its result never unified with `f c`, and
         // `print (liftA2 (+) (Just 1) (Just 2))` printed an address (#63).
+        // `quot` and `rem` held `Int -> Int -> Int`, so at `Integer` a negated
+        // literal operand was built as a machine integer (#78).
         // Only these names: elsewhere the permissive scheme at the DefId is
         // what lets programs through (see `builtin_by_name` above).
         for def_info in defs.values() {
@@ -8091,7 +8093,17 @@ impl TyCtxt {
                 || local_value_ids.contains(&def_info.id)
                 || !matches!(
                     def_info.name.as_str(),
-                    "liftA" | "liftA2" | "liftA3" | "liftM" | "liftM2"
+                    "liftA"
+                        | "liftA2"
+                        | "liftA3"
+                        | "liftM"
+                        | "liftM2"
+                        | "quot"
+                        | "rem"
+                        | "gcd"
+                        | "lcm"
+                        | "quotRem"
+                        | "divMod"
                 )
             {
                 continue;

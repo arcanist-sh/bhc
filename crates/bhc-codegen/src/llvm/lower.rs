@@ -7422,11 +7422,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "odd" => self.lower_builtin_odd(args[0]),
 
             // Integer operations via RTS
+            "gcd" | "lcm" if self.is_integer_expr(args[0]) || self.is_integer_expr(args[1]) => {
+                let symbol = if name == "gcd" {
+                    "bhc_integer_gcd"
+                } else {
+                    "bhc_integer_lcm"
+                };
+                self.lower_integer_binop_rts(args[0], args[1], symbol)
+            }
             "gcd" => self.lower_builtin_int_binop_rts(args[0], args[1], 1000500, "gcd"),
             "^" => self.lower_builtin_power(args[0], args[1]),
             "lcm" => self.lower_builtin_int_binop_rts(args[0], args[1], 1000501, "lcm"),
 
             // Division with tuples
+            "divMod" | "quotRem"
+                if self.is_integer_expr(args[0]) || self.is_integer_expr(args[1]) =>
+            {
+                let (first, second) = if name == "divMod" {
+                    ("bhc_integer_div", "bhc_integer_mod")
+                } else {
+                    ("bhc_integer_quot", "bhc_integer_rem")
+                };
+                let quotient = self
+                    .lower_integer_binop_rts(args[0], args[1], first)?
+                    .ok_or_else(|| CodegenError::Internal(format!("{name}: no quotient")))?;
+                let remainder = self
+                    .lower_integer_binop_rts(args[0], args[1], second)?
+                    .ok_or_else(|| CodegenError::Internal(format!("{name}: no remainder")))?;
+                Ok(Some(self.alloc_pair(quotient, remainder)?.into()))
+            }
             "divMod" => self.lower_builtin_divmod(args[0], args[1]),
             "quotRem" => self.lower_builtin_quotrem(args[0], args[1]),
 
@@ -27651,6 +27675,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a binary integer RTS operation (gcd, lcm).
+    /// Call the RTS function `symbol` on two `Integer` operands (bignum pointers),
+    /// declaring it on first use.
+    fn lower_integer_binop_rts(
+        &mut self,
+        a_expr: &Expr,
+        b_expr: &Expr,
+        symbol: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let function = match self.module.get_function(symbol) {
+            Some(function) => function,
+            None => self.module.add_function(
+                symbol,
+                ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            ),
+        };
+        let mut operands = Vec::new();
+        for expr in [a_expr, b_expr] {
+            let value = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal(format!("{symbol}: no operand")))?;
+            let forced = self.build_force(value)?;
+            operands.push(self.value_to_ptr(forced)?);
+        }
+        Ok(self
+            .builder()
+            .build_call(function, &[operands[0].into(), operands[1].into()], symbol)
+            .map_err(|e| CodegenError::Internal(format!("{symbol}: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
+    }
+
     fn lower_builtin_int_binop_rts(
         &mut self,
         a_expr: &Expr,

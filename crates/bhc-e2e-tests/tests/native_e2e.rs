@@ -2451,3 +2451,8 @@ fn test_tier3_monadic_list_results_native() {
 fn test_tier3_runtime_errors_native() {
     run_native_test("tier3_io/runtime_errors", Profile::Default);
 }
+
+#[test]
+fn test_tier2_integer_division_family_native() {
+    run_native_test("tier2_functions/integer_division_family", Profile::Default);
+}

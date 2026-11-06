@@ -6294,7 +6294,6 @@ impl Builtins {
         // Numeric operations at fixed DefIds 10500-10507
         // These are registered at fixed DefIds to avoid sequential alignment issues
         {
-            let int_pair = Ty::Tuple(vec![self.int_ty.clone(), self.int_ty.clone()]);
             let numeric_ops: &[(usize, &str, Scheme)] = &[
                 (
                     10500,
@@ -6309,50 +6308,82 @@ impl Builtins {
                 (
                     10502,
                     "gcd",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        ),
+                    ),
                 ),
                 (
                     10503,
                     "lcm",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        ),
+                    ),
                 ),
+                // At any numeric type, like `div` and `mod`: pinned to `Int`, an
+                // `Integer` use unified to `Int -> Int -> Integer`, and a literal
+                // operand was built as a machine integer (#78). `gcd` and `lcm`
+                // above likewise.
                 (
                     10504,
                     "quot",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        ),
+                    ),
                 ),
+                // At any numeric type, like `div` and `mod`: pinned to `Int`, an
+                // `Integer` use unified to `Int -> Int -> Integer`, and a literal
+                // operand was built as a machine integer (#78). `gcd` and `lcm`
+                // above likewise.
                 (
                     10505,
                     "rem",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        ),
+                    ),
                 ),
                 (
                     10506,
                     "quotRem",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), int_pair.clone()),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(a.clone())]),
+                            ),
+                        ),
+                    ),
                 ),
                 (
                     10507,
                     "divMod",
-                    Scheme::mono(Ty::fun(
-                        self.int_ty.clone(),
-                        Ty::fun(self.int_ty.clone(), int_pair),
-                    )),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(a.clone())]),
+                            ),
+                        ),
+                    ),
                 ),
             ];
             for (id, name, scheme) in numeric_ops {

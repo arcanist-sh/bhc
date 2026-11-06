@@ -6,6 +6,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `quot`, `rem`, `quotRem`, `divMod`, `gcd` and `lcm` work at `Integer`. Their types
+  were pinned to `Int`, so a negated literal operand under `quot` or `rem` crashed
+  `print`, `gcd` and `lcm` on `Integer`s crashed, and `quotRem`/`divMod` on
+  `Integer`s crashed (#78).
+
 ## [0.2.27] - 2026-11-06
 
 A correctness release. `div` and `mod` on negative `Int`s gave wrong answers, and

@@ -1,0 +1,22 @@
+(-4,1,-3,-1)
+(-4,-1,-3,1)
+((-4,1),(-3,-1))
+(-4,1,-3,-1)
+divide by zero
+divide by zero
+divide by zero
+divide by zero
+divide by zero
+divide by zero
+divide by zero
+head failed
+tail failed
+last failed
+init failed
+index failed
+fromJust failed
+undefined failed
+Ratio has zero denominator
+(1,5)
+ec
+1 % 3

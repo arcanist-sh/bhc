@@ -6,6 +6,20 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `div` and `mod` round toward negative infinity. They truncated, so
+  ``(-7) `div` 2`` was -3 and ``(-7) `mod` 2`` was -1. At `Integer`, `quot` and `rem`
+  truncate, where they rounded down.
+- Division by zero throws `divide by zero`, as an `ArithException` that `try` and
+  `catch` can see and `show` can print. At `Int` it gave a garbage number and
+  carried on.
+- `head`, `tail`, `last`, `init`, `!!`, `fromJust` and `undefined` throw an exception
+  that `try` and `catch` can see, where they aborted the program (#76).
+- `x % y` at `Integer` reads its operands, where it read their addresses, and a
+  zero denominator throws `Ratio has zero denominator`.
+- The `ErrorCall` constructor works, where it aborted as a stub.
+
 ## [0.2.26] - 2026-11-05
 
 Native code now uses the closure IO model by default, so monad transformers are

@@ -1144,7 +1144,8 @@ pub extern "C" fn bhc_negate_int(a: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn bhc_quot_int(a: i64, b: i64) -> i64 {
     if b == 0 {
-        panic!("divide by zero");
+        throw_arith("divide by zero");
+        return 0;
     }
     a / b
 }
@@ -1153,27 +1154,40 @@ pub extern "C" fn bhc_quot_int(a: i64, b: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn bhc_rem_int(a: i64, b: i64) -> i64 {
     if b == 0 {
-        panic!("divide by zero");
+        throw_arith("divide by zero");
+        return 0;
     }
     a % b
 }
 
-/// Int division (truncated toward negative infinity)
+/// Int division (rounded toward negative infinity)
 #[no_mangle]
 pub extern "C" fn bhc_div_int(a: i64, b: i64) -> i64 {
     if b == 0 {
-        panic!("divide by zero");
+        throw_arith("divide by zero");
+        return 0;
     }
-    a.div_euclid(b)
+    let (quotient, remainder) = (a.wrapping_div(b), a.wrapping_rem(b));
+    if remainder != 0 && (remainder ^ b) < 0 {
+        quotient - 1
+    } else {
+        quotient
+    }
 }
 
-/// Int modulus (Euclidean)
+/// Int modulus, with the sign of the divisor
 #[no_mangle]
 pub extern "C" fn bhc_mod_int(a: i64, b: i64) -> i64 {
     if b == 0 {
-        panic!("divide by zero");
+        throw_arith("divide by zero");
+        return 0;
     }
-    a.rem_euclid(b)
+    let remainder = a.wrapping_rem(b);
+    if remainder != 0 && (remainder ^ b) < 0 {
+        remainder + b
+    } else {
+        remainder
+    }
 }
 
 /// Minimum Int value
@@ -1258,6 +1272,10 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
 /// Construct a Rational from numerator and denominator, normalizing via GCD.
 #[no_mangle]
 pub extern "C" fn bhc_rational_make(num: i64, denom: i64) -> *mut u8 {
+    if denom == 0 {
+        throw_arith("Ratio has zero denominator");
+        return rational_make_normalized(0, 1);
+    }
     rational_make_normalized(num, denom)
 }
 
@@ -1324,7 +1342,8 @@ pub extern "C" fn bhc_rational_div(a: *mut u8, b: *mut u8) -> *mut u8 {
     let (an, ad) = rational_parts(a);
     let (bn, bd) = rational_parts(b);
     if bn == 0 {
-        panic!("Rational: division by zero");
+        throw_arith("Ratio has zero denominator");
+        return rational_make_normalized(0, 1);
     }
     rational_make_normalized(an * bd, ad * bn)
 }
@@ -3139,6 +3158,15 @@ const EXC_TAG_ERROR_CALL: i64 = 2;
 /// A handler for `SomeException`: catches everything, and is given the whole
 /// exception object, which `show` can read whatever was thrown.
 const EXC_TAG_WHOLE_EXCEPTION: i64 = 3;
+/// `ArithException`, with its text as a C-string payload.
+const EXC_TAG_ARITH_EXCEPTION: i64 = 4;
+
+/// Throw an `ArithException`. The caller returns a placeholder, which the pending
+/// exception stops from being used, as with every other throw.
+fn throw_arith(message: &str) {
+    let text = CString::new(message).unwrap_or_default().into_raw() as *mut u8;
+    bhc_throw(bhc_make_some_exception(EXC_TAG_ARITH_EXCEPTION, text));
+}
 
 /// The value a handler or `Left` receives for `exc`. An `IOException` or
 /// `ErrorCall` is the exception object itself, so it can be shown and rethrown;
@@ -3148,6 +3176,7 @@ fn exception_value(exc: *mut u8, type_tag: i64) -> *mut u8 {
     if type_tag == EXC_TAG_WHOLE_EXCEPTION
         || tag == EXC_TAG_IO_EXCEPTION
         || tag == EXC_TAG_ERROR_CALL
+        || tag == EXC_TAG_ARITH_EXCEPTION
     {
         exc
     } else {
@@ -3264,7 +3293,7 @@ pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
     // `PandocError` crashed instead of reporting). Report those generically
     // rather than guessing at a layout we do not own.
     let msg = match tag {
-        EXC_TAG_IO_EXCEPTION | EXC_TAG_ERROR_CALL => {
+        EXC_TAG_IO_EXCEPTION | EXC_TAG_ERROR_CALL | EXC_TAG_ARITH_EXCEPTION => {
             if payload.is_null() {
                 "<null>".to_string()
             } else {
@@ -5206,8 +5235,8 @@ pub extern "C" fn bhc_integer_div(a: *const u8, b: *const u8) -> *mut u8 {
     let b = unsafe { &*(b as *const BigInt) };
     use num_traits::Zero;
     if b.is_zero() {
-        eprintln!("bhc_integer_div: division by zero");
-        std::process::exit(1);
+        throw_arith("divide by zero");
+        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
     }
     use num_integer::Integer;
     Box::into_raw(Box::new(a.div_floor(b))) as *mut u8
@@ -5220,11 +5249,37 @@ pub extern "C" fn bhc_integer_mod(a: *const u8, b: *const u8) -> *mut u8 {
     let b = unsafe { &*(b as *const BigInt) };
     use num_traits::Zero;
     if b.is_zero() {
-        eprintln!("bhc_integer_mod: division by zero");
-        std::process::exit(1);
+        throw_arith("divide by zero");
+        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
     }
     use num_integer::Integer;
     Box::into_raw(Box::new(a.mod_floor(b))) as *mut u8
+}
+
+/// Truncating quotient of two BigInts (Haskell's `quot`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_quot(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_traits::Zero;
+    if b.is_zero() {
+        throw_arith("divide by zero");
+        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+    }
+    Box::into_raw(Box::new(a / b)) as *mut u8
+}
+
+/// Truncating remainder of two BigInts (Haskell's `rem`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_rem(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_traits::Zero;
+    if b.is_zero() {
+        throw_arith("divide by zero");
+        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+    }
+    Box::into_raw(Box::new(a % b)) as *mut u8
 }
 
 /// Negate a BigInt.

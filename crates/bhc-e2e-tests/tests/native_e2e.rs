@@ -2488,3 +2488,8 @@ fn test_tier2_polymorphic_fold_accumulator_native() {
         Profile::Default,
     );
 }
+
+#[test]
+fn test_tier2_derived_foldable_foldr_native() {
+    run_native_test("tier2_functions/derived_foldable_foldr", Profile::Default);
+}

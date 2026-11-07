@@ -2472,3 +2472,11 @@ fn test_tier3_concurrent_throw_to_main_native() {
     }
     run_native_test("tier3_io/concurrent_throw_to_main", Profile::Default);
 }
+
+#[test]
+fn test_tier3_concurrent_preemption_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_preemption", Profile::Default);
+}

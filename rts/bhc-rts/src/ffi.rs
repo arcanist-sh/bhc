@@ -2813,7 +2813,7 @@ pub extern "C" fn bhc_signum_double(a: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn bhc_getLine() -> *mut c_char {
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    match crate::concurrent::outside_baton(|| std::io::stdin().read_line(&mut line)) {
         Ok(0) => {
             // Like GHC: reading past the end of stdin is an IO error.
             eprintln!("Prelude.getLine: end of file");
@@ -2841,7 +2841,7 @@ pub extern "C" fn bhc_getLine() -> *mut c_char {
 pub extern "C" fn bhc_getChar() -> i64 {
     use std::io::Read;
     let mut buf = [0u8; 1];
-    match std::io::stdin().read(&mut buf) {
+    match crate::concurrent::outside_baton(|| std::io::stdin().read(&mut buf)) {
         Ok(1) => buf[0] as i64,
         _ => -1, // EOF or error
     }
@@ -2851,18 +2851,14 @@ pub extern "C" fn bhc_getChar() -> i64 {
 #[no_mangle]
 pub extern "C" fn bhc_isEOF() -> i64 {
     use std::io::BufRead;
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    match handle.fill_buf() {
-        Ok(buf) => {
-            if buf.is_empty() {
-                1
-            } else {
-                0
-            }
+    crate::concurrent::outside_baton(|| {
+        let stdin = std::io::stdin();
+        let mut handle = stdin.lock();
+        match handle.fill_buf() {
+            Ok(buf) => i64::from(buf.is_empty()),
+            Err(_) => 1,
         }
-        Err(_) => 1,
-    }
+    })
 }
 
 /// Read all of stdin as a null-terminated C string.
@@ -2870,7 +2866,7 @@ pub extern "C" fn bhc_isEOF() -> i64 {
 pub extern "C" fn bhc_getContents() -> *mut c_char {
     use std::io::Read;
     let mut contents = String::new();
-    match std::io::stdin().read_to_string(&mut contents) {
+    match crate::concurrent::outside_baton(|| std::io::stdin().read_to_string(&mut contents)) {
         Ok(_) => CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw()),
         Err(_) => ptr::null_mut(),
     }
@@ -3168,6 +3164,7 @@ pub(crate) fn report_thread_exception() {
 /// do-chain instead of flowing into value code and being dereferenced.
 #[no_mangle]
 pub extern "C" fn bhc_exception_check() -> i64 {
+    crate::concurrent::safe_point();
     i64::from(bhc_exception_pending())
 }
 
@@ -4032,7 +4029,7 @@ pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
     let h = handle as usize;
     if h == HANDLE_STDIN {
         let mut buf = [0u8; 1];
-        match std::io::stdin().read(&mut buf) {
+        match crate::concurrent::outside_baton(|| std::io::stdin().read(&mut buf)) {
             Ok(1) => buf[0] as c_int,
             _ => -1,
         }
@@ -4064,7 +4061,7 @@ pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
 
     if h == HANDLE_STDIN {
         let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
+        match crate::concurrent::outside_baton(|| std::io::stdin().read_line(&mut line)) {
             Ok(0) => return ptr::null_mut(),
             Ok(_) => {
                 if line.ends_with('\n') {
@@ -4129,7 +4126,7 @@ pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
     let mut contents = String::new();
 
     let result = if h == HANDLE_STDIN {
-        std::io::stdin().read_to_string(&mut contents)
+        crate::concurrent::outside_baton(|| std::io::stdin().read_to_string(&mut contents))
     } else if let Some(bh) = get_bhc_handle(handle) {
         if let Some(ref mut f) = bh.file {
             f.read_to_string(&mut contents)

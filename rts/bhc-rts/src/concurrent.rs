@@ -1,15 +1,24 @@
 //! `Control.Concurrent` for compiled Haskell: threads, `MVar`s and `Chan`s.
 //!
 //! Every Haskell thread is an OS thread, but only one runs at a time: it holds
-//! a baton (`Sched::current`) and passes it on only where it blocks, sleeps,
-//! yields or finishes. Compiled code and thunk updates are not safe to run in
-//! parallel, and the baton keeps them sequential, while separate OS threads
-//! give each Haskell thread its own stack without any context-switch code.
+//! a baton (`Sched::current`) and passes it on where it blocks, sleeps,
+//! finishes, or has run for a time slice. Compiled code and thunk updates are
+//! not safe to run in parallel, and the baton keeps them sequential, while
+//! separate OS threads give each Haskell thread its own stack without any
+//! context-switch code.
+//!
+//! A thread is preempted at an IO step (`safe_point`, which compiled code
+//! reaches through `bhc_exception_check` at every `>>=`) once its slice is
+//! over. A read from stdin gives the baton up while it waits
+//! (`outside_baton`). When no thread can run, the baton is idle, and an
+//! idle thread wakes sleepers and waits for readers to come back.
 //!
 //! ==== Limits
 //!
-//! * Scheduling is cooperative: a thread that never blocks keeps the baton, and
-//!   a blocking system call (`getLine`) stops every thread.
+//! * Pure code is not preempted: a thread in a long pure computation keeps
+//!   the baton until its next IO step.
+//! * An exception thrown to a thread waiting for stdin is raised when the read
+//!   returns.
 //! * `throwTo` and `killThread` reach a thread where it next runs: the
 //!   other thread is always parked, blocked or waiting for the baton, so the
 //!   exception is raised as it returns from there, and its handlers run.
@@ -21,11 +30,19 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The id of the program's main thread.
 const MAIN_THREAD: u64 = 1;
+
+/// `Sched::current` when no thread holds the baton.
+const IDLE: u64 = 0;
+
+/// How long a thread runs before it gives way at an IO step, like GHC's
+/// default context-switch interval.
+const TIME_SLICE: Duration = Duration::from_millis(20);
 
 /// Stack of a forked thread. It is reserved, not committed, so the cost of an
 /// idle thread is address space.
@@ -88,6 +105,8 @@ struct Sched {
     /// Exceptions thrown to a thread that has not run since, raised when it
     /// next gets the baton.
     interrupts: HashMap<u64, *mut u8>,
+    /// Threads waiting for stdin without the baton.
+    outside: usize,
 }
 
 // SAFETY: the raw pointers are Haskell values, which stay valid because the
@@ -96,8 +115,17 @@ unsafe impl Send for Sched {}
 
 static SCHED: Mutex<Option<Sched>> = Mutex::new(None);
 
+/// Wakes the idle thread: the baton went idle, or a reader came back.
+static IDLE_WAKER: Condvar = Condvar::new();
+
+/// Set by the first `forkIO`. Until then there is one thread, and neither
+/// preemption nor the stdin hand-off has anything to do.
+static FORKED: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     static THIS_THREAD: Cell<u64> = const { Cell::new(MAIN_THREAD) };
+    /// When this thread last got the baton.
+    static SLICE_START: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 type Guard = MutexGuard<'static, Option<Sched>>;
@@ -116,6 +144,7 @@ fn lock() -> Guard {
             delivered: HashMap::new(),
             blocked: HashMap::new(),
             interrupts: HashMap::new(),
+            outside: 0,
         });
     }
     guard
@@ -125,27 +154,21 @@ fn sched(guard: &mut Guard) -> &mut Sched {
     guard.as_mut().expect("scheduler is initialized by lock()")
 }
 
-/// The next thread to run. Waits for the earliest sleeper if only sleepers are
-/// left, and `None` means every remaining thread is blocked for good.
-fn next_runnable(s: &mut Sched) -> Option<u64> {
-    loop {
-        let now = Instant::now();
-        let mut i = 0;
-        while i < s.sleepers.len() {
-            if s.sleepers[i].0 <= now {
-                let (_, thread) = s.sleepers.remove(i);
-                s.blocked.remove(&thread);
-                s.run_queue.push_back(thread);
-            } else {
-                i += 1;
-            }
+/// Make every sleeper whose time has come runnable. Returns the earliest
+/// wake-up time of those left.
+fn wake_sleepers(s: &mut Sched) -> Option<Instant> {
+    let now = Instant::now();
+    let mut i = 0;
+    while i < s.sleepers.len() {
+        if s.sleepers[i].0 <= now {
+            let (_, thread) = s.sleepers.remove(i);
+            s.blocked.remove(&thread);
+            s.run_queue.push_back(thread);
+        } else {
+            i += 1;
         }
-        if let Some(thread) = s.run_queue.pop_front() {
-            return Some(thread);
-        }
-        let earliest = s.sleepers.iter().map(|(at, _)| *at).min()?;
-        std::thread::sleep(earliest.saturating_duration_since(now));
     }
+    s.sleepers.iter().map(|(at, _)| *at).min()
 }
 
 /// Every thread is blocked, so none can ever wake. GHC raises this in the
@@ -157,15 +180,114 @@ fn report_deadlock() -> ! {
     std::process::exit(1)
 }
 
-/// Pass the baton on, without waiting to get it back.
+/// Pass the baton on, without waiting to get it back. With no thread ready, it
+/// goes idle if a sleeper or a reader will want it later; otherwise every
+/// thread is blocked for good.
 fn hand_off(s: &mut Sched) {
-    let Some(next) = next_runnable(s) else {
-        report_deadlock()
-    };
-    s.current = next;
-    if let Some(waker) = s.wakers.get(&next) {
-        waker.notify_one();
+    let earliest = wake_sleepers(s);
+    match s.run_queue.pop_front() {
+        Some(next) => {
+            s.current = next;
+            if let Some(waker) = s.wakers.get(&next) {
+                waker.notify_one();
+            }
+        }
+        None if earliest.is_some() || s.outside > 0 => {
+            s.current = IDLE;
+            IDLE_WAKER.notify_one();
+        }
+        None => report_deadlock(),
     }
+}
+
+/// The idle thread: while the baton is idle, wait for the earliest sleeper or
+/// for a reader to come back, then pass the baton on.
+fn run_idle() {
+    let mut guard = lock();
+    loop {
+        let s = sched(&mut guard);
+        if s.current != IDLE {
+            guard = IDLE_WAKER.wait(guard).unwrap_or_else(|e| e.into_inner());
+            continue;
+        }
+        let earliest = wake_sleepers(s);
+        if !s.run_queue.is_empty() || (earliest.is_none() && s.outside == 0) {
+            hand_off(s);
+            continue;
+        }
+        guard = match earliest {
+            Some(at) => {
+                let wait = at.saturating_duration_since(Instant::now());
+                IDLE_WAKER
+                    .wait_timeout(guard, wait)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            }
+            None => IDLE_WAKER.wait(guard).unwrap_or_else(|e| e.into_inner()),
+        };
+    }
+}
+
+/// Raise the exception thrown to this thread since it last ran, if any.
+/// Returns whether there was one.
+fn raise_interrupt(s: &mut Sched, me: u64) -> bool {
+    match s.interrupts.remove(&me) {
+        Some(exception) => {
+            crate::ffi::raise_async(exception);
+            true
+        }
+        None => false,
+    }
+}
+
+/// A point where the running thread may be preempted: compiled code reaches
+/// it at every IO step. Once the thread has had the baton for a time slice and
+/// another thread is ready, it goes to the back of the queue. An exception
+/// thrown to it meanwhile is raised here.
+pub(crate) fn safe_point() {
+    if !FORKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let started = SLICE_START.with(Cell::get);
+    if started.is_some_and(|at| at.elapsed() < TIME_SLICE) {
+        return;
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    wake_sleepers(s);
+    if s.run_queue.is_empty() {
+        SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+        return;
+    }
+    s.run_queue.push_back(me);
+    let mut guard = park(guard, me);
+    raise_interrupt(sched(&mut guard), me);
+}
+
+/// Run `read`, a read from stdin that may block, without the baton, so other
+/// threads run while it waits. `read` must not touch Haskell values.
+pub(crate) fn outside_baton<T>(read: impl FnOnce() -> T) -> T {
+    if !FORKED.load(Ordering::Relaxed) {
+        return read();
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    s.outside += 1;
+    hand_off(s);
+    drop(guard);
+    let result = read();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    s.outside -= 1;
+    s.run_queue.push_back(me);
+    if s.current == IDLE {
+        IDLE_WAKER.notify_one();
+    }
+    let mut guard = wait_for_baton(guard, me);
+    raise_interrupt(sched(&mut guard), me);
+    result
 }
 
 /// Wait until this thread holds the baton.
@@ -178,6 +300,7 @@ fn wait_for_baton(mut guard: Guard, me: u64) -> Guard {
     while sched(&mut guard).current != me {
         guard = waker.wait(guard).unwrap_or_else(|e| e.into_inner());
     }
+    SLICE_START.with(|cell| cell.set(Some(Instant::now())));
     guard
 }
 
@@ -194,9 +317,8 @@ fn park_blocked(mut guard: Guard, me: u64, blocked: Blocked) -> (Guard, bool) {
     let mut guard = park(guard, me);
     let s = sched(&mut guard);
     s.blocked.remove(&me);
-    if let Some(exception) = s.interrupts.remove(&me) {
+    if raise_interrupt(s, me) {
         s.delivered.remove(&me);
-        crate::ffi::raise_async(exception);
         return (guard, false);
     }
     (guard, true)
@@ -241,6 +363,16 @@ unsafe impl Send for SendPtr {}
 /// `action` must be an IO action closure or a thunk evaluating to one.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
+    if !FORKED.swap(true, Ordering::Relaxed) {
+        std::thread::Builder::new()
+            .name("bhc-idle".to_string())
+            .spawn(run_idle)
+            .unwrap_or_else(|e| {
+                eprintln!("forkIO: cannot create the idle thread: {e}");
+                std::process::exit(1)
+            });
+        SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+    }
     let mut guard = lock();
     let s = sched(&mut guard);
     let id = s.next_id;

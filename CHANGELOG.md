@@ -6,6 +6,15 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A thread that never blocks no longer starves the others: a thread is
+  preempted at an IO step once it has run for 20 ms, and an exception thrown
+  to it reaches it there. Pure code is still not preempted (#75).
+- Reading stdin (`getLine`, `getChar`, `getContents`, `isEOF` and their `h`
+  forms on `stdin`) lets other threads run while it waits. `Data.Text.IO`'s
+  reads still stop every thread (#75).
+
 ## [0.2.28] - 2026-11-07
 
 `throwTo` works, `killThread` runs the killed thread's handlers, and `quot`,

@@ -157,27 +157,21 @@ impl<'ctx> LlvmModule<'ctx> {
             self.module
                 .add_function("bhc_handle_uncaught_exception", uncaught_type, None);
 
-        // Create entry block
-        let entry = self
+        // The program body runs on a thread with a large stack
+        // (`bhc_run_main`, rts/bhc-rts/src/stack.rs, #82): forcing a long thunk
+        // chain recurses on the C stack, which is small on the OS main thread.
+        let body_type = void_type.fn_type(&[], false);
+        let body_fn = self.add_function("__bhc_main_body", body_type);
+        let run_main_type = void_type.fn_type(&[ptr_type.into()], false);
+        let run_main = self
+            .module
+            .add_function("bhc_run_main", run_main_type, None);
+
+        let body_entry = self
             .type_mapper
             .context()
-            .append_basic_block(main_fn, "entry");
-        self.builder.position_at_end(entry);
-
-        // Get argc and argv parameters
-        let argc = main_fn
-            .get_nth_param(0)
-            .ok_or_else(|| CodegenError::Internal("missing argc param".to_string()))?;
-        let argv = main_fn
-            .get_nth_param(1)
-            .ok_or_else(|| CodegenError::Internal("missing argv param".to_string()))?;
-
-        // Call bhc_rts_init(argc, argv)
-        self.builder
-            .build_call(rts_init, &[argc.into(), argv.into()], "")
-            .map_err(|e| {
-                CodegenError::Internal(format!("failed to build rts_init call: {:?}", e))
-            })?;
+            .append_basic_block(body_fn, "entry");
+        self.builder.position_at_end(body_entry);
 
         // Call Haskell main with null env pointer (uniform calling convention)
         let null_env = ptr_type.const_null();
@@ -204,11 +198,45 @@ impl<'ctx> LlvmModule<'ctx> {
         }
 
         // Handle any uncaught exception (e.g. `error`) that escaped to the top
-        // level: print it and exit non-zero before normal shutdown.
+        // level: print it and exit non-zero before normal shutdown. It reads the
+        // exception of the thread `main` ran on, so it runs in the body too.
         self.builder
             .build_call(handle_uncaught, &[], "")
             .map_err(|e| {
                 CodegenError::Internal(format!("failed to build uncaught-handler call: {:?}", e))
+            })?;
+        self.builder
+            .build_return(None)
+            .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+
+        // int main(int argc, char** argv)
+        let entry = self
+            .type_mapper
+            .context()
+            .append_basic_block(main_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        // Get argc and argv parameters
+        let argc = main_fn
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::Internal("missing argc param".to_string()))?;
+        let argv = main_fn
+            .get_nth_param(1)
+            .ok_or_else(|| CodegenError::Internal("missing argv param".to_string()))?;
+
+        // Call bhc_rts_init(argc, argv)
+        self.builder
+            .build_call(rts_init, &[argc.into(), argv.into()], "")
+            .map_err(|e| {
+                CodegenError::Internal(format!("failed to build rts_init call: {:?}", e))
+            })?;
+
+        // Run the body, and wait for it.
+        let body_ptr = body_fn.as_global_value().as_pointer_value();
+        self.builder
+            .build_call(run_main, &[body_ptr.into()], "")
+            .map_err(|e| {
+                CodegenError::Internal(format!("failed to build run_main call: {:?}", e))
             })?;
 
         // Call bhc_shutdown()

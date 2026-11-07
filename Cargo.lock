@@ -809,6 +809,7 @@ dependencies = [
  "bhc-rts-arena",
  "bhc-rts-gc",
  "bhc-rts-scheduler",
+ "libc",
  "num-bigint",
  "num-integer",
  "num-traits",

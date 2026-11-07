@@ -8,6 +8,10 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A long chain of unevaluated thunks no longer crashes the program: `main`
+  runs on a thread with a 1 GiB stack (reserved, not committed). A program
+  that still runs out of stack prints `prog: stack overflow` and exits with
+  status 2, as in GHC, instead of a bare segfault (#82).
 - A thread that never blocks no longer starves the others: a thread is
   preempted at an IO step once it has run for 20 ms, and an exception thrown
   to it reaches it there. Pure code is still not preempted (#75).

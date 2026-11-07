@@ -67,6 +67,7 @@
 // FFI entry points for C interop
 pub mod concurrent;
 pub mod ffi;
+pub mod stack;
 
 // Re-export RTS components
 pub use bhc_rts_alloc as alloc;

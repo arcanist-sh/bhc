@@ -384,6 +384,7 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
         .stack_size(FORKED_THREAD_STACK_BYTES)
         .spawn(move || {
             let action = action;
+            crate::stack::enter_thread(FORKED_THREAD_STACK_BYTES);
             THIS_THREAD.with(|t| t.set(id));
             let mut guard = wait_for_baton(lock(), id);
             let interrupt = sched(&mut guard).interrupts.remove(&id);

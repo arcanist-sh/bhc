@@ -535,6 +535,11 @@ pub struct Lowering<'ctx, 'm> {
     /// refers back to it is a recursive knot and is passed lazily through a
     /// closure call (see `lower_closure_call`).
     current_top_fn: Option<VarId>,
+    /// The binding being lowered is a derived instance method
+    /// (`$derived_foldr_Tree`). Its recursive calls never tie a parser knot,
+    /// and its generated variables are typed `Error`, so the knot rule could
+    /// not tell a raw `Int` accumulator from a thunk (#64, #87).
+    current_top_is_derived: bool,
     /// Set for one `lower_lazy` call: the thunk forces its own result, for a
     /// recursive-knot argument whose value can be a thunk passed through
     /// unevaluated (see `lower_closure_call`).
@@ -620,6 +625,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
             current_top_fn: None,
+            current_top_is_derived: false,
             lazy_force_result: false,
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
@@ -682,6 +688,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
             current_top_fn: None,
+            current_top_is_derived: false,
             lazy_force_result: false,
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
@@ -12021,11 +12028,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         init_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Check if container is a user ADT with derived Foldable
-        if let Some(type_name) = self.infer_adt_type_from_expr(list_expr) {
-            if self.derived_foldable_fns.contains_key(&type_name) {
-                return self.lower_foldr_derived(func_expr, init_expr, list_expr, &type_name);
-            }
+        // Check if container is a user ADT with derived Foldable. A variable
+        // holding one has no constructor to read, and `infer_adt_type_from_expr`
+        // names its type only when the type also derives `Show`, so the
+        // container's own type is checked too. Without it `foldr f z tree` on a
+        // `Foldable`-only type folded the tree as a list, forcing its raw
+        // elements (#87).
+        let derived_type = self
+            .infer_adt_type_from_expr(list_expr)
+            .filter(|name| self.derived_foldable_fns.contains_key(name))
+            .or_else(|| {
+                Self::head_type_con_name(&list_expr.ty())
+                    .filter(|name| self.derived_foldable_fns.contains_key(name))
+            });
+        if let Some(type_name) = derived_type {
+            return self.lower_foldr_derived(func_expr, init_expr, list_expr, &type_name);
         }
 
         // Lower the function (should be a closure)
@@ -51278,6 +51295,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Infer the user ADT type name from an expression, for derived method dispatch.
+    /// The name of the type constructor at the head of `ty` (`Tree` for
+    /// `Tree Int`), if it has one.
+    fn head_type_con_name(ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Con(tc) => Some(tc.name.as_str().to_string()),
+            Ty::App(f, _) => Self::head_type_con_name(f),
+            _ => None,
+        }
+    }
+
     fn infer_adt_type_from_expr(&self, expr: &Expr) -> Option<String> {
         // The syntactic cases below name the type from a CONSTRUCTOR. When
         // there is no constructor to read — a variable, or the stand-in used
@@ -51622,6 +51649,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_function_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
         self.dbg_enclosing_bind = var.name.as_str().to_string();
         self.current_top_fn = Some(var.id);
+        self.current_top_is_derived = var.name.as_str().starts_with("$derived_");
         let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
             CodegenError::Internal(format!("function not declared: {}", var.name.as_str()))
         })?;
@@ -59021,6 +59049,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Parser knots have concrete types.
             let recursive_knot = !Self::is_trivial_expr(arg_expr)
                 && !matches!(arg_expr.ty(), Ty::Var(_))
+                && !self.current_top_is_derived
                 && self
                     .current_top_fn
                     .is_some_and(|id| Self::expr_calls_var(arg_expr, id));

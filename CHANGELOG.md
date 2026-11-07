@@ -8,6 +8,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `foldr` called directly on a type with only a derived `Foldable` instance
+  works. Held in a variable, the container was folded as a list, which forced
+  its raw elements and crashed, and an `Int` result printed as an address
+  (#87).
+
 - A polymorphic recursive fold such as `foldT f z (Node l x r) = foldT f (f x
   (foldT f z r)) l` returns the right value at `Int` and `Double`. The inner
   call was passed to `f` as a thunk, which was then read as a number, so

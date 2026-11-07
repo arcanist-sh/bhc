@@ -59013,7 +59013,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // dictionary to a helper (pandoc-types' `query f x = f x <>
             // queryInline f x`) merely names itself, and a thunk there reached
             // the builtin `<>`, which does not force its operands.
+            //
+            // But not an argument whose type is a bare type variable: it may
+            // be a raw `Int` or `Double` (a fold's accumulator, `foldT f
+            // (f x (foldT f z r)) l` at `Int`), and a thunk cannot stand in
+            // for one, since nothing at run time tells them apart (#64).
+            // Parser knots have concrete types.
             let recursive_knot = !Self::is_trivial_expr(arg_expr)
+                && !matches!(arg_expr.ty(), Ty::Var(_))
                 && self
                     .current_top_fn
                     .is_some_and(|id| Self::expr_calls_var(arg_expr, id));

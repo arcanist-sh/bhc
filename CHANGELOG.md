@@ -8,6 +8,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A polymorphic recursive fold such as `foldT f z (Node l x r) = foldT f (f x
+  (foldT f z r)) l` returns the right value at `Int` and `Double`. The inner
+  call was passed to `f` as a thunk, which was then read as a number, so
+  `foldT (+) 0 tree` printed an address (#64).
+
 - A long chain of unevaluated thunks no longer crashes the program: `main`
   runs on a thread with a 1 GiB stack (reserved, not committed). A program
   that still runs out of stack prints `prog: stack overflow` and exits with

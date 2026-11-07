@@ -2480,3 +2480,11 @@ fn test_tier3_concurrent_preemption_native() {
     }
     run_native_test("tier3_io/concurrent_preemption", Profile::Default);
 }
+
+#[test]
+fn test_tier2_polymorphic_fold_accumulator_native() {
+    run_native_test(
+        "tier2_functions/polymorphic_fold_accumulator",
+        Profile::Default,
+    );
+}

@@ -2,17 +2,22 @@
 //!
 //! A fixture's stdin is written all at once, so it cannot show this: here the
 //! program's stdin stays open until another thread has printed, which it can
-//! only do if `getLine` gave the baton up.
+//! only do if the read gave the baton up.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const PROGRAM: &str = "\
-import Control.Concurrent
-import System.IO
+use bhc_e2e_tests::add_bhc_library_path;
 
+/// A program whose main thread reads a line with `read_line` (which leaves
+/// it in `l` as a `String`) while another thread prints `ticker ran`.
+fn program(imports: &str, read_line: &str) -> String {
+    format!(
+        "import Control.Concurrent
+import System.IO
+{imports}
 main :: IO ()
 main = do
   hSetBuffering stdout NoBuffering
@@ -21,24 +26,27 @@ main = do
     threadDelay 10000
     putStrLn \"ticker ran\"
     putMVar done ()
-  l <- getLine
+  l <- {read_line}
   takeMVar done
   putStrLn (\"got \" ++ l)
-";
+"
+    )
+}
 
-#[test]
-fn get_line_lets_other_threads_run() {
+/// Compile `source`, run it with stdin held open until it prints its first
+/// line, and check that the line is the other thread's.
+fn check_other_thread_runs_during_read(source: &str) {
     // Threads run only under the closure IO model.
     if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     let work = tempfile::tempdir().expect("temporary directory");
-    let source = work.path().join("Main.hs");
-    std::fs::write(&source, PROGRAM).expect("write the program");
+    let path = work.path().join("Main.hs");
+    std::fs::write(&path, source).expect("write the program");
     let binary = work.path().join("main");
     let compile = Command::new("cargo")
         .args(["run", "--quiet", "-p", "bhc", "--"])
-        .arg(&source)
+        .arg(&path)
         .arg("-o")
         .arg(&binary)
         .output()
@@ -49,7 +57,11 @@ fn get_line_lets_other_threads_run() {
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let mut child = Command::new(&binary)
+    // On Linux the program links the runtime's shared libraries, which the
+    // loader finds only through the library path.
+    let mut command = Command::new(&binary);
+    add_bhc_library_path(&mut command);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -73,9 +85,22 @@ fn get_line_lets_other_threads_run() {
     assert_eq!(
         first.as_deref(),
         Ok("ticker ran"),
-        "the other thread did not run while getLine waited"
+        "the other thread did not run while the read waited"
     );
     let second = lines.recv_timeout(Duration::from_secs(30));
     assert_eq!(second.as_deref(), Ok("got hi"));
     assert!(status.success(), "exit status {status}");
+}
+
+#[test]
+fn get_line_lets_other_threads_run() {
+    check_other_thread_runs_during_read(&program("", "getLine"));
+}
+
+#[test]
+fn text_get_line_lets_other_threads_run() {
+    check_other_thread_runs_during_read(&program(
+        "import qualified Data.Text as T\nimport qualified Data.Text.IO as TIO\n",
+        "fmap T.unpack TIO.getLine",
+    ));
 }

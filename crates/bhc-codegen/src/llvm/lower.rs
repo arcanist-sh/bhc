@@ -48363,17 +48363,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError(format!("{} expects handle", label))),
         };
-        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+        self.build_handle_read(handle_ptr, rts_id, label).map(Some)
+    }
+
+    /// Call the read function `rts_id` of another runtime library on
+    /// `handle`. If it is stdin, the read may block, so it runs without the
+    /// thread baton (`bhc_read_wait_begin`/`_end`) and other threads run
+    /// meanwhile (#75).
+    fn build_handle_read(
+        &mut self,
+        handle_ptr: PointerValue<'ctx>,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let rts_fn = *self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
             CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
         })?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let begin = match self.module.get_function("bhc_read_wait_begin") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_read_wait_begin",
+                i64_type.fn_type(&[ptr_type.into()], false),
+            ),
+        };
+        let end = match self.module.get_function("bhc_read_wait_end") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_read_wait_end",
+                self.llvm_ctx.void_type().fn_type(&[i64_type.into()], false),
+            ),
+        };
+        let released = self
+            .builder()
+            .build_call(begin, &[handle_ptr.into()], "read_wait")
+            .map_err(|e| CodegenError::Internal(format!("{label}: read wait failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{label}: read wait returned void")))?;
         let result = self
             .builder()
-            .build_call(*rts_fn, &[handle_ptr.into()], label)
+            .build_call(rts_fn, &[handle_ptr.into()], label)
             .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
-        Ok(Some(result))
+        self.builder()
+            .build_call(end, &[released.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("{label}: read wait end failed: {e:?}")))?;
+        Ok(result)
     }
 
     /// Data.Text.IO (handle, Text) -> void: hPutStr, hPutStrLn.
@@ -48458,18 +48497,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: stdin returned void", label)))?;
         let stdin_ptr = stdin.into_pointer_value();
-        // Call RTS function
-        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
-            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
-        })?;
-        let result = self
-            .builder()
-            .build_call(*rts_fn, &[stdin_ptr.into()], label)
-            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
-        Ok(Some(result))
+        self.build_handle_read(stdin_ptr, rts_id, label).map(Some)
     }
 
     /// ByteString snoc: (ptr, i64) -> ptr (e.g. bs_snoc)
@@ -55295,6 +55323,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     1000459
                 };
+                if var_id == 1000459 {
+                    if let BasicValueEnum::PointerValue(handle) = args[0] {
+                        return self
+                            .build_handle_read(handle, var_id, "lbs_h_get_contents")
+                            .map(Some);
+                    }
+                }
                 let rts_fn = self
                     .functions
                     .get(&VarId::new(var_id))

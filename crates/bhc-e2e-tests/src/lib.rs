@@ -35,6 +35,7 @@ pub use runner::{format_failure_report, E2EResult, E2ERunner, ExecutionOutput};
 
 // Re-export backend-specific functions
 pub use gpu::cuda_available;
+pub use native::add_bhc_library_path;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

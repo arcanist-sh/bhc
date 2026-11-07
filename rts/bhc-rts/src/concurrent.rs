@@ -268,16 +268,31 @@ pub(crate) fn safe_point() {
 /// Run `read`, a read from stdin that may block, without the baton, so other
 /// threads run while it waits. `read` must not touch Haskell values.
 pub(crate) fn outside_baton<T>(read: impl FnOnce() -> T) -> T {
-    if !FORKED.load(Ordering::Relaxed) {
-        return read();
+    let released = release_baton();
+    let result = read();
+    if released {
+        reacquire_baton();
     }
-    let me = me();
+    result
+}
+
+/// Give the baton up for a read that may block. Returns whether it did: with
+/// one thread there is nobody to give it to.
+fn release_baton() -> bool {
+    if !FORKED.load(Ordering::Relaxed) {
+        return false;
+    }
     let mut guard = lock();
     let s = sched(&mut guard);
     s.outside += 1;
     hand_off(s);
-    drop(guard);
-    let result = read();
+    true
+}
+
+/// Take the baton back after [`release_baton`], waiting for a turn. An
+/// exception thrown to this thread meanwhile is raised here.
+fn reacquire_baton() {
+    let me = me();
     let mut guard = lock();
     let s = sched(&mut guard);
     s.outside -= 1;
@@ -287,7 +302,24 @@ pub(crate) fn outside_baton<T>(read: impl FnOnce() -> T) -> T {
     }
     let mut guard = wait_for_baton(guard, me);
     raise_interrupt(sched(&mut guard), me);
-    result
+}
+
+/// Before a read from `handle` in another runtime library (`Data.Text.IO`,
+/// lazy `ByteString`): if it is stdin, give the baton up, so other threads run
+/// while it waits. Returns 1 if it did; pass that to [`bhc_read_wait_end`].
+/// Compiled code brackets the call with the two.
+#[no_mangle]
+pub extern "C" fn bhc_read_wait_begin(handle: *mut u8) -> i64 {
+    i64::from(crate::ffi::is_stdin_handle(handle) && release_baton())
+}
+
+/// After the read [`bhc_read_wait_begin`] bracketed: take the baton back if
+/// it was given up.
+#[no_mangle]
+pub extern "C" fn bhc_read_wait_end(released: i64) {
+    if released != 0 {
+        reacquire_baton();
+    }
 }
 
 /// Wait until this thread holds the baton.

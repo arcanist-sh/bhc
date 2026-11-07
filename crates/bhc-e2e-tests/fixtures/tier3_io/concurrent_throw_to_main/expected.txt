@@ -1,0 +1,3 @@
+main caught: from child
+async: thread killed
+main cleanup

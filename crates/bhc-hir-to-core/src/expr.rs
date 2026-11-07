@@ -1057,7 +1057,10 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         }
         return;
     }
-    if matches!(v.name.as_str(), "try" | "throw" | "throwIO" | "ioError") {
+    if matches!(
+        v.name.as_str(),
+        "try" | "throw" | "throwIO" | "ioError" | "throwTo"
+    ) {
         // Codegen picks the exception type these act on from their own type.
         if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
             if matches!(&resolved, Ty::Fun(..)) {

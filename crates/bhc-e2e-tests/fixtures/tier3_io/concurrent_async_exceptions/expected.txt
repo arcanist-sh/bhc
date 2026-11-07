@@ -1,0 +1,13 @@
+cleanup
+caught: thread killed
+caught: boom
+stopped: enough
+counted
+acquire
+release
+unblocked 1
+unblocked 2
+unblocked 3
+chan still works
+self-kill cleanup
+end

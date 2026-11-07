@@ -77,6 +77,10 @@ const EXC_TAG_ERROR_CALL: u64 = 2;
 /// The RTS exception tag of `ArithException` (`EXC_TAG_ARITH_EXCEPTION` in
 /// `bhc-rts`).
 const EXC_TAG_ARITH_EXCEPTION: u64 = 4;
+
+/// The RTS exception tag of `AsyncException` (`EXC_TAG_ASYNC_EXCEPTION` in
+/// `bhc-rts`).
+const EXC_TAG_ASYNC_EXCEPTION: u64 = 5;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::types::{BasicType, BasicTypeEnum};
@@ -7458,7 +7462,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "forkIO" | "forkOS" | "myThreadId" | "killThread" | "threadDelay" | "newEmptyMVar"
             | "newMVar" | "takeMVar" | "readMVar" | "putMVar" | "tryTakeMVar" | "tryPutMVar"
             | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar" | "newChan" | "readChan"
-            | "writeChan"
+            | "writeChan" | "throwTo"
                 if crate::io_closure_mode() =>
             {
                 self.lower_builtin_concurrency(name, args)
@@ -15710,66 +15714,55 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         msg_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let msg_val = self
-            .lower_expr(msg_expr)?
-            .ok_or_else(|| CodegenError::Internal("throw: message has no value".to_string()))?;
-
-        let msg_ptr = self.value_to_ptr(msg_val)?;
-
-        // An `IOException`, `ErrorCall` or `SomeException` already is an
-        // exception object, and wrapping it would hide its tag from a handler.
-        let thrown_is_exception_object = matches!(
+        let is_object = matches!(
             &self.current_builtin_ty,
             Ty::Fun(a, _) if Self::is_exception_object_ty(a)
         ) || Self::is_user_error_call(msg_expr);
+        let exception = self.lower_exception_object(msg_expr, is_object)?;
+        let throw_fn = *self
+            .functions
+            .get(&VarId::new(1000080))
+            .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
+        let result = self
+            .builder()
+            .build_call(throw_fn, &[exception.into()], "throw_sentinel")
+            .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
+        Ok(Some(result))
+    }
 
-        // Wrap in SomeException with tag 0 (generic)
-        let make_exc_fn = self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
+    /// The RTS exception object thrown for `expr`. An exception object
+    /// (`is_object`: an `IOException`, `ErrorCall`, `SomeException` and so on)
+    /// is thrown as it is, since wrapping it would hide its tag from a handler;
+    /// any other value is wrapped with tag 0.
+    fn lower_exception_object(
+        &mut self,
+        expr: &Expr,
+        is_object: bool,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let value = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("throw: exception has no value".to_string()))?;
+        let value_ptr = self.value_to_ptr(value)?;
+        if is_object {
+            return Ok(value_ptr);
+        }
+        let make_exc_fn = *self.functions.get(&VarId::new(1000700)).ok_or_else(|| {
             CodegenError::Internal("bhc_make_some_exception not declared".to_string())
         })?;
-
-        let i64_type = self.llvm_context().i64_type();
-        let tag_val = i64_type.const_int(0, false);
-
-        if thrown_is_exception_object {
-            let throw_fn = self
-                .functions
-                .get(&VarId::new(1000080))
-                .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
-            let result = self
-                .builder()
-                .build_call(*throw_fn, &[msg_ptr.into()], "throw_result")
-                .map_err(|e| CodegenError::Internal(format!("throw failed: {:?}", e)))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
-            return Ok(Some(result));
-        }
-
+        let tag_val = self.llvm_context().i64_type().const_int(0, false);
         let some_exc = self
             .builder()
-            .build_call(*make_exc_fn, &[tag_val.into(), msg_ptr.into()], "some_exc")
+            .build_call(make_exc_fn, &[tag_val.into(), value_ptr.into()], "some_exc")
             .map_err(|e| CodegenError::Internal(format!("failed to make SomeException: {:?}", e)))?
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| {
                 CodegenError::Internal("make_some_exception: returned void".to_string())
             })?;
-
-        let throw_fn = self
-            .functions
-            .get(&VarId::new(1000080))
-            .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
-
-        let result = self
-            .builder()
-            .build_call(*throw_fn, &[some_exc.into()], "throw_sentinel")
-            .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
-
-        Ok(Some(result))
+        self.value_to_ptr(some_exc)
     }
 
     /// Lower `catch` - call bhc_catch with action and handler closures.
@@ -16363,14 +16356,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// The RTS exception tag for handling exceptions of type `ty`: 1 for
     /// `IOException`, 2 for `ErrorCall`, 3 for `SomeException` (everything, kept
-    /// whole so it can be shown), 4 for `ArithException` and 0 for anything else
-    /// (everything, unwrapped).
+    /// whole so it can be shown), 4 for `ArithException`, 5 for `AsyncException`
+    /// and 0 for anything else (everything, unwrapped).
     fn exception_tag_of_ty(ty: &Ty) -> u64 {
         match ty {
             Ty::Con(c) if matches!(c.name.as_str(), "IOException" | "IOError") => 1,
             Ty::Con(c) if c.name.as_str() == "ErrorCall" => 2,
             Ty::Con(c) if c.name.as_str() == "SomeException" => 3,
             Ty::Con(c) if c.name.as_str() == "ArithException" => EXC_TAG_ARITH_EXCEPTION,
+            Ty::Con(c) if c.name.as_str() == "AsyncException" => EXC_TAG_ASYNC_EXCEPTION,
             _ => 0,
         }
     }
@@ -16397,6 +16391,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     3 // EXC_TAG_WHOLE_EXCEPTION
                 } else if ty_name.contains("ArithException") {
                     EXC_TAG_ARITH_EXCEPTION
+                } else if ty_name.contains("AsyncException") {
+                    EXC_TAG_ASYNC_EXCEPTION
                 } else {
                     0 // EXC_TAG_SOME_EXCEPTION (catch-all)
                 }
@@ -28084,6 +28080,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "killThread" => {
                 let thread = self.lower_concurrency_handle(args[0])?;
                 self.call_concurrency_rts("bhc_kill_thread", &[thread], false)?
+            }
+            "throwTo" => {
+                let is_object = matches!(
+                    &self.current_builtin_ty,
+                    Ty::Fun(_, rest) if matches!(
+                        rest.as_ref(),
+                        Ty::Fun(e, _) if Self::is_exception_object_ty(e)
+                    )
+                ) || Self::is_user_error_call(args[1]);
+                let thread = self.lower_concurrency_handle(args[0])?;
+                let exception = self.lower_exception_object(args[1], is_object)?;
+                self.call_concurrency_rts("bhc_throw_to", &[thread, exception], false)?
             }
             "threadDelay" => {
                 let micros = self.lower_concurrency_value(args[0])?;
@@ -63790,7 +63798,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         }
         "myThreadId" | "newEmptyMVar" | "newChan" if crate::io_closure_mode() => Some(0),
         "putMVar" | "tryPutMVar" | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar"
-        | "writeChan"
+        | "writeChan" | "throwTo"
             if crate::io_closure_mode() =>
         {
             Some(2)

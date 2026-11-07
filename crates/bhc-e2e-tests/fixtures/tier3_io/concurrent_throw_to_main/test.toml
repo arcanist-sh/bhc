@@ -1,0 +1,3 @@
+[test]
+backends = ["native"]
+expected_exit = 1

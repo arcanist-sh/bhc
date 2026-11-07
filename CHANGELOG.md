@@ -6,6 +6,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.28] - 2026-11-07
+
+`throwTo` works, `killThread` runs the killed thread's handlers, and `quot`,
+`rem`, `quotRem`, `divMod`, `gcd` and `lcm` work at `Integer`.
+
 ### Added
 
 - `throwTo`, which aborted at run time, raises its exception in the other
@@ -17,11 +22,20 @@ All notable changes to BHC are recorded here. The format follows
   handlers. It used to drop the thread without them. An uncaught
   `ThreadKilled` ends a forked thread without a message, and the main thread
   with status 1, as in GHC (#75).
-
 - `quot`, `rem`, `quotRem`, `divMod`, `gcd` and `lcm` work at `Integer`. Their types
   were pinned to `Int`, so a negated literal operand under `quot` or `rem` crashed
   `print`, `gcd` and `lcm` on `Integer`s crashed, and `quotRem`/`divMod` on
   `Integer`s crashed (#78).
+
+### Known issues
+
+- A polymorphic recursive fold that returns an accumulator used at an unboxed
+  type (`foldT (+) 0 tree`) prints an address (#64).
+- With `BHC_IO_MODEL=eager`, a recursive `Monad m =>` function at `IO` prints an
+  address (#65).
+- Threads take turns, so one that never blocks starves the others, and a blocking
+  read such as `getLine` stops every thread. `mask` does not defer an exception
+  thrown to a thread (#75).
 
 ## [0.2.27] - 2026-11-06
 
@@ -517,7 +531,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.27...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.28...HEAD
+[0.2.28]: https://github.com/arcanist-sh/bhc/compare/v0.2.27...v0.2.28
 [0.2.27]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...v0.2.27
 [0.2.26]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...v0.2.26
 [0.2.25]: https://github.com/arcanist-sh/bhc/compare/v0.2.24...v0.2.25

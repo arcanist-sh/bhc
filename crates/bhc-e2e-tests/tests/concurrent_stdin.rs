@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use bhc_e2e_tests::add_bhc_library_path;
+
 /// A program whose main thread reads a line with `read_line` (which leaves
 /// it in `l` as a `String`) while another thread prints `ticker ran`.
 fn program(imports: &str, read_line: &str) -> String {
@@ -55,7 +57,11 @@ fn check_other_thread_runs_during_read(source: &str) {
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let mut child = Command::new(&binary)
+    // On Linux the program links the runtime's shared libraries, which the
+    // loader finds only through the library path.
+    let mut command = Command::new(&binary);
+    add_bhc_library_path(&mut command);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -75,7 +75,7 @@ pub fn compile_native(
 /// `libbhc_text`, etc. from `target/debug` (or `target/release`). On Linux
 /// those have no embedded rpath, so without this the executable fails to start
 /// with exit code 127.
-fn add_bhc_library_path(cmd: &mut Command) {
+pub fn add_bhc_library_path(cmd: &mut Command) {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let Some(workspace) = manifest_dir.parent().and_then(|p| p.parent()) else {
         return;

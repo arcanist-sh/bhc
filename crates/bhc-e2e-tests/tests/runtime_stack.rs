@@ -6,6 +6,8 @@
 
 use std::process::{Command, Output};
 
+use bhc_e2e_tests::add_bhc_library_path;
+
 /// Compile `source` at `-O0` and run it.
 fn compile_and_run(source: &str) -> Output {
     let work = tempfile::tempdir().expect("temporary directory");
@@ -24,7 +26,11 @@ fn compile_and_run(source: &str) -> Output {
         "bhc failed: {}",
         String::from_utf8_lossy(&compile.stderr)
     );
-    Command::new(&binary).output().expect("run the program")
+    // On Linux the program links the runtime's shared libraries, which the
+    // loader finds only through the library path.
+    let mut command = Command::new(&binary);
+    add_bhc_library_path(&mut command);
+    command.output().expect("run the program")
 }
 
 #[test]

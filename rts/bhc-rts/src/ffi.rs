@@ -3922,6 +3922,11 @@ pub extern "C" fn bhc_stdin() -> *mut u8 {
     HANDLE_STDIN as *mut u8
 }
 
+/// Whether `handle` is the stdin handle.
+pub(crate) fn is_stdin_handle(handle: *mut u8) -> bool {
+    handle as usize == HANDLE_STDIN
+}
+
 /// Return sentinel pointer for stdout.
 #[no_mangle]
 pub extern "C" fn bhc_stdout() -> *mut u8 {

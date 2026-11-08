@@ -25,13 +25,11 @@ jobs:
           # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: bhc
             asset_name: bhc-x86_64-linux
 
           # macOS aarch64 (Apple Silicon)
           - os: macos-15
             target: aarch64-apple-darwin
-            artifact_name: bhc
             asset_name: bhc-aarch64-darwin
 
     steps:
@@ -72,8 +70,9 @@ jobs:
 
       - name: Build release binary, RTS, and stdlib
         run: |
-          # Compiler driver
-          cargo build --release --target ${{ matrix.target }} -p bhc
+          # Compiler driver, plus the REPL (`bhc repl` runs the `bhci` next
+          # to `bhc`) and the IR inspector
+          cargo build --release --target ${{ matrix.target }} -p bhc -p bhci -p bhi
           # RTS — required to link any compiled program
           cargo build --release --target ${{ matrix.target }} -p bhc-rts
           # Standard library static archives — without these the compiled
@@ -93,8 +92,10 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p dist/lib
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
-          chmod +x dist/${{ matrix.artifact_name }}
+          for bin in bhc bhci bhi; do
+            cp target/${{ matrix.target }}/release/$bin dist/
+            chmod +x dist/$bin
+          done
           # RTS + every stdlib static archive. The shell glob means a new
           # stdlib crate is picked up automatically as long as it ends up
           # in target/.../release/ with a libbhc_*.a name.
@@ -141,13 +142,15 @@ jobs:
 
       - name: Generate checksums
         run: |
-          cd artifacts
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sh -c '
-            for f; do
-              sha256sum "$f" | sed "s|  \./|  |"
+          # Bare file names, so that `shasum -a 256 -c --ignore-missing
+          # SHA256SUMS.txt` works next to a downloaded archive (install.sh
+          # and the Homebrew formula rely on this).
+          : > SHA256SUMS.txt
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort |
+            while read -r f; do
+              (cd "$(dirname "$f")" && sha256sum "$(basename "$f")") >> SHA256SUMS.txt
             done
-          ' sh {} + > ../SHA256SUMS.txt
-          cat ../SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create release notes
         env:
@@ -206,6 +209,57 @@ jobs:
             SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew-tap:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    # Prereleases stay out of the tap.
+    if: ${{ !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+    env:
+      # A token that can push to arcanist-sh/homebrew-tap. Without it the job
+      # only prints the formula, to update the tap by hand.
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Render formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release download "$VERSION" -R "$GITHUB_REPOSITORY" -p SHA256SUMS.txt -O SHA256SUMS.txt
+          scripts/homebrew-formula.sh "$VERSION" SHA256SUMS.txt > bhc.rb
+          cat bhc.rb
+
+      - name: Push formula to the tap
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; update Formula/bhc.rb in arcanist-sh/homebrew-tap by hand with the formula printed above"
+            exit 0
+          fi
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/arcanist-sh/homebrew-tap.git" tap
+          cp bhc.rb tap/Formula/bhc.rb
+          cd tap
+          if git diff --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "bhc: ${VERSION#v}"
+          git push origin HEAD
 
   publish-crates:
     name: Publish to crates.io

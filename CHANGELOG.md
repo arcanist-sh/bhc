@@ -6,7 +6,21 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Release archives include `bhci`, the REPL that `bhc repl` starts, and `bhi`,
+  the IR inspector; the install script and the Homebrew formula install them
+  (#50).
+- The release workflow updates the Homebrew formula in `arcanist-sh/homebrew-tap`
+  (`scripts/homebrew-formula.sh`), which installs every `libbhc_*.a` instead of
+  only the RTS (#47). It needs a `HOMEBREW_TAP_TOKEN` secret, and prints the
+  formula to apply by hand without one.
+
 ### Fixed
+
+- `SHA256SUMS.txt` lists bare archive names, so `shasum -a 256 -c
+  --ignore-missing SHA256SUMS.txt` works next to a download, and the install
+  script verifies the archive against it before unpacking (#46).
 
 - `mask` defers an exception thrown to a thread with `throwTo` or
   `killThread` until the thread unmasks or blocks, and `uninterruptibleMask`

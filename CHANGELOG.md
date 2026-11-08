@@ -8,6 +8,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `mask` defers an exception thrown to a thread with `throwTo` or
+  `killThread` until the thread unmasks or blocks, and `uninterruptibleMask`
+  until it unmasks, as in GHC. `throwTo` waits until the exception is
+  delivered, and a forked thread starts in its parent's masking state (#75).
+
 - `mask $ \restore -> body` runs its body, `restore` runs its action, and an
   exception thrown inside `restore` reaches the caller. Under the default IO
   model the body never ran, so `forkFinally` and anything else built on

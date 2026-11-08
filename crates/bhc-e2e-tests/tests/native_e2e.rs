@@ -2507,3 +2507,11 @@ fn test_tier3_mask_restore_native() {
     }
     run_native_test("tier3_io/mask_restore", Profile::Default);
 }
+
+#[test]
+fn test_tier3_concurrent_mask_deferral_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_mask_deferral", Profile::Default);
+}

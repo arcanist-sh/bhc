@@ -3714,6 +3714,25 @@ pub extern "C" fn bhc_bracket(
     }
 }
 
+/// Set this thread's async exception masking state, and let the scheduler
+/// know: it defers an exception thrown to a masked thread and raises it once
+/// the thread unmasks.
+fn set_mask_state(state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+    crate::concurrent::mask_changed(state);
+}
+
+/// This thread's async exception masking state.
+pub(crate) fn current_mask_state() -> i64 {
+    BHC_MASK_STATE.with(|cell| cell.get())
+}
+
+/// Start a forked thread in its parent's masking state. The scheduler records
+/// it for the thread itself.
+pub(crate) fn init_mask_state(state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+}
+
 /// Masking state constants matching Haskell's MaskingState constructors.
 const MASK_UNMASKED: i64 = 0;
 const MASK_INTERRUPTIBLE: i64 = 1;
@@ -3746,7 +3765,7 @@ pub extern "C" fn bhc_query_terminal(fd: i64) -> i64 {
 /// Set the async exception masking state.
 #[no_mangle]
 pub extern "C" fn bhc_set_masking_state(state: i64) {
-    BHC_MASK_STATE.with(|cell| cell.set(state));
+    set_mask_state(state);
 }
 
 // ----------------------------------------------------------------------------
@@ -3783,14 +3802,14 @@ struct RestoreAction {
 #[no_mangle]
 pub extern "C" fn bhc_mask_enter(state: i64) -> i64 {
     let old = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(state));
+    set_mask_state(state);
     old
 }
 
 /// Leave a masked region entered with `bhc_mask_enter`.
 #[no_mangle]
 pub extern "C" fn bhc_mask_exit(old_state: i64) {
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
 }
 
 /// The `restore` function for a `mask` entered from `saved_state`.
@@ -3832,13 +3851,13 @@ unsafe extern "C" fn restore_run(action: *mut u8) -> *mut u8 {
         (action.inner, action.saved_state)
     };
     let current = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
+    set_mask_state(saved_state);
     let result = unsafe {
         let inner = bhc_force(inner);
         let code = *(inner as *const unsafe extern "C" fn(*mut u8) -> *mut u8);
         code(inner)
     };
-    BHC_MASK_STATE.with(|cell| cell.set(current));
+    set_mask_state(current);
     result
 }
 
@@ -3852,9 +3871,9 @@ pub extern "C" fn bhc_mask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
+    set_mask_state(MASK_INTERRUPTIBLE);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3868,9 +3887,9 @@ pub extern "C" fn bhc_unmask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNMASKED));
+    set_mask_state(MASK_UNMASKED);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3881,9 +3900,9 @@ pub extern "C" fn bhc_uninterruptible_mask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
+    set_mask_state(MASK_UNINTERRUPTIBLE);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3901,7 +3920,7 @@ pub extern "C" fn bhc_mask_with_restore(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
+    set_mask_state(MASK_INTERRUPTIBLE);
 
     // Create a restore closure: [fn_ptr, saved_state]
     // The restore function temporarily sets masking state to old_state,
@@ -3917,7 +3936,7 @@ pub extern "C" fn bhc_mask_with_restore(
     };
 
     let result = action_fn(restore_closure, action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3928,7 +3947,7 @@ pub extern "C" fn bhc_uninterruptible_mask_with_restore(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
+    set_mask_state(MASK_UNINTERRUPTIBLE);
 
     let restore_closure = unsafe {
         let size = 2 * std::mem::size_of::<*mut u8>();
@@ -3939,7 +3958,7 @@ pub extern "C" fn bhc_uninterruptible_mask_with_restore(
     };
 
     let result = action_fn(restore_closure, action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3956,7 +3975,7 @@ extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mu
     };
 
     let current_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
+    set_mask_state(saved_state);
 
     // inner_io is a closure: extract fn_ptr and call fn_ptr(inner_io)
     let result = unsafe {
@@ -3965,7 +3984,7 @@ extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mu
         fn_ptr(inner_io)
     };
 
-    BHC_MASK_STATE.with(|cell| cell.set(current_state));
+    set_mask_state(current_state);
     result
 }
 

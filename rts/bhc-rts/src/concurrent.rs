@@ -22,7 +22,8 @@
 //! * `throwTo` and `killThread` reach a thread where it next runs: the
 //!   other thread is always parked, blocked or waiting for the baton, so the
 //!   exception is raised as it returns from there, and its handlers run.
-//!   `mask` does not defer them.
+//!   As in GHC, `mask` defers it until the thread unmasks or blocks, and
+//!   `uninterruptibleMask` until it unmasks; the thrower waits meanwhile.
 //! * An RTS panic in a forked thread aborts the program. A thrown exception
 //!   ends only that thread, and is reported on stderr as GHC does, except
 //!   `ThreadKilled`.
@@ -81,6 +82,19 @@ enum Blocked {
     Put(*mut MVar),
     ReadChan(*mut Chan),
     Sleep,
+    /// In `throwTo`, until the target receives the exception.
+    ThrowTo(u64),
+}
+
+/// Masking states, as `BHC_MASK_STATE` in `ffi.rs` holds them.
+const MASK_UNMASKED: i64 = 0;
+const MASK_UNINTERRUPTIBLE: i64 = 2;
+
+/// Whether a thread in masking state `state` takes an exception thrown to it
+/// now: unmasked always; under `mask` only at an interruptible point, a
+/// blocking operation; under `uninterruptibleMask` never.
+fn deliverable(state: i64, interruptible_point: bool) -> bool {
+    state == MASK_UNMASKED || (interruptible_point && state != MASK_UNINTERRUPTIBLE)
 }
 
 /// A `ThreadId`, with the header of an evaluated heap object.
@@ -107,6 +121,10 @@ struct Sched {
     interrupts: HashMap<u64, *mut u8>,
     /// Threads waiting for stdin without the baton.
     outside: usize,
+    /// The masking state of every thread that is not unmasked.
+    masked: HashMap<u64, i64>,
+    /// Threads waiting in `throwTo` for the target thread, by target.
+    throwers: HashMap<u64, Vec<u64>>,
 }
 
 // SAFETY: the raw pointers are Haskell values, which stay valid because the
@@ -145,6 +163,8 @@ fn lock() -> Guard {
             blocked: HashMap::new(),
             interrupts: HashMap::new(),
             outside: 0,
+            masked: HashMap::new(),
+            throwers: HashMap::new(),
         });
     }
     guard
@@ -228,15 +248,44 @@ fn run_idle() {
     }
 }
 
-/// Raise the exception thrown to this thread since it last ran, if any.
-/// Returns whether there was one.
-fn raise_interrupt(s: &mut Sched, me: u64) -> bool {
-    match s.interrupts.remove(&me) {
-        Some(exception) => {
-            crate::ffi::raise_async(exception);
-            true
-        }
-        None => false,
+/// Raise the exception thrown to this thread since it last ran, if any and
+/// if its masking state lets it (`interruptible_point`: the thread is at a
+/// blocking operation). Returns whether it raised one.
+fn raise_interrupt(s: &mut Sched, me: u64, interruptible_point: bool) -> bool {
+    if !s.interrupts.contains_key(&me)
+        || !deliverable(crate::ffi::current_mask_state(), interruptible_point)
+    {
+        return false;
+    }
+    let exception = s.interrupts.remove(&me).expect("checked above");
+    crate::ffi::raise_async(exception);
+    release_throwers(s, me);
+    true
+}
+
+/// The threads waiting in `throwTo` for `target` can go on: it received the
+/// exception, or finished.
+fn release_throwers(s: &mut Sched, target: u64) {
+    for thrower in s.throwers.remove(&target).unwrap_or_default() {
+        wake(s, thrower);
+    }
+}
+
+/// Record that this thread's masking state is now `state`, and raise an
+/// exception that was deferred while it was masked once it unmasks. The RTS
+/// calls this whenever the state changes.
+pub(crate) fn mask_changed(state: i64) {
+    if !FORKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    if state == MASK_UNMASKED {
+        s.masked.remove(&me);
+        raise_interrupt(s, me, false);
+    } else {
+        s.masked.insert(me, state);
     }
 }
 
@@ -262,7 +311,7 @@ pub(crate) fn safe_point() {
     }
     s.run_queue.push_back(me);
     let mut guard = park(guard, me);
-    raise_interrupt(sched(&mut guard), me);
+    raise_interrupt(sched(&mut guard), me, false);
 }
 
 /// Run `read`, a read from stdin that may block, without the baton, so other
@@ -301,7 +350,7 @@ fn reacquire_baton() {
         IDLE_WAKER.notify_one();
     }
     let mut guard = wait_for_baton(guard, me);
-    raise_interrupt(sched(&mut guard), me);
+    raise_interrupt(sched(&mut guard), me, true);
 }
 
 /// Before a read from `handle` in another runtime library (`Data.Text.IO`,
@@ -343,17 +392,43 @@ fn park(mut guard: Guard, me: u64) -> Guard {
 }
 
 /// Park this thread where `blocked` says until it is woken. Returns `false` if
-/// it was woken by an exception thrown to it, which is then pending.
+/// it was woken by an exception thrown to it, which is then pending. Blocking
+/// is interruptible: an exception deferred under `mask` is raised here instead,
+/// without blocking.
 fn park_blocked(mut guard: Guard, me: u64, blocked: Blocked) -> (Guard, bool) {
+    if raise_interrupt(sched(&mut guard), me, true) {
+        undo_block(sched(&mut guard), me, blocked);
+        return (guard, false);
+    }
     sched(&mut guard).blocked.insert(me, blocked);
     let mut guard = park(guard, me);
     let s = sched(&mut guard);
     s.blocked.remove(&me);
-    if raise_interrupt(s, me) {
+    if raise_interrupt(s, me, true) {
         s.delivered.remove(&me);
         return (guard, false);
     }
     (guard, true)
+}
+
+/// Take `thread` out of whatever `blocked` names: the queue of an `MVar` or a
+/// `Chan`, the sleepers, or a target's throwers.
+fn undo_block(s: &mut Sched, thread: u64, blocked: Blocked) {
+    // SAFETY: a blocked thread's `MVar` or `Chan` stays allocated, and the
+    // lock guards its fields.
+    unsafe {
+        match blocked {
+            Blocked::Take(m) => (*m).waiters.retain(|w| w.thread != thread),
+            Blocked::Put(m) => (*m).putters.retain(|(t, _)| *t != thread),
+            Blocked::ReadChan(c) => (*c).readers.retain(|t| *t != thread),
+            Blocked::Sleep => s.sleepers.retain(|(_, t)| *t != thread),
+            Blocked::ThrowTo(target) => {
+                if let Some(throwers) = s.throwers.get_mut(&target) {
+                    throwers.retain(|t| *t != thread);
+                }
+            }
+        }
+    }
 }
 
 fn me() -> u64 {
@@ -405,12 +480,17 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
             });
         SLICE_START.with(|cell| cell.set(Some(Instant::now())));
     }
+    // A forked thread starts in its parent's masking state, as in GHC.
+    let parent_mask = crate::ffi::current_mask_state();
     let mut guard = lock();
     let s = sched(&mut guard);
     let id = s.next_id;
     s.next_id += 1;
     s.wakers.insert(id, Arc::new(Condvar::new()));
     s.run_queue.push_back(id);
+    if parent_mask != MASK_UNMASKED {
+        s.masked.insert(id, parent_mask);
+    }
     let action = SendPtr(action);
     std::thread::Builder::new()
         .stack_size(FORKED_THREAD_STACK_BYTES)
@@ -418,19 +498,22 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
             let action = action;
             crate::stack::enter_thread(FORKED_THREAD_STACK_BYTES);
             THIS_THREAD.with(|t| t.set(id));
+            crate::ffi::init_mask_state(parent_mask);
             let mut guard = wait_for_baton(lock(), id);
-            let interrupt = sched(&mut guard).interrupts.remove(&id);
+            // Thrown to before it first ran: unmasked, it ends at once.
+            let thrown = raise_interrupt(sched(&mut guard), id, false);
             drop(guard);
-            match interrupt {
-                // Thrown to before it first ran: it ends at once.
-                Some(exception) => crate::ffi::raise_async(exception),
+            if !thrown {
                 // SAFETY: the caller of `bhc_fork_io` guarantees the closure.
-                None => unsafe { run_action(action.0) },
+                unsafe { run_action(action.0) };
             }
             crate::ffi::report_thread_exception();
             let mut guard = lock();
             let s = sched(&mut guard);
             s.wakers.remove(&id);
+            s.masked.remove(&id);
+            s.interrupts.remove(&id);
+            release_throwers(s, id);
             hand_off(s);
         })
         .unwrap_or_else(|e| {
@@ -471,6 +554,11 @@ pub extern "C" fn bhc_thread_delay(micros: i64) {
 /// runnable, and it raises the exception when it next runs, so its handlers
 /// run as in GHC. A finished thread ignores it.
 ///
+/// A target that defers the exception (masked and not blocked, or blocked
+/// under `uninterruptibleMask`) keeps waiting, and the caller waits too, until
+/// the target receives it or finishes: `throwTo` returns only once the
+/// exception is raised, as in GHC.
+///
 /// # Safety
 ///
 /// `thread` must be a pointer returned by `bhc_fork_io` or `bhc_my_thread_id`,
@@ -491,21 +579,24 @@ pub unsafe extern "C" fn bhc_throw_to(thread: *mut u8, exception: *mut u8) {
         return;
     }
     s.interrupts.entry(target).or_insert(exception);
-    let Some(blocked) = s.blocked.remove(&target) else {
-        // Runnable, or not started yet: it raises it when it gets the baton.
-        return;
-    };
-    // SAFETY: a blocked thread's `MVar` or `Chan` stays allocated, and the
-    // lock guards its fields.
-    unsafe {
-        match blocked {
-            Blocked::Take(m) => (*m).waiters.retain(|w| w.thread != target),
-            Blocked::Put(m) => (*m).putters.retain(|(t, _)| *t != target),
-            Blocked::ReadChan(c) => (*c).readers.retain(|t| *t != target),
-            Blocked::Sleep => s.sleepers.retain(|(_, t)| *t != target),
+    let mask = s.masked.get(&target).copied().unwrap_or(MASK_UNMASKED);
+    match s.blocked.get(&target).copied() {
+        // Blocking is interruptible: it raises the exception when it runs.
+        Some(blocked) if mask != MASK_UNINTERRUPTIBLE => {
+            s.blocked.remove(&target);
+            undo_block(s, target, blocked);
+            s.run_queue.push_back(target);
+            return;
         }
+        // Runnable or not started, and unmasked: it raises it when it next
+        // gets the baton.
+        None if mask == MASK_UNMASKED => return,
+        // Deferred: wait for it.
+        _ => {}
     }
-    s.run_queue.push_back(target);
+    let me = me();
+    s.throwers.entry(target).or_default().push(me);
+    drop(park_blocked(guard, me, Blocked::ThrowTo(target)));
 }
 
 /// `killThread`: `throwTo` with `ThreadKilled`.

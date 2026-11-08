@@ -2510,3 +2510,8 @@ fn test_tier3_monad_poly_recursive_bind_native() {
 fn test_tier2_caf_sharing_native() {
     run_native_test("tier2_functions/caf_sharing", Profile::Default);
 }
+
+#[test]
+fn test_tier2_recursive_caf_lists_native() {
+    run_native_test("tier2_functions/recursive_caf_lists", Profile::Default);
+}

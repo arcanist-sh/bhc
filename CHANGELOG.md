@@ -24,6 +24,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A top-level list defined in terms of itself works: `ones = 1 : ones`
+  segfaulted, `nats = 0 : map (+ 1) nats` overflowed the stack, and
+  `fibs = 0 : 1 : zipWith (+) fibs (tail fibs)` crashed. Inside such a
+  definition, a constructor field that uses it is built lazily, a list
+  builtin defers a tail that is still being evaluated instead of reporting
+  `<<loop>>`, and a reference made once the list exists reads the shared
+  list, so `fibs !! n` takes linear time.
+
 - A top-level constant (CAF) is computed once and shared by every use, as in
   GHC; it was recomputed at each use. A global `IORef` made with
   `unsafePerformIO (newIORef …)` is now one `IORef`. Constants whose type is

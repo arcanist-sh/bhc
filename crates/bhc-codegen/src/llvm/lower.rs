@@ -536,6 +536,19 @@ pub struct Lowering<'ctx, 'm> {
     /// infinite `block()` -> `yamlMetaBlock'()` -> `block()` call cycle
     /// (stack overflow). Non-recursive CAF references keep the eager call.
     recursive_caf_ids: FxHashSet<VarId>,
+    /// The public, memoizing function of each memoized CAF, by its binder.
+    /// While its body is lowered, `functions` maps the binder to the private
+    /// body function; a self-reference thunk must call the public one, so it
+    /// reaches the value being built instead of building another.
+    caf_public: FxHashMap<VarId, FunctionValue<'ctx>>,
+    /// How many thunk bodies (`lower_lazy`) enclose the code being lowered.
+    /// A recursive CAF referenced inside one is called, not delayed: the
+    /// thunk already broke the recursion, and the caller wants the value.
+    lazy_depth: usize,
+    /// The top-level CAFs that are memoized (`is_memoizable_caf`), known
+    /// before any body is lowered, so a reference can test whether one is
+    /// computed yet.
+    memo_caf_ids: FxHashSet<VarId>,
     /// The top-level binding whose body is being lowered. An argument that
     /// refers back to it is a recursive knot and is passed lazily through a
     /// closure call (see `lower_closure_call`).
@@ -629,6 +642,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            caf_public: FxHashMap::default(),
+            lazy_depth: 0,
+            memo_caf_ids: FxHashSet::default(),
             current_top_fn: None,
             current_top_is_derived: false,
             lazy_force_result: false,
@@ -692,6 +708,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            caf_public: FxHashMap::default(),
+            lazy_depth: 0,
+            memo_caf_ids: FxHashSet::default(),
             current_top_fn: None,
             current_top_is_derived: false,
             lazy_force_result: false,
@@ -6737,12 +6756,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .build_load(i64_type, raw, "tail_tag")
                 .map_err(|e| CodegenError::Internal(format!("load tail tag: {:?}", e)))?
                 .into_int_value();
+            // Not evaluated yet: a thunk (-1), or a blackhole (-2), a thunk
+            // being evaluated, such as the tail of `nats = 0 : map (+ 1) nats`
+            // that this very `map` is producing. Forcing a blackhole here is a
+            // `<<loop>>`; deferring it is what GHC's laziness does. Tag + 2 is
+            // below 2 (unsigned) for exactly those two.
+            let shifted = self
+                .builder()
+                .build_int_add(tag, i64_type.const_int(2, false), "tail_tag_shifted")
+                .map_err(|e| CodegenError::Internal(format!("shift tail tag: {:?}", e)))?;
             let is_thunk = self
                 .builder()
                 .build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    tag,
-                    i64_type.const_int(-1i64 as u64, true),
+                    inkwell::IntPredicate::ULT,
+                    shifted,
+                    i64_type.const_int(2, false),
                     "tail_is_thunk",
                 )
                 .map_err(|e| CodegenError::Internal(format!("compare tail tag: {:?}", e)))?;
@@ -50644,6 +50672,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Whether `expr` refers to any variable in `ids`, anywhere in it, top-level
+    /// ones included (`free_vars` leaves those out).
+    fn expr_mentions_any(expr: &Expr, ids: &FxHashSet<VarId>) -> bool {
+        match expr {
+            Expr::Var(v, _) => ids.contains(&v.id),
+            Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
+            Expr::App(f, a, _) => {
+                Self::expr_mentions_any(f, ids) || Self::expr_mentions_any(a, ids)
+            }
+            Expr::Lam(_, body, _) | Expr::TyLam(_, body, _) => Self::expr_mentions_any(body, ids),
+            Expr::TyApp(e, _, _) | Expr::Cast(e, _, _) | Expr::Tick(_, e, _) | Expr::Lazy(e, _) => {
+                Self::expr_mentions_any(e, ids)
+            }
+            Expr::Let(bind, body, _) => {
+                let in_rhs = match bind.as_ref() {
+                    Bind::NonRec(_, rhs) => Self::expr_mentions_any(rhs, ids),
+                    Bind::Rec(bs) => bs.iter().any(|(_, rhs)| Self::expr_mentions_any(rhs, ids)),
+                };
+                in_rhs || Self::expr_mentions_any(body, ids)
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                Self::expr_mentions_any(scrut, ids)
+                    || alts
+                        .iter()
+                        .any(|alt| Self::expr_mentions_any(&alt.rhs, ids))
+            }
+        }
+    }
+
     /// The function at the head of a chain of applications.
     fn app_head(expr: &Expr) -> &Expr {
         match Self::peel_expr(expr) {
@@ -50954,6 +51011,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // First pass: declare all top-level functions
         for bind in &core_module.bindings {
             self.declare_binding(bind)?;
+        }
+
+        // Which CAFs are memoized: a reference made before a CAF's own body
+        // is lowered needs to know.
+        for bind in &core_module.bindings {
+            let vars: Vec<&Var> = match bind {
+                Bind::NonRec(var, _) => vec![var],
+                Bind::Rec(pairs) => pairs.iter().map(|(var, _)| var).collect(),
+            };
+            for var in vars {
+                if let Some(function) = self.functions.get(&var.id).copied() {
+                    if Self::is_memoizable_caf(var, function) {
+                        self.memo_caf_ids.insert(var.id);
+                    }
+                }
+            }
         }
 
         // Second pass: define all functions
@@ -51931,7 +52004,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Lower a top-level definition, memoizing it if it is a CAF that may be.
     fn lower_top_level_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
         match self.functions.get(&var.id).copied() {
-            Some(public) if Self::is_memoizable_caf(var, public) => {
+            Some(public) if self.memo_caf_ids.contains(&var.id) => {
                 self.lower_memoized_caf(var, expr, public)
             }
             _ => self.lower_function_def(var, expr),
@@ -51974,6 +52047,103 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             && std::env::var_os("BHC_NO_CAF_MEMO").is_none()
     }
 
+    /// A reference to the memoized CAF `public` whose `done` flag says whether
+    /// it is computed: its value if so, a thunk that computes it if not.
+    fn lower_caf_ref_if_done(
+        &mut self,
+        public: FunctionValue<'ctx>,
+        done: inkwell::values::GlobalValue<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("CAF reference: {e:?}"))
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let i8_type = self.llvm_context().i8_type();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no function".to_string()))?;
+        let ready = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_ready");
+        let pending = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_pending");
+        let merge = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_ref");
+        let flag = self
+            .builder()
+            .build_load(i8_type, done.as_pointer_value(), "caf_is_done")
+            .map_err(err)?
+            .into_int_value();
+        let is_done = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                flag,
+                i8_type.const_zero(),
+                "done",
+            )
+            .map_err(err)?;
+        self.builder()
+            .build_conditional_branch(is_done, ready, pending)
+            .map_err(err)?;
+
+        self.builder().position_at_end(ready);
+        let value = self
+            .builder()
+            .build_call(public, &[ptr_type.const_null().into()], "caf_value")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: void".to_string()))?;
+        let value = self.value_to_ptr(value)?;
+        let ready_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(err)?;
+
+        self.builder().position_at_end(pending);
+        let fn_ptr = public.as_global_value().as_pointer_value();
+        let thunk = self.alloc_thunk(fn_ptr, &[])?;
+        let pending_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(err)?;
+
+        self.builder().position_at_end(merge);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "caf_ref_value")
+            .map_err(err)?;
+        phi.add_incoming(&[(&value, ready_end), (&thunk, pending_end)]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// The flag a memoized CAF sets once its value is cached, by the CAF's
+    /// symbol; created by whichever needs it first, its wrapper or a reference
+    /// made in another CAF's body.
+    fn caf_done_global(&self, symbol: &str) -> inkwell::values::GlobalValue<'ctx> {
+        let name = format!("{symbol}$caf_done");
+        let llvm_module = self.module.llvm_module();
+        if let Some(existing) = llvm_module.get_global(&name) {
+            return existing;
+        }
+        let i8_type = self.llvm_context().i8_type();
+        let done = llvm_module.add_global(i8_type, None, &name);
+        done.set_linkage(inkwell::module::Linkage::Internal);
+        done.set_initializer(&i8_type.const_zero());
+        done
+    }
+
     /// Lower the CAF `var` so its value is computed once: the body goes into
     /// a private `<name>$caf` function, and `public` (what every reference
     /// calls, in this module or another) returns the cached value after the
@@ -51993,6 +52163,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .module
             .add_function(&format!("{symbol}$caf"), public.get_type());
         body_fn.set_linkage(inkwell::module::Linkage::Internal);
+        self.caf_public.insert(var.id, public);
         self.functions.insert(var.id, body_fn);
         let lowered = self.lower_function_def(var, expr);
         self.functions.insert(var.id, public);
@@ -52007,9 +52178,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let cache = llvm_module.add_global(ret_ty, None, &format!("{symbol}$caf_value"));
         cache.set_linkage(inkwell::module::Linkage::Internal);
         cache.set_initializer(&ret_ty.const_zero());
-        let done = llvm_module.add_global(i8_type, None, &format!("{symbol}$caf_done"));
-        done.set_linkage(inkwell::module::Linkage::Internal);
-        done.set_initializer(&i8_type.const_zero());
+        let done = self.caf_done_global(&symbol);
         let pending_fn = match self.module.get_function("bhc_exception_is_pending") {
             Some(f) => f,
             None => self.module.add_function(
@@ -52278,16 +52447,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // `block` — the eager call chain never terminates.
                         // Wrap the CAF fn as a lazy thunk instead; the apply
                         // path and bhc_force evaluate it on first USE.
-                        if self.recursive_caf_ids.contains(&var.id) {
-                            let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                        //
+                        // Only inside a recursive CAF, where the eager call
+                        // could recurse: from anywhere else (`main = print
+                        // (take 3 ones)` for `ones = 1 : ones`) the call ends,
+                        // and its caller wants the value, not a thunk that a
+                        // list builtin would read as a cons cell.
+                        //
+                        // Inside a thunk, once a memoized CAF is computed, it
+                        // is called: `tail fibs` in the lazy tail of `fibs = 0
+                        // : 1 : zipWith (+) fibs (tail fibs)` runs once `fibs`
+                        // is built, and `tail` reads the cons it returns. A
+                        // thunk forced while the CAF is still being built (a
+                        // parser knot) gets a thunk, as before.
+                        if self.recursive_caf_ids.contains(&var.id)
+                            && self
+                                .current_top_fn
+                                .is_some_and(|f| self.recursive_caf_ids.contains(&f))
+                        {
+                            let target = self.caf_public.get(&var.id).copied().unwrap_or(*fn_val);
+                            if self.lazy_depth > 0 && self.memo_caf_ids.contains(&var.id) {
+                                let symbol = self.mangle_name(var.name.as_str());
+                                let done = self.caf_done_global(&symbol);
+                                return self.lower_caf_ref_if_done(target, done).map(Some);
+                            }
+                            let fn_ptr = target.as_global_value().as_pointer_value();
                             let thunk_ptr = self.alloc_thunk(fn_ptr, &[])?;
                             return Ok(Some(thunk_ptr.into()));
                         }
-                        // CAF - call the function with null env to get its value
+                        // CAF - call the function with null env to get its value.
+                        // Inside its own body, the public, memoizing function:
+                        // the private body would build another copy of the
+                        // value (`nats` read from its own lazy tail).
+                        let target = self.caf_public.get(&var.id).copied().unwrap_or(*fn_val);
                         let null_env = self.type_mapper().ptr_type().const_null();
                         let call_result = self
                             .builder()
-                            .build_call(*fn_val, &[null_env.into()], "caf_result")
+                            .build_call(target, &[null_env.into()], "caf_result")
                             .map_err(|e| {
                                 CodegenError::Internal(format!("failed to call CAF: {:?}", e))
                             })?;
@@ -52779,7 +52975,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Lower the inner expression (this produces the actual computation)
-        let mut result = self.lower_expr(inner)?;
+        self.lazy_depth += 1;
+        let lowered = self.lower_expr(inner);
+        self.lazy_depth -= 1;
+        let mut result = lowered?;
         // A heap result may itself be a thunk (a lazily passed argument the
         // callee returned as is); evaluate through it when asked to.
         if force_result {
@@ -59878,8 +60077,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // (`arg_should_thunk`): `fst (2, error "BOOM")` must not run the second
         // component. A field that is later projected and used reaches whatever
         // forces it, and one that would have diverged eagerly was already fatal.
+        //
+        // So is a field of a recursive CAF that uses the CAF's recursive
+        // group: `nats = 0 : map (+ 1) nats` evaluated `map (+ 1) nats` while
+        // building `nats`, and `map` forced `nats` again, without end. Lazy,
+        // the cons exists before anything reads its tail, as in GHC.
+        let in_recursive_caf = self
+            .current_top_fn
+            .is_some_and(|f| self.recursive_caf_ids.contains(&f));
         for (i, arg_expr) in args.iter().enumerate() {
-            if self.arg_should_thunk(arg_expr) {
+            let knot = in_recursive_caf
+                && !Self::is_trivial_expr(arg_expr)
+                && Self::expr_mentions_any(arg_expr, &self.recursive_caf_ids);
+            if knot || self.arg_should_thunk(arg_expr) {
+                self.lazy_force_result = knot;
                 if let Some(thunk) = self.lower_lazy(arg_expr)? {
                     self.store_adt_field(adt_ptr, arity, i as u32, thunk)?;
                     continue;

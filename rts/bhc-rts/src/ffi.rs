@@ -3749,6 +3749,99 @@ pub extern "C" fn bhc_set_masking_state(state: i64) {
     BHC_MASK_STATE.with(|cell| cell.set(state));
 }
 
+// ----------------------------------------------------------------------------
+// `mask` under the closure IO model
+// ----------------------------------------------------------------------------
+//
+// Under the closure model an IO expression evaluates to an action closure
+// (`{code, arity, env...}`, run by calling `code(closure)`), so `mask`'s body
+// must be RUN inside the masked region, not merely evaluated there. Codegen
+// brackets the run with `bhc_mask_enter`/`bhc_mask_exit` and hands the body a
+// `restore` built by `bhc_make_restore`.
+
+/// The `restore` function `mask` passes to its body: a one-argument function
+/// closure holding the masking state to restore.
+#[repr(C)]
+struct RestoreFn {
+    code: unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    arity: i64,
+    saved_state: i64,
+}
+
+/// `restore action`: an action closure that runs `action` under the saved
+/// masking state.
+#[repr(C)]
+struct RestoreAction {
+    code: unsafe extern "C" fn(*mut u8) -> *mut u8,
+    arity: i64,
+    inner: *mut u8,
+    saved_state: i64,
+}
+
+/// Enter a masked region: set the masking state to `state` and return the
+/// previous one, which `bhc_mask_exit` restores.
+#[no_mangle]
+pub extern "C" fn bhc_mask_enter(state: i64) -> i64 {
+    let old = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+    old
+}
+
+/// Leave a masked region entered with `bhc_mask_enter`.
+#[no_mangle]
+pub extern "C" fn bhc_mask_exit(old_state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+}
+
+/// The `restore` function for a `mask` entered from `saved_state`.
+#[no_mangle]
+pub extern "C" fn bhc_make_restore(saved_state: i64) -> *mut u8 {
+    Box::into_raw(Box::new(RestoreFn {
+        code: restore_apply,
+        arity: 1,
+        saved_state,
+    })) as *mut u8
+}
+
+/// Apply `restore` to an action: build the action that runs it unmasked (or
+/// under whatever state `mask` was entered from).
+///
+/// # Safety
+///
+/// `closure` must be a `RestoreFn` from `bhc_make_restore`.
+unsafe extern "C" fn restore_apply(closure: *mut u8, inner: *mut u8) -> *mut u8 {
+    let saved_state = unsafe { (*(closure as *const RestoreFn)).saved_state };
+    Box::into_raw(Box::new(RestoreAction {
+        code: restore_run,
+        arity: 0,
+        inner,
+        saved_state,
+    })) as *mut u8
+}
+
+/// Run a `restore action`: the inner action under the saved masking state,
+/// then the current state again.
+///
+/// # Safety
+///
+/// `action` must be a `RestoreAction` from `restore_apply`, whose `inner` is
+/// an IO action closure or a thunk evaluating to one.
+unsafe extern "C" fn restore_run(action: *mut u8) -> *mut u8 {
+    let (inner, saved_state) = unsafe {
+        let action = &*(action as *const RestoreAction);
+        (action.inner, action.saved_state)
+    };
+    let current = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
+    let result = unsafe {
+        let inner = bhc_force(inner);
+        let code = *(inner as *const unsafe extern "C" fn(*mut u8) -> *mut u8);
+        code(inner)
+    };
+    BHC_MASK_STATE.with(|cell| cell.set(current));
+    result
+}
+
 /// Mask asynchronous exceptions (simple form, for `mask_`).
 ///
 /// Saves the current masking state, sets it to MaskedInterruptible,

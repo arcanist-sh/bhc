@@ -50500,6 +50500,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// The type of `expr`. Core leaves most application nodes untyped
+    /// (`Ty::Error`); for a call of a variable, the type is then the
+    /// function's own codomain once every arrow is applied. Dictionary
+    /// arguments have no arrow of their own, so they only make the call look
+    /// over-saturated, which is fine. A partial application stays untyped.
+    fn call_result_ty(expr: &Expr) -> Ty {
+        let ty = expr.ty();
+        if !matches!(ty, Ty::Error) {
+            return ty;
+        }
+        let mut value_args = 0usize;
+        let mut head = Self::peel_expr(expr);
+        loop {
+            match head {
+                Expr::App(f, arg, _) => {
+                    if !matches!(arg.as_ref(), Expr::Type(..)) {
+                        value_args += 1;
+                    }
+                    head = Self::peel_expr(f);
+                }
+                Expr::TyApp(f, _, _) => head = Self::peel_expr(f),
+                _ => break,
+            }
+        }
+        let Expr::Var(v, _) = head else {
+            return Ty::Error;
+        };
+        let mut fn_ty = &v.ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        let mut arrows = 0usize;
+        while let Ty::Fun(_, result) = fn_ty {
+            arrows += 1;
+            fn_ty = result;
+        }
+        if arrows == 0 || value_args < arrows {
+            return Ty::Error;
+        }
+        fn_ty.clone()
+    }
+
+    /// Whether a value of type `ty` may be a raw scalar that a thunk cannot
+    /// stand in for: a bare type variable (#64), and under the eager IO model
+    /// a type headed by one, `m a`, whose value at `IO` is the result (#65).
+    fn knot_type_is_opaque(ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(_) => true,
+            Ty::App(..) if !crate::io_closure_mode() => {
+                let mut head = ty;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                matches!(head, Ty::Var(_))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether evaluating `expr` may call the variable `id`: `id` heads an
     /// application outside any lambda. A reference to `id` as a plain value
     /// (`(,) $instance_query_Inline 0`, the dictionary an instance method
@@ -59222,9 +59281,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // be a raw `Int` or `Double` (a fold's accumulator, `foldT f
             // (f x (foldT f z r)) l` at `Int`), and a thunk cannot stand in
             // for one, since nothing at run time tells them apart (#64).
-            // Parser knots have concrete types.
+            // Under the eager IO model, neither may an argument of type `m a`:
+            // at `IO` its value is the action's result, which may be just as
+            // raw (`cnt g (n - 1) >>= k` at `IO Int`, #65). Parser knots have
+            // concrete types.
             let recursive_knot = !Self::is_trivial_expr(arg_expr)
-                && !matches!(arg_expr.ty(), Ty::Var(_))
+                && !Self::knot_type_is_opaque(&Self::call_result_ty(arg_expr))
                 && !self.current_top_is_derived
                 && self
                     .current_top_fn

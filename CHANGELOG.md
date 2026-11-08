@@ -18,6 +18,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Under the eager IO model, a recursive `Monad m =>` function called at IO,
+  such as `cnt g n = cnt g (n - 1) >>= g`, gives its continuation the result
+  instead of a thunk's address. The recursive call was delayed because it
+  calls the function being defined; a call whose result type is `m a` (or a
+  bare type variable, which #64 covered only where Core kept the type) is no
+  longer delayed under that model, since a thunk cannot stand in for an
+  action's raw result there (#65).
+
 - A thread in a long pure computation no longer keeps the other threads from
   running: compiled code checks for preemption on function entry and at
   allocations, where a timer asks for it once per 20 ms slice, so recursion

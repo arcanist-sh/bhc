@@ -98,7 +98,18 @@ pub fn io_closure_mode() -> bool {
 pub fn select_io_model_for_target(target_triple: Option<&str>) {
     let wasm = target_triple.is_some_and(|t| t.contains("wasm"));
     let _ = IO_CLOSURE_MODE.set(io_model_from_env().unwrap_or(!wasm));
+    let _ = TARGET_HAS_THREADS.set(!wasm);
 }
+
+/// Whether the compilation target runs `Control.Concurrent` threads: every
+/// native target does, under either IO model; WebAssembly does not yet (#75).
+/// Set by [`select_io_model_for_target`]; a native target until then.
+#[must_use]
+pub fn target_has_threads() -> bool {
+    *TARGET_HAS_THREADS.get_or_init(|| true)
+}
+
+static TARGET_HAS_THREADS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Every type, constructor, class and value that `stdlib/bhc-transformers/hs`
 /// defines. Under the closure IO model ([`io_closure_mode`]) no compiler stage

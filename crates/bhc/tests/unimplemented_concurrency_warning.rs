@@ -1,11 +1,14 @@
 //! Using a concurrency primitive that would abort at run time warns at compile
-//! time (#38).
+//! time (#38): on WebAssembly, which has no threads yet (#75). Native targets
+//! run them under either IO model.
 //!
 //! Lowering reports each one used, once per name, as
 //! `LowerWarning::NotImplemented`. It stays a warning: a module that merely
-//! mentions them (pandoc's `Text.Pandoc.Process`) must still compile. They all
-//! run under the closure IO model, so they warn only under the eager model. A
-//! user's own function of the same name is not flagged.
+//! mentions them (pandoc's `Text.Pandoc.Process`) must still compile. A user's
+//! own function of the same name is not flagged.
+//!
+//! Every test here compiles for a WebAssembly target. The target is fixed
+//! once per process, which is why this is its own test binary.
 
 use bhc_lower::{LowerConfig, LowerContext, LowerWarning};
 use bhc_parser::parse_module;
@@ -13,6 +16,7 @@ use bhc_span::FileId;
 
 /// The names `NotImplemented` warnings were reported for, in order.
 fn not_implemented_warnings(source: &str) -> Vec<String> {
+    bhc_types::select_io_model_for_target(Some("wasm32-wasi"));
     let (module, diags) = parse_module(source, FileId::new(0));
     assert!(
         diags
@@ -37,12 +41,6 @@ fn not_implemented_warnings(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The warnings expected for `names`: none under the closure model.
-fn expected<'a>(names: &[&'a str]) -> Vec<&'a str> {
-    let eager = std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager");
-    names.iter().copied().filter(|_| eager).collect()
-}
-
 #[test]
 fn concurrency_primitives_warn_once_each() {
     let names = not_implemented_warnings(concat!(
@@ -57,7 +55,7 @@ fn concurrency_primitives_warn_once_each() {
     ));
     assert_eq!(
         names,
-        expected(&["newEmptyMVar", "forkIO", "putMVar", "throwTo", "takeMVar"])
+        ["newEmptyMVar", "forkIO", "putMVar", "throwTo", "takeMVar"]
     );
 }
 
@@ -67,7 +65,7 @@ fn qualified_concurrency_primitives_warn() {
         "import qualified Control.Concurrent.MVar as MV\n",
         "main = MV.newEmptyMVar >>= \\v -> MV.putMVar v (1 :: Int)\n",
     ));
-    assert_eq!(names, expected(&["newEmptyMVar", "putMVar"]));
+    assert_eq!(names, ["newEmptyMVar", "putMVar"]);
 }
 
 #[test]

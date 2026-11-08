@@ -271,6 +271,7 @@ dependencies = [
  "bhc-span",
  "bhc-target",
  "bhc-typeck",
+ "bhc-types",
  "camino",
  "clap",
  "clap_complete",

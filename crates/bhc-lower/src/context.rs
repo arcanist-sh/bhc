@@ -70,11 +70,10 @@ impl DefKind {
     }
 }
 
-/// Builtins that type-check but abort at run time. Threads, `MVar`s and `Chan`s
-/// run only under the closure IO model, so the eager model (and with it
-/// WebAssembly) reports them all (#38). Using one is a warning rather than an
-/// error, so a module that merely mentions them (pandoc's `Text.Pandoc.Process`)
-/// still compiles.
+/// Builtins that type-check but abort at run time on WebAssembly, which has no
+/// threads yet; every native target runs them, under either IO model (#38,
+/// #75). Using one is a warning rather than an error, so a module that merely
+/// mentions them (pandoc's `Text.Pandoc.Process`) still compiles.
 const UNIMPLEMENTED_BUILTINS: &[&str] = &[
     "forkIO",
     "forkOS",
@@ -2567,8 +2566,8 @@ impl LowerContext {
     /// Record the `UNIMPLEMENTED_BUILTINS` that importing `module` just bound,
     /// bare and under `qualifier`, so their uses warn (#38).
     pub fn mark_unimplemented_imports(&mut self, module: &str, qualifier: &str) {
-        // They all run under the closure IO model.
-        if !module.starts_with("Control.Concurrent") || bhc_types::io_closure_mode() {
+        // They all run on a native target.
+        if !module.starts_with("Control.Concurrent") || bhc_types::target_has_threads() {
             return;
         }
         for name in UNIMPLEMENTED_BUILTINS {

@@ -7537,15 +7537,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "divMod" => self.lower_builtin_divmod(args[0], args[1]),
             "quotRem" => self.lower_builtin_quotrem(args[0], args[1]),
 
-            // Concurrency (closure IO model; rts/bhc-rts/src/concurrent.rs)
+            // Concurrency (rts/bhc-rts/src/concurrent.rs)
             "forkIO" | "forkOS" | "myThreadId" | "killThread" | "threadDelay" | "newEmptyMVar"
             | "newMVar" | "takeMVar" | "readMVar" | "putMVar" | "tryTakeMVar" | "tryPutMVar"
             | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar" | "newChan" | "readChan"
-            | "writeChan" | "throwTo"
-                if crate::io_closure_mode() =>
-            {
-                self.lower_builtin_concurrency(name, args)
-            }
+            | "writeChan" | "throwTo" => self.lower_builtin_concurrency(name, args),
 
             // IORef operations
             "newIORef" => self.lower_builtin_new_ioref(args[0]),
@@ -19745,6 +19741,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let action_result = self
             .lower_expr(action_expr)?
             .ok_or_else(|| CodegenError::Internal(">>=: action has no value".to_string()))?;
+        // An exception it threw, or one thrown to this thread (#75), skips
+        // the rest, as under the closure model.
+        self.emit_io_exn_guard()?;
 
         // Lower the function
         let func_val = self
@@ -19801,6 +19800,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
         // Execute the first action (result is discarded)
         let _action1_result = self.lower_expr(action1_expr)?;
+        self.emit_io_exn_guard()?;
 
         // Execute the second action and return its result
         self.lower_expr(action2_expr)
@@ -28248,11 +28248,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("MVar apply: returned void".to_string()))?;
+        // Under the eager IO model, applying `f` ran the action already, and
+        // the call returned its result.
+        if !crate::io_closure_mode() {
+            return Ok(action);
+        }
         self.run_io_action(action)
     }
 
-    /// Lower a `Control.Concurrent` builtin in run mode, under the closure IO
-    /// model. See `rts/bhc-rts/src/concurrent.rs` for what the calls do (#38).
+    /// Lower a `Control.Concurrent` builtin in run mode. See
+    /// `rts/bhc-rts/src/concurrent.rs` for what the calls do (#38, #75).
     fn lower_builtin_concurrency(
         &mut self,
         name: &str,
@@ -28260,7 +28265,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let result = match name {
             "forkIO" | "forkOS" => {
-                let action = self.lower_concurrency_value(args[0])?;
+                // Under the eager IO model, lowering the argument would run the
+                // action here, before the fork: defer it into a closure the new
+                // thread calls, as `catch` does with its action.
+                let action = if crate::io_closure_mode() {
+                    self.lower_concurrency_value(args[0])?
+                } else {
+                    self.wrap_io_as_thunk(args[0])?
+                };
                 self.call_concurrency_rts("bhc_fork_io", &[action], true)?
             }
             "myThreadId" => self.call_concurrency_rts("bhc_my_thread_id", &[], true)?,
@@ -32320,7 +32332,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let _ = self.lower_io_run(action_expr)?;
             self.emit_io_exn_guard()?;
         } else {
+            // Under the eager model too, a throw is the way out (#75).
             let _ = self.lower_expr(action_expr)?;
+            self.emit_io_exn_guard()?;
         }
         self.builder()
             .build_unconditional_branch(loop_block)
@@ -64098,21 +64112,12 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "toRational" => Some(1),
         "fromRational" => Some(1),
         "recip" => Some(1),
-        // Concurrency runs under the closure IO model. Under the eager model these
-        // have no arity, so a use compiles to a stub that aborts at run time.
+        // Concurrency (rts/bhc-rts/src/concurrent.rs), under either IO model.
         "forkIO" | "forkOS" | "killThread" | "threadDelay" | "newMVar" | "takeMVar"
-        | "readMVar" | "tryTakeMVar" | "readChan"
-            if crate::io_closure_mode() =>
-        {
-            Some(1)
-        }
-        "myThreadId" | "newEmptyMVar" | "newChan" if crate::io_closure_mode() => Some(0),
+        | "readMVar" | "tryTakeMVar" | "readChan" => Some(1),
+        "myThreadId" | "newEmptyMVar" | "newChan" => Some(0),
         "putMVar" | "tryPutMVar" | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar"
-        | "writeChan" | "throwTo"
-            if crate::io_closure_mode() =>
-        {
-            Some(2)
-        }
+        | "writeChan" | "throwTo" => Some(2),
         "newIORef" => Some(1),
         "readIORef" => Some(1),
         "writeIORef" => Some(2),

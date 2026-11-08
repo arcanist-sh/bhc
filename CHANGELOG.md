@@ -18,6 +18,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Threads, `MVar`s and `Chan`s run under the eager IO model too
+  (`BHC_IO_MODEL=eager`), with preemption, `throwTo` and `killThread`; they
+  compiled to stubs that aborted. Under that model `>>=`, `>>` and `forever`
+  now stop at an exception, thrown or thrown to the thread, so a throw also
+  ends `forever`. `mask` with `restore` still does not run there (#91), and
+  WebAssembly has no threads yet; the compile-time warning now names only that
+  target (#75).
+
 - Under the eager IO model, a recursive `Monad m =>` function called at IO,
   such as `cnt g n = cnt g (n - 1) >>= g`, gives its continuation the result
   instead of a thunk's address. The recursive call was delayed because it

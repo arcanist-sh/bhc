@@ -149,8 +149,9 @@ pub enum LowerWarning {
         /// What kind of stub (value, type, or constructor).
         kind: &'static str,
     },
-    /// A builtin that type-checks but has no implementation yet, so calling
-    /// it aborts at run time (the concurrency primitives, #38).
+    /// A builtin that type-checks but has no implementation on this target,
+    /// so calling it aborts at run time (the concurrency primitives on
+    /// WebAssembly, #75).
     NotImplemented {
         /// The builtin's name.
         name: String,
@@ -199,8 +200,8 @@ impl std::fmt::Display for LowerWarning {
             LowerWarning::NotImplemented { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is not implemented yet: calling it aborts at run time \
-                     (concurrency is not wired to the runtime, see issue #38)"
+                    "`{name}` is not implemented on WebAssembly yet: calling it aborts \
+                     at run time (threads run on native targets only, see issue #75)"
                 )
             }
             LowerWarning::UnknownExtension { name, .. } => {

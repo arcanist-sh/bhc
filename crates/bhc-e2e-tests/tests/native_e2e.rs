@@ -2393,37 +2393,24 @@ fn test_tier3_transformer_lift_run_except_native() {
     run_native_test("tier3_io/transformer_lift_run_except", Profile::Default);
 }
 
-/// Threads, `MVar`s and `Chan`s run under the closure IO model only (#38).
+/// Threads, `MVar`s and `Chan`s, under either IO model (#38, #75).
 #[test]
 fn test_tier3_concurrent_mvar_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_mvar", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_chan_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_chan", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_threads_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_threads", Profile::Default);
 }
 
 #[test]
 fn test_tier3_forever_exception_native() {
-    // Under the eager model a throw does not end `forever`.
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/forever_exception", Profile::Default);
 }
 
@@ -2459,25 +2446,16 @@ fn test_tier2_integer_division_family_native() {
 
 #[test]
 fn test_tier3_concurrent_async_exceptions_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_async_exceptions", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_throw_to_main_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_throw_to_main", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_preemption_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_preemption", Profile::Default);
 }
 
@@ -2510,6 +2488,8 @@ fn test_tier3_mask_restore_native() {
 
 #[test]
 fn test_tier3_concurrent_mask_deferral_native() {
+    // Its last case is `mask` with `restore`, which the eager model does not
+    // run yet (#91).
     if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
@@ -2518,9 +2498,6 @@ fn test_tier3_concurrent_mask_deferral_native() {
 
 #[test]
 fn test_tier3_concurrent_pure_preemption_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_pure_preemption", Profile::Default);
 }
 

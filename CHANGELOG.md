@@ -26,6 +26,12 @@ All notable changes to BHC are recorded here. The format follows
   longer delayed under that model, since a thunk cannot stand in for an
   action's raw result there (#65).
 
+- On WebAssembly, a `Monad m =>` function called at IO runs: the backend
+  knows the IO dictionary's methods (`>>=`, `>>`, `fmap`, `<*>`, `pure`) as
+  values, tuple constructors up to 15 fields (dictionaries are tuples), and
+  shows a value typed `Maybe Int`. Before, the dictionary held zeros and the
+  program trapped (#65).
+
 - A thread in a long pure computation no longer keeps the other threads from
   running: compiled code checks for preemption on function entry and at
   allocations, where a timer asks for it once per 20 ms slice, so recursion

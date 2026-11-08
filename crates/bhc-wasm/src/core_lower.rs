@@ -112,8 +112,23 @@ fn well_known_constructors() -> FxHashMap<String, ConInfo> {
     // Tuples
     m.insert("(,)".to_string(), ConInfo { tag: 0, arity: 2 });
     m.insert("(,,)".to_string(), ConInfo { tag: 0, arity: 3 });
+    // Larger tuples, which class dictionaries are built from (the
+    // `Applicative` dictionary has five fields).
+    for arity in 4..=MAX_TUPLE_ARITY {
+        let name = format!("({})", ",".repeat(arity - 1));
+        m.insert(
+            name,
+            ConInfo {
+                tag: 0,
+                arity: arity as u32,
+            },
+        );
+    }
     m
 }
+
+/// The largest tuple constructor the backend knows.
+const MAX_TUPLE_ARITY: usize = 15;
 
 /// Starting offset for user string data in linear memory.
 ///
@@ -1701,6 +1716,11 @@ impl<'a> WasmLowering<'a> {
                     return self.emit_show_tuple_of_lists(arg, instrs, locals, local_count);
                 }
             }
+        }
+        // A value typed `Maybe Int` (a top-level `r :: Maybe Int` computed
+        // through a `Monad m =>` function) renders the same way.
+        if is_maybe_int_ty(&arg.ty()) {
+            return self.emit_show_maybe(arg, instrs, locals, local_count);
         }
         // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
         // not as a list of characters — so handle it before the list paths.
@@ -4920,7 +4940,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: >> (sequence) - evaluate both sides for effects
-            Some(">>" | "GHC.Base.>>") if args.len() == 2 => {
+            Some(">>" | "GHC.Base.>>" | "IO.>>") if args.len() == 2 => {
                 // Evaluate first action, drop result
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Drop);
@@ -4929,7 +4949,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: >>= (bind) - evaluate first, pass result to second
-            Some(">>=" | "GHC.Base.>>=") if args.len() == 2 => {
+            Some(">>=" | "GHC.Base.>>=" | "IO.>>=") if args.len() == 2 => {
                 // Check if the second argument is a lambda: >>= \x -> body
                 let second = peel_type_abstractions(args[1]);
                 if let Expr::Lam(var, body, _) = second {
@@ -4954,8 +4974,22 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: return / pure - just evaluate the argument
-            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure") if args.len() == 1 => {
+            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure" | "IO.pure")
+                if args.len() == 1 =>
+            {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+
+            // The IO `Functor`/`Applicative` methods, as a `Monad m =>`
+            // function called at IO reaches them through its dictionary (#65).
+            // An action's value is its result here, so both are application.
+            // Extra arguments (`IO.fmap g a b`, once `<*>` is unfolded) apply
+            // to the result.
+            Some("IO.fmap" | "IO.<*>") if args.len() >= 2 => {
+                let applied = args[1..]
+                    .iter()
+                    .fold(args[0].clone(), |f, a| papp(f, (*a).clone()));
+                self.lower_expr(&applied, instrs, locals, local_count, is_main)?;
             }
 
             // Monad-transformer eliminators (see rewrite_monad). The rewritten
@@ -5346,8 +5380,21 @@ impl<'a> WasmLowering<'a> {
                             instrs.push(WasmInstr::Drop);
                         }
                         instrs.push(WasmInstr::LocalGet(local_idx));
+                    } else if operator_arity(name).is_some_and(|arity| args.len() < arity) {
+                        // A builtin used as a value, partly applied (`IO.fmap
+                        // f` in a dictionary's `<$`): a closure waiting for
+                        // the rest, as for a user function.
+                        let arity = operator_arity(name).unwrap_or(args.len());
+                        return self.lower_partial_application(
+                            var,
+                            &args,
+                            arity,
+                            instrs,
+                            locals,
+                            local_count,
+                        );
                     } else {
-                        tracing::warn!(func = name, "unknown function, using 0");
+                        tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
                         for arg in &args {
                             self.lower_expr(arg, instrs, locals, local_count, false)?;
                             instrs.push(WasmInstr::Drop);
@@ -5355,7 +5402,7 @@ impl<'a> WasmLowering<'a> {
                         instrs.push(WasmInstr::I32Const(0));
                     }
                 } else {
-                    tracing::warn!(func = name, "unknown function, using 0");
+                    tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
                     for arg in &args {
                         self.lower_expr(arg, instrs, locals, local_count, false)?;
                         instrs.push(WasmInstr::Drop);
@@ -11010,6 +11057,17 @@ fn strip_qualifier(name: &str) -> &str {
     }
 }
 
+/// Whether `ty` is `Maybe Int`, whose `Just` field `emit_show_maybe` renders.
+fn is_maybe_int_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::App(f, a) => {
+            matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe")
+                && matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Int")
+        }
+        _ => false,
+    }
+}
+
 /// The element type of a list type `[e]`, if `ty` is one.
 fn list_element_ty(ty: &Ty) -> Option<&Ty> {
     match ty {
@@ -11316,6 +11374,10 @@ fn operator_arity(name: &str) -> Option<usize> {
         | "GHC.Classes.==" | "/=" | "GHC.Classes./=" | "<" | "GHC.Classes.<" | "<="
         | "GHC.Classes.<=" | ">" | "GHC.Classes.>" | ">=" | "GHC.Classes.>=" | "++"
         | "GHC.Base.++" => Some(2),
+        // The IO dictionary's methods, which a `Monad m =>` function called
+        // at IO selects as values (#65). `strip_qualifier` keeps symbolic
+        // names whole, so they are listed qualified.
+        "IO.>>=" | "IO.>>" | "IO.fmap" | "IO.<*>" => Some(2),
         "negate" | "GHC.Num.negate" => Some(1),
         // Enum/identity/char builtins usable as first-class function values.
         _ => match strip_qualifier(name) {

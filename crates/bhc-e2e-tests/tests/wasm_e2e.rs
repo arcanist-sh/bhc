@@ -1055,3 +1055,10 @@ fn test_tier3_file_append_roundtrip_wasm() {
 fn test_tier3_show_string_list_wasm() {
     run_wasm_test("tier3_io/show_string_list", Profile::Default);
 }
+
+// A `Monad m =>` function called at IO selects the IO dictionary's methods
+// as values (#65).
+#[test]
+fn test_tier3_monad_poly_recursive_bind_wasm() {
+    run_wasm_test("tier3_io/monad_poly_recursive_bind", Profile::Default);
+}

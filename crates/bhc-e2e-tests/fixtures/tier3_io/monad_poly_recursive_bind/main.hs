@@ -19,12 +19,16 @@ foldT :: (a -> b -> b) -> b -> [a] -> b
 foldT _ z [] = z
 foldT f z (x : xs) = f x (foldT f z xs)
 
+-- The same function at Maybe.
+justCount :: Maybe Int
+justCount = cnt (\x -> Just (x + 1)) 5
+
 main :: IO ()
 main = do
   cnt (\x -> return (x + 1)) 3 >>= print
   cntIf (\x -> return (x * 2 + 1)) 4 >>= print
   sumTo 10 >>= print
-  print (cnt (\x -> Just (x + 1)) 5)
+  print justCount
   r <- cnt (\x -> do { putStrLn ("step " ++ show x); return (x + 1) }) 2
   print r
   print (foldT (+) 0 [1 .. 10 :: Int])

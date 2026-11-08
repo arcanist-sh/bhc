@@ -589,6 +589,11 @@ impl LowerContext {
             "execState",
             "execStateT",
             "lift",
+            // System.IO.Unsafe and Debug.Trace
+            "unsafePerformIO",
+            "unsafeDupablePerformIO",
+            "trace",
+            "traceIO",
             // Exception handling
             "catch",
             "try",
@@ -1306,6 +1311,22 @@ impl LowerContext {
             let def_id = self.fresh_def_id();
             self.define(def_id, sym, DefKind::Value, Span::default());
             self.bind_value(sym, def_id);
+        }
+
+        // Builtins that live in a module bhc otherwise stubs: bind the
+        // module-qualified name to the builtin too, so `Debug.Trace.trace`
+        // does not resolve through the bare name to a same-named definition
+        // of the importing module (pandoc's `PandocMonad` class has a `trace`
+        // method and calls `Debug.Trace.trace` in it).
+        for (module, name) in [
+            ("Debug.Trace", "trace"),
+            ("Debug.Trace", "traceIO"),
+            ("System.IO.Unsafe", "unsafePerformIO"),
+            ("System.IO.Unsafe", "unsafeDupablePerformIO"),
+        ] {
+            if let Some(def_id) = self.lookup_value(Symbol::intern(name)) {
+                self.bind_value(Symbol::intern(&format!("{module}.{name}")), def_id);
+            }
         }
 
         // Register monad transformer builtins at fixed DefIds (10000+).

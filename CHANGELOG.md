@@ -16,7 +16,19 @@ All notable changes to BHC are recorded here. The format follows
   only the RTS (#47). It needs a `HOMEBREW_TAP_TOKEN` secret, and prints the
   formula to apply by hand without one.
 
+### Added
+
+- `unsafePerformIO`, `unsafeDupablePerformIO`, `Debug.Trace.trace` and
+  `traceIO` run; they were stubs that aborted. `trace` writes its message to
+  stderr before its value is evaluated.
+
 ### Fixed
+
+- A top-level constant (CAF) is computed once and shared by every use, as in
+  GHC; it was recomputed at each use. A global `IORef` made with
+  `unsafePerformIO (newIORef …)` is now one `IORef`. Constants whose type is
+  or holds an IO action, or is unknown, are left as they were, and a CAF that
+  throws throws again at its next use. `BHC_NO_CAF_MEMO=1` turns sharing off.
 
 - Threads, `MVar`s and `Chan`s run under the eager IO model too
   (`BHC_IO_MODEL=eager`), with preemption, `throwTo` and `killThread`; they

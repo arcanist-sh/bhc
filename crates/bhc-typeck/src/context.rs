@@ -3631,6 +3631,30 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b)),
                     )
                 }
+                // unsafePerformIO :: IO a -> a
+                "unsafePerformIO" | "unsafeDupablePerformIO" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(io_a, Ty::Var(a.clone())))
+                }
+                // trace :: String -> a -> a
+                "trace" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
+                ),
+                // traceIO :: String -> IO ()
+                "traceIO" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    ),
+                )),
                 // evaluate :: a -> IO a
                 "evaluate" => {
                     let io_a = Ty::App(

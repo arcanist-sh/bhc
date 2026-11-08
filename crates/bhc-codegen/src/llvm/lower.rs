@@ -7068,6 +7068,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "bracket_" => self.lower_builtin_bracket_(args[0], args[1], args[2]),
             "evaluate" => self.lower_builtin_evaluate(args[0]),
+            "unsafePerformIO" | "unsafeDupablePerformIO" => {
+                // Under the closure IO model the argument is an action to
+                // run; under the eager model evaluating it ran it already.
+                if crate::io_closure_mode() {
+                    self.lower_io_run(args[0])
+                } else {
+                    self.lower_expr(args[0])
+                }
+            }
+            "trace" => {
+                // The message goes out before the value is evaluated, as in
+                // GHC, so a trace inside a computation shows when it starts.
+                self.emit_trace_message(args[0])?;
+                self.lower_expr(args[1])
+            }
+            "traceIO" => {
+                self.emit_trace_message(args[0])?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+            }
             "<$" => self.lower_builtin_replace(args[0], args[1]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
@@ -16746,6 +16765,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             lowered
         };
         Ok(Some(forced))
+    }
+
+    /// Write the `String` `message_expr` to stderr, for `Debug.Trace`.
+    fn emit_trace_message(&mut self, message_expr: &Expr) -> CodegenResult<()> {
+        let message = self
+            .lower_expr(message_expr)?
+            .ok_or_else(|| CodegenError::Internal("trace: no message".to_string()))?;
+        let message = self.value_to_ptr(message)?;
+        let cstr = self.char_list_to_cstring(message)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let trace_fn = match self.module.get_function("bhc_trace_message") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_trace_message",
+                self.llvm_ctx.void_type().fn_type(&[ptr_type.into()], false),
+            ),
+        };
+        self.builder()
+            .build_call(trace_fn, &[cstr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("trace: {e:?}")))?;
+        Ok(())
     }
 
     /// Whether `expr` evaluates to a heap object or a thunk of one, by its type.
@@ -51877,14 +51917,180 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_binding(&mut self, bind: &Bind) -> CodegenResult<()> {
         match bind {
             Bind::NonRec(var, expr) => {
-                self.lower_function_def(var, expr)?;
+                self.lower_top_level_def(var, expr)?;
             }
             Bind::Rec(bindings) => {
                 for (var, expr) in bindings {
-                    self.lower_function_def(var, expr)?;
+                    self.lower_top_level_def(var, expr)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Lower a top-level definition, memoizing it if it is a CAF that may be.
+    fn lower_top_level_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
+        match self.functions.get(&var.id).copied() {
+            Some(public) if Self::is_memoizable_caf(var, public) => {
+                self.lower_memoized_caf(var, expr, public)
+            }
+            _ => self.lower_function_def(var, expr),
+        }
+    }
+
+    /// Whether the top-level binding `var`, declared as `function`, is a CAF
+    /// whose value can be computed once and shared, as GHC shares a CAF:
+    /// nullary, with a known type that is not, and holds no, IO action. Under
+    /// the eager IO model calling an IO CAF performs its effects, so caching
+    /// one would drop them; a type headed by a type variable may be IO. `main`
+    /// runs once anyway.
+    fn is_memoizable_caf(var: &Var, function: FunctionValue<'ctx>) -> bool {
+        fn mentions_io(ty: &Ty) -> bool {
+            match ty {
+                Ty::Con(c) => c.name.as_str() == "IO",
+                Ty::App(f, a) | Ty::Fun(f, a) => mentions_io(f) || mentions_io(a),
+                Ty::List(e) => mentions_io(e),
+                Ty::Tuple(es) => es.iter().any(mentions_io),
+                Ty::Forall(_, body) => mentions_io(body),
+                _ => false,
+            }
+        }
+        fn headed_by_var(ty: &Ty) -> bool {
+            match ty {
+                Ty::Var(_) => true,
+                Ty::App(f, _) => headed_by_var(f),
+                Ty::Forall(_, body) => headed_by_var(body),
+                _ => false,
+            }
+        }
+        let name = var.name.as_str();
+        function.count_params() == 1
+            && function.get_type().get_return_type().is_some()
+            && !matches!(var.ty, Ty::Error)
+            && !mentions_io(&var.ty)
+            && !headed_by_var(&var.ty)
+            && name != "main"
+            && !name.ends_with(".main")
+            && std::env::var_os("BHC_NO_CAF_MEMO").is_none()
+    }
+
+    /// Lower the CAF `var` so its value is computed once: the body goes into
+    /// a private `<name>$caf` function, and `public` (what every reference
+    /// calls, in this module or another) returns the cached value after the
+    /// first call. A call that leaves an exception pending caches nothing, so
+    /// a CAF that throws throws again where it is used next.
+    ///
+    /// Two threads may both compute it, if one is preempted in the middle;
+    /// they store the same value.
+    fn lower_memoized_caf(
+        &mut self,
+        var: &Var,
+        expr: &Expr,
+        public: FunctionValue<'ctx>,
+    ) -> CodegenResult<()> {
+        let symbol = self.mangle_name(var.name.as_str());
+        let body_fn = self
+            .module
+            .add_function(&format!("{symbol}$caf"), public.get_type());
+        body_fn.set_linkage(inkwell::module::Linkage::Internal);
+        self.functions.insert(var.id, body_fn);
+        let lowered = self.lower_function_def(var, expr);
+        self.functions.insert(var.id, public);
+        lowered?;
+
+        let ret_ty = public
+            .get_type()
+            .get_return_type()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void".to_string()))?;
+        let i8_type = self.llvm_context().i8_type();
+        let llvm_module = self.module.llvm_module();
+        let cache = llvm_module.add_global(ret_ty, None, &format!("{symbol}$caf_value"));
+        cache.set_linkage(inkwell::module::Linkage::Internal);
+        cache.set_initializer(&ret_ty.const_zero());
+        let done = llvm_module.add_global(i8_type, None, &format!("{symbol}$caf_done"));
+        done.set_linkage(inkwell::module::Linkage::Internal);
+        done.set_initializer(&i8_type.const_zero());
+        let pending_fn = match self.module.get_function("bhc_exception_is_pending") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_exception_is_pending",
+                self.type_mapper().i64_type().fn_type(&[], false),
+            ),
+        };
+
+        let ctx = self.llvm_context();
+        let entry = ctx.append_basic_block(public, "entry");
+        let hit = ctx.append_basic_block(public, "caf_hit");
+        let miss = ctx.append_basic_block(public, "caf_miss");
+        let store = ctx.append_basic_block(public, "caf_store");
+        let skip = ctx.append_basic_block(public, "caf_skip");
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("memoized CAF: {e:?}"))
+        };
+        let builder = self.builder();
+        builder.position_at_end(entry);
+        let flag = builder
+            .build_load(i8_type, done.as_pointer_value(), "caf_done")
+            .map_err(err)?
+            .into_int_value();
+        let is_done = builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                flag,
+                i8_type.const_zero(),
+                "is_done",
+            )
+            .map_err(err)?;
+        builder
+            .build_conditional_branch(is_done, hit, miss)
+            .map_err(err)?;
+
+        builder.position_at_end(hit);
+        let cached = builder
+            .build_load(ret_ty, cache.as_pointer_value(), "caf_cached")
+            .map_err(err)?;
+        builder.build_return(Some(&cached)).map_err(err)?;
+
+        builder.position_at_end(miss);
+        let env = public
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: no env".to_string()))?;
+        let value = builder
+            .build_call(body_fn, &[env.into()], "caf_value")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void body".to_string()))?;
+        let pending = builder
+            .build_call(pending_fn, &[], "caf_exn")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void probe".to_string()))?
+            .into_int_value();
+        let threw = builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                pending,
+                self.type_mapper().i64_type().const_zero(),
+                "caf_threw",
+            )
+            .map_err(err)?;
+        builder
+            .build_conditional_branch(threw, skip, store)
+            .map_err(err)?;
+
+        builder.position_at_end(store);
+        builder
+            .build_store(cache.as_pointer_value(), value)
+            .map_err(err)?;
+        builder
+            .build_store(done.as_pointer_value(), i8_type.const_int(1, false))
+            .map_err(err)?;
+        builder.build_return(Some(&value)).map_err(err)?;
+
+        builder.position_at_end(skip);
+        builder.build_return(Some(&value)).map_err(err)?;
         Ok(())
     }
 
@@ -64032,6 +64238,8 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "bracket" => Some(3),
         "bracket_" => Some(3),
         "evaluate" => Some(1),
+        "unsafePerformIO" | "unsafeDupablePerformIO" | "traceIO" => Some(1),
+        "trace" => Some(2),
         "<$" => Some(2),
         "finally" | "onException" => Some(2),
         "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),

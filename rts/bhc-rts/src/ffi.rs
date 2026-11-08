@@ -3190,6 +3190,31 @@ pub(crate) fn report_thread_exception() {
     }
 }
 
+/// `Debug.Trace`: write `message` and a newline to stderr. Stdout is flushed
+/// first, so a trace lands between the lines printed around it.
+///
+/// # Safety
+///
+/// `message` must be null or a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_trace_message(message: *const c_char) {
+    let _ = std::io::stdout().flush();
+    let text = if message.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        unsafe { CStr::from_ptr(message) }.to_string_lossy()
+    };
+    eprintln!("{text}");
+}
+
+/// 1 if a Haskell exception is pending on this thread, else 0. Unlike
+/// [`bhc_exception_check`] it is not a preemption point, so pure code (a
+/// memoized CAF deciding whether to cache its value) can ask.
+#[no_mangle]
+pub extern "C" fn bhc_exception_is_pending() -> i64 {
+    i64::from(bhc_exception_pending())
+}
+
 /// C-ABI probe for compiled code: 1 if a Haskell exception is pending
 /// (thrown and not yet caught), else 0. Codegen emits this check at
 /// IO-bind boundaries so a thrown sentinel short-circuits the rest of a

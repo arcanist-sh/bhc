@@ -6,32 +6,42 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.29] - 2026-11-08
+
+Threads take turns fairly, reading stdin no longer stops other threads, deep
+evaluation no longer crashes on a small stack, and four wrong results from
+polymorphic code are fixed.
+
 ### Fixed
 
-- `print` of a `String` that a polymorphic function returns (`print (pick True
-  "yes" "no")`) prints the string. It printed an address (#86).
-
-- `foldr` called directly on a type with only a derived `Foldable` instance
-  works. Held in a variable, the container was folded as a list, which forced
-  its raw elements and crashed, and an `Int` result printed as an address
-  (#87).
-
-- A polymorphic recursive fold such as `foldT f z (Node l x r) = foldT f (f x
-  (foldT f z r)) l` returns the right value at `Int` and `Double`. The inner
-  call was passed to `f` as a thunk, which was then read as a number, so
-  `foldT (+) 0 tree` printed an address (#64).
-
+- A thread that never blocks no longer starves the others: a thread is
+  preempted at an IO step once it has run for 20 ms, and an exception thrown
+  to it reaches it there. Pure code is still not preempted (#75).
+- Reading stdin lets other threads run while it waits: `getLine`, `getChar`,
+  `getContents`, `isEOF` and their `h` forms, `Data.Text.IO.getLine`,
+  `getContents`, `hGetLine` and `hGetContents`, and lazy
+  `ByteString.hGetContents` (#75).
 - A long chain of unevaluated thunks no longer crashes the program: `main`
   runs on a thread with a 1 GiB stack (reserved, not committed). A program
   that still runs out of stack prints `prog: stack overflow` and exits with
   status 2, as in GHC, instead of a bare segfault (#82).
-- A thread that never blocks no longer starves the others: a thread is
-  preempted at an IO step once it has run for 20 ms, and an exception thrown
-  to it reaches it there. Pure code is still not preempted (#75).
-- Reading stdin (`getLine`, `getChar`, `getContents`, `isEOF` and their `h`
-  forms on `stdin`) lets other threads run while it waits (#75).
-- So do `Data.Text.IO.getLine`, `getContents`, `hGetLine` and `hGetContents`,
-  and lazy `ByteString.hGetContents`, on `stdin` (#75).
+- A polymorphic recursive fold such as `foldT f z (Node l x r) = foldT f (f x
+  (foldT f z r)) l` returns the right value at `Int` and `Double`. The inner
+  call was passed to `f` as a thunk, which was then read as a number, so
+  `foldT (+) 0 tree` printed an address (#64).
+- `foldr` called directly on a type with only a derived `Foldable` instance
+  works. Held in a variable, the container was folded as a list, which forced
+  its raw elements and crashed, and an `Int` result printed as an address
+  (#87).
+- `print` of a `String` that a polymorphic function returns (`print (pick True
+  "yes" "no")`) prints the string. It printed an address (#86).
+
+### Known issues
+
+- Pure code is not preempted, and `mask` does not defer an exception thrown
+  to another thread (#75).
+- With `BHC_IO_MODEL=eager`, a recursive `Monad m =>` function at `IO` prints
+  an address (#65).
 
 ## [0.2.28] - 2026-11-07
 
@@ -558,7 +568,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.28...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.29...HEAD
+[0.2.29]: https://github.com/arcanist-sh/bhc/compare/v0.2.28...v0.2.29
 [0.2.28]: https://github.com/arcanist-sh/bhc/compare/v0.2.27...v0.2.28
 [0.2.27]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...v0.2.27
 [0.2.26]: https://github.com/arcanist-sh/bhc/compare/v0.2.25...v0.2.26

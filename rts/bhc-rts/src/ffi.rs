@@ -142,6 +142,10 @@ pub extern "C" fn bhc_gc() {
 /// The returned pointer must be freed using `bhc_free` or by GC.
 #[no_mangle]
 pub extern "C" fn bhc_alloc(size: usize) -> *mut u8 {
+    // Pure code reaches no IO step, but it allocates: preempt it here.
+    if crate::concurrent::bhc_preempt_requested.load(Ordering::Relaxed) != 0 {
+        crate::concurrent::bhc_preempt();
+    }
     // The global allocator must not be called with a zero-size layout
     if size == 0 {
         return 8 as *mut u8; // aligned dangling pointer; bhc_free ignores size 0
@@ -543,6 +547,25 @@ pub extern "C" fn bhc_get_profile() -> c_int {
 /// Thunk tag constant: unevaluated thunk
 pub const BHC_TAG_THUNK: i64 = -1;
 
+/// Offset of the word that holds a blackholed thunk's owner, the thread that
+/// evaluates it. Before that it holds the environment size, which nothing
+/// reads.
+const THUNK_OWNER_OFFSET: usize = 16;
+
+/// `obj` is a blackhole. Return once it is evaluated if another thread owns
+/// it; abort with `<<loop>>` if this thread does, or if it can never finish.
+fn wait_for_other_owner(obj: *mut u8, tag: &AtomicI64) {
+    let owner = unsafe { *(obj.add(THUNK_OWNER_OFFSET) as *const u64) };
+    let others_evaluate_it = crate::concurrent::forked()
+        && owner != crate::concurrent::current_thread()
+        && crate::concurrent::wait_for_blackhole(|| {
+            tag.load(Ordering::Acquire) == BHC_TAG_BLACKHOLE
+        });
+    if !others_evaluate_it {
+        rts_abort("<<loop>> - circular reference in thunk evaluation");
+    }
+}
+
 /// Thunk tag constant: blackhole (being evaluated, used to detect cycles)
 pub const BHC_TAG_BLACKHOLE: i64 = -2;
 
@@ -610,7 +633,15 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     // across tasks, plain loads/stores on these words would be a data race
     // (UB), and a torn update could dispatch on a garbage tag.
     let tag_atomic = unsafe { &*(obj as *const AtomicI64) };
-    let tag = tag_atomic.load(Ordering::Acquire);
+    let mut tag = tag_atomic.load(Ordering::Acquire);
+
+    // Another thread is evaluating this thunk (it was preempted in the
+    // middle): wait until it is done. Blackholed by this thread, or with no
+    // thread left to finish it, it is a `<<loop>>`.
+    if tag == BHC_TAG_BLACKHOLE {
+        wait_for_other_owner(obj, tag_atomic);
+        tag = tag_atomic.load(Ordering::Acquire);
+    }
 
     // Check for indirection (previously evaluated thunk) — must check before tag >= 0
     if tag == BHC_TAG_INDIRECTION {
@@ -640,17 +671,18 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
             )
             .is_err()
         {
-            // Lost the race: another forcing is in progress or finished.
-            // Single-owner semantics treat a blackhole as <<loop>>.
+            // Lost the race: only one thread runs at a time, so it was not
+            // lost to a parallel forcing.
             rts_abort("<<loop>> - circular reference in thunk evaluation");
         }
+
+        // Record the owner, which a thread that meets the blackhole checks.
+        // The word held the environment size, which nothing reads.
+        unsafe { *(obj.add(THUNK_OWNER_OFFSET) as *mut u64) = crate::concurrent::current_thread() };
 
         // Read eval function pointer (at offset 8); we own the thunk after
         // winning the CAS, so plain reads of its fields are fine
         let eval_fn_ptr = unsafe { *(obj.add(8) as *const *const u8) };
-
-        // Read env_size (at offset 16) - currently unused but kept for documentation
-        let _env_size = unsafe { *(obj.add(16) as *const i64) };
 
         // Get environment pointer (at offset 24)
         let env_ptr = unsafe { obj.add(24) };

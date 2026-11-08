@@ -18,6 +18,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A thread in a long pure computation no longer keeps the other threads from
+  running: compiled code checks for preemption on function entry and at
+  allocations, where a timer asks for it once per 20 ms slice, so recursion
+  and loops that reach no IO step give way too. `killThread` reaches such a
+  thread at its next IO step. A thread that needs a thunk another thread is
+  evaluating waits for it instead of reporting `<<loop>>` (#75).
+
 - `SHA256SUMS.txt` lists bare archive names, so `shasum -a 256 -c
   --ignore-missing SHA256SUMS.txt` works next to a download, and the install
   script verifies the archive against it before unpacking (#46).

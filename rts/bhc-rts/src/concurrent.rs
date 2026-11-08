@@ -13,10 +13,17 @@
 //! (`outside_baton`). When no thread can run, the baton is idle, and an
 //! idle thread wakes sleepers and waits for readers to come back.
 //!
+//! Pure code is preempted on entry to a function and at allocations
+//! (`bhc_preempt`), which check a flag a timer thread sets once per slice. A thread preempted while it evaluates a thunk leaves
+//! it blackholed, and another thread that needs it waits for it
+//! (`wait_for_blackhole`) instead of reporting `<<loop>>`.
+//!
 //! ==== Limits
 //!
-//! * Pure code is not preempted: a thread in a long pure computation keeps
-//!   the baton until its next IO step.
+//! * A loop inside one function that neither calls nor allocates (such as a
+//!   builtin numeric loop) is not preempted.
+//! * An exception thrown to a thread in pure code is raised at its next IO
+//!   step: pure code does not check for one.
 //! * An exception thrown to a thread waiting for stdin is raised when the read
 //!   returns.
 //! * `throwTo` and `killThread` reach a thread where it next runs: the
@@ -31,7 +38,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -307,11 +314,117 @@ pub(crate) fn safe_point() {
     wake_sleepers(s);
     if s.run_queue.is_empty() {
         SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+        // Thrown to while it ran pure code (`bhc_preempt` deferred it here).
+        raise_interrupt(s, me, false);
         return;
     }
     s.run_queue.push_back(me);
     let mut guard = park(guard, me);
     raise_interrupt(sched(&mut guard), me, false);
+}
+
+/// Set by the timer thread once per time slice, and checked by compiled code
+/// at every function entry and by `bhc_alloc`, which call `bhc_preempt` when
+/// it is set. Pure code reaches no IO step, so without it a thread in a long
+/// pure computation would keep the baton until it finished. Nothing sets it
+/// before the first `forkIO`, so a program without threads pays one load.
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static bhc_preempt_requested: AtomicU8 = AtomicU8::new(0);
+
+/// Whether other threads exist, so that preemption can matter.
+#[inline]
+pub(crate) fn forked() -> bool {
+    FORKED.load(Ordering::Relaxed)
+}
+
+/// The id of the running thread, which `bhc_force` records as the owner of a
+/// thunk it is evaluating.
+#[inline]
+pub(crate) fn current_thread() -> u64 {
+    me()
+}
+
+/// The timer thread: ask the running thread to check its slice once per
+/// slice.
+fn run_timer() {
+    loop {
+        std::thread::sleep(TIME_SLICE);
+        bhc_preempt_requested.store(1, Ordering::Relaxed);
+    }
+}
+
+/// A preemption point in pure code: compiled code calls it on entry to a
+/// function, and `bhc_alloc` when it allocates, once `bhc_preempt_requested`
+/// is set. Once the slice is over and another thread is ready, it gives way.
+///
+/// Unlike `safe_point`, it raises no exception thrown to this thread: pure
+/// code does not check for one, so it is raised at the next IO step instead.
+/// It is reached only from compiled code and from allocation, and RTS code
+/// never allocates with a lock held, so giving way here is safe.
+#[no_mangle]
+pub extern "C" fn bhc_preempt() {
+    bhc_preempt_requested.store(0, Ordering::Relaxed);
+    if !FORKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let started = SLICE_START.with(Cell::get);
+    if started.is_some_and(|at| at.elapsed() < TIME_SLICE) {
+        return;
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    wake_sleepers(s);
+    if s.run_queue.is_empty() {
+        SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+        // Keep an exception thrown to it earlier due at the next IO step.
+        defer_interrupt_to_io_step(s, me);
+        return;
+    }
+    s.run_queue.push_back(me);
+    let mut guard = park(guard, me);
+    defer_interrupt_to_io_step(sched(&mut guard), me);
+}
+
+/// An exception thrown to this thread while it was parked in pure code waits
+/// for the next IO step; make that step take `safe_point`'s slow path, which
+/// raises it, instead of waiting for the slice to end.
+fn defer_interrupt_to_io_step(s: &Sched, me: u64) {
+    if s.interrupts.contains_key(&me) {
+        SLICE_START.with(|cell| cell.set(None));
+    }
+}
+
+/// Wait while another thread evaluates a thunk this one needs: it was
+/// preempted in the middle (`alloc_tick`), or blocked in IO inside it. Gives
+/// the baton away until `is_blackhole` turns false, and returns `true` then.
+/// Returns `false` if no thread can ever finish the thunk, because none is
+/// ready and none will wake.
+pub(crate) fn wait_for_blackhole(is_blackhole: impl Fn() -> bool) -> bool {
+    let me = me();
+    loop {
+        let mut guard = lock();
+        let s = sched(&mut guard);
+        let earliest = wake_sleepers(s);
+        if s.run_queue.is_empty() {
+            if earliest.is_none() && s.outside == 0 {
+                return false;
+            }
+            // The owner is blocked: look again once a sleeper or a reader
+            // has had the chance to run.
+            s.sleepers
+                .push((Instant::now() + Duration::from_millis(1), me));
+        } else {
+            s.run_queue.push_back(me);
+        }
+        let mut guard = park(guard, me);
+        defer_interrupt_to_io_step(sched(&mut guard), me);
+        drop(guard);
+        if !is_blackhole() {
+            return true;
+        }
+    }
 }
 
 /// Run `read`, a read from stdin that may block, without the baton, so other
@@ -476,6 +589,13 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
             .spawn(run_idle)
             .unwrap_or_else(|e| {
                 eprintln!("forkIO: cannot create the idle thread: {e}");
+                std::process::exit(1)
+            });
+        std::thread::Builder::new()
+            .name("bhc-timer".to_string())
+            .spawn(run_timer)
+            .unwrap_or_else(|e| {
+                eprintln!("forkIO: cannot create the timer thread: {e}");
                 std::process::exit(1)
             });
         SLICE_START.with(|cell| cell.set(Some(Instant::now())));

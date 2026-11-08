@@ -1694,6 +1694,73 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(())
     }
 
+    /// Emit a preemption point at a function entry: if the RTS's timer asked
+    /// for one (`bhc_preempt_requested`), call `bhc_preempt`, which gives the
+    /// baton away once the slice is over. Pure recursion has no IO step, so
+    /// this is what lets other threads run while it goes on (#75). Without
+    /// threads the flag is never set, and this is one load and a branch.
+    fn emit_preempt_check(&mut self) -> CodegenResult<()> {
+        let i8_type = self.llvm_context().i8_type();
+        let llvm_module = self.module.llvm_module();
+        let flag = match llvm_module.get_global("bhc_preempt_requested") {
+            Some(g) => g,
+            None => {
+                let g = llvm_module.add_global(i8_type, None, "bhc_preempt_requested");
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            }
+        };
+        let preempt_fn = match self.module.get_function("bhc_preempt") {
+            Some(f) => f,
+            None => {
+                let fn_type = self.llvm_context().void_type().fn_type(&[], false);
+                self.module.add_function("bhc_preempt", fn_type)
+            }
+        };
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("preempt check: no function".to_string()))?;
+        let requested = self
+            .builder()
+            .build_load(i8_type, flag.as_pointer_value(), "preempt_requested")
+            .map_err(|e| CodegenError::Internal(format!("preempt load: {:?}", e)))?;
+        if let Some(load) = requested.into_int_value().as_instruction() {
+            load.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic)
+                .map_err(|e| CodegenError::Internal(format!("preempt ordering: {e}")))?;
+            load.set_alignment(1)
+                .map_err(|e| CodegenError::Internal(format!("preempt align: {e}")))?;
+        }
+        let is_requested = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                requested.into_int_value(),
+                i8_type.const_zero(),
+                "preempt_is_requested",
+            )
+            .map_err(|e| CodegenError::Internal(format!("preempt cmp: {:?}", e)))?;
+        let yield_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "preempt");
+        let cont_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "preempt_cont");
+        self.builder()
+            .build_conditional_branch(is_requested, yield_block, cont_block)
+            .map_err(|e| CodegenError::Internal(format!("preempt br: {:?}", e)))?;
+        self.builder().position_at_end(yield_block);
+        self.builder()
+            .build_call(preempt_fn, &[], "")
+            .map_err(|e| CodegenError::Internal(format!("preempt call: {:?}", e)))?;
+        self.builder()
+            .build_unconditional_branch(cont_block)
+            .map_err(|e| CodegenError::Internal(format!("preempt br2: {:?}", e)))?;
+        self.builder().position_at_end(cont_block);
+        Ok(())
+    }
+
     fn lower_io_bind_with_value(
         &mut self,
         lhs_val: BasicValueEnum<'ctx>,
@@ -60095,6 +60162,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         expr: &Expr,
         integer_param_positions: &[bool],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.emit_preempt_check()?;
         // If the expression is a lambda, bind parameters to function arguments
         // Note: param_idx starts at 1 because index 0 is the env/closure pointer
         let mut current = expr;

@@ -63,22 +63,57 @@ struct Waiter {
     is_read: bool,
 }
 
+/// A value an `MVar` or a `Chan` holds. GHC's are lazy in their contents:
+/// `newMVar (error "x")` is fine until someone uses the value. Codegen stores a
+/// still-unevaluated argument as a thunk and says so; the reader forces it.
+/// The flag travels with the value because nothing in a word tells a thunk
+/// from an unboxed scalar.
+#[derive(Clone, Copy)]
+struct Slot {
+    ptr: *mut u8,
+    lazy: bool,
+}
+
+impl Slot {
+    const EMPTY: Slot = Slot {
+        ptr: std::ptr::null_mut(),
+        lazy: false,
+    };
+
+    fn new(ptr: *mut u8, lazy: bool) -> Slot {
+        Slot { ptr, lazy }
+    }
+
+    /// The value, evaluating a lazily stored one. Called without the lock
+    /// held: the evaluation runs Haskell code, which may block or be
+    /// preempted. A thunk that throws leaves the exception pending and yields
+    /// null, as every blocking operation does.
+    fn resolve(self) -> *mut u8 {
+        if self.lazy {
+            // SAFETY: a lazy slot holds a thunk built by codegen.
+            unsafe { crate::ffi::bhc_force(self.ptr) }
+        } else {
+            self.ptr
+        }
+    }
+}
+
 /// An `MVar`. The object header makes it an evaluated heap object, so
 /// `bhc_force` leaves it alone. Fields are only touched under the `SCHED` lock.
 #[repr(C)]
 pub struct MVar {
     tag: i64,
     full: bool,
-    value: *mut u8,
+    value: Slot,
     waiters: VecDeque<Waiter>,
-    putters: VecDeque<(u64, *mut u8)>,
+    putters: VecDeque<(u64, Slot)>,
 }
 
 /// A `Chan`: an unbounded queue, with threads waiting when it is empty.
 #[repr(C)]
 pub struct Chan {
     tag: i64,
-    items: VecDeque<*mut u8>,
+    items: VecDeque<Slot>,
     readers: VecDeque<u64>,
 }
 
@@ -120,7 +155,7 @@ struct Sched {
     /// How a parked thread is woken, for every live thread.
     wakers: HashMap<u64, Arc<Condvar>>,
     /// Values handed to a thread that blocked in `takeMVar`/`readChan`.
-    delivered: HashMap<u64, *mut u8>,
+    delivered: HashMap<u64, Slot>,
     /// Threads waiting in an `MVar`, a `Chan` or `threadDelay`.
     blocked: HashMap<u64, Blocked>,
     /// Exceptions thrown to a thread that has not run since, raised when it
@@ -555,7 +590,7 @@ fn wake(s: &mut Sched, thread: u64) {
 }
 
 /// Give a blocked thread its value and make it runnable.
-fn wake_with(s: &mut Sched, thread: u64, value: *mut u8) {
+fn wake_with(s: &mut Sched, thread: u64, value: Slot) {
     s.delivered.insert(thread, value);
     wake(s, thread);
 }
@@ -735,15 +770,13 @@ pub extern "C" fn bhc_new_empty_mvar() -> *mut u8 {
     Box::into_raw(Box::new(MVar {
         tag: 0,
         full: false,
-        value: std::ptr::null_mut(),
+        value: Slot::EMPTY,
         waiters: VecDeque::new(),
         putters: VecDeque::new(),
     })) as *mut u8
 }
 
-/// `newMVar`.
-#[no_mangle]
-pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
+fn new_full_mvar(value: Slot) -> *mut u8 {
     let mvar = bhc_new_empty_mvar();
     // SAFETY: `mvar` was just allocated and nothing else can see it.
     unsafe {
@@ -752,6 +785,18 @@ pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
         m.value = value;
     }
     mvar
+}
+
+/// `newMVar`.
+#[no_mangle]
+pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
+    new_full_mvar(Slot::new(value, false))
+}
+
+/// `newMVar` of an unevaluated value: `thunk` is forced by its first reader.
+#[no_mangle]
+pub extern "C" fn bhc_new_mvar_lazy(thunk: *mut u8) -> *mut u8 {
+    new_full_mvar(Slot::new(thunk, true))
 }
 
 /// After the value left a full `MVar`: the first blocked `putMVar` fills it.
@@ -777,10 +822,11 @@ unsafe fn take_or_read(mvar: *mut u8, is_read: bool) -> *mut u8 {
         let value = m.value;
         if !is_read {
             m.full = false;
-            m.value = std::ptr::null_mut();
+            m.value = Slot::EMPTY;
             refill(s, m);
         }
-        return value;
+        drop(guard);
+        return value.resolve();
     }
     m.waiters.push_back(Waiter {
         thread: me,
@@ -790,10 +836,9 @@ unsafe fn take_or_read(mvar: *mut u8, is_read: bool) -> *mut u8 {
     if !woken {
         return std::ptr::null_mut();
     }
-    sched(&mut guard)
-        .delivered
-        .remove(&me)
-        .unwrap_or(std::ptr::null_mut())
+    let value = sched(&mut guard).delivered.remove(&me);
+    drop(guard);
+    value.unwrap_or(Slot::EMPTY).resolve()
 }
 
 /// `takeMVar`: empty the `MVar`, waiting until it is full.
@@ -818,7 +863,7 @@ pub unsafe extern "C" fn bhc_read_mvar(mvar: *mut u8) -> *mut u8 {
 
 /// Store into an empty `MVar`: every waiting `readMVar` sees the value, then
 /// the first waiting `takeMVar` takes it, and otherwise it stays.
-fn fill(s: &mut Sched, m: &mut MVar, value: *mut u8) {
+fn fill(s: &mut Sched, m: &mut MVar, value: Slot) {
     let mut taker = None;
     let mut rest = VecDeque::new();
     while let Some(waiter) = m.waiters.pop_front() {
@@ -846,6 +891,20 @@ fn fill(s: &mut Sched, m: &mut MVar, value: *mut u8) {
 /// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_put_mvar(mvar: *mut u8, value: *mut u8) {
+    unsafe { put_mvar(mvar, Slot::new(value, false)) }
+}
+
+/// `putMVar` of an unevaluated value: `thunk` is forced by its first reader.
+///
+/// # Safety
+///
+/// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_put_mvar_lazy(mvar: *mut u8, thunk: *mut u8) {
+    unsafe { put_mvar(mvar, Slot::new(thunk, true)) }
+}
+
+unsafe fn put_mvar(mvar: *mut u8, value: Slot) {
     if crate::ffi::exception_pending() {
         return;
     }
@@ -886,8 +945,13 @@ pub unsafe extern "C" fn bhc_try_take_mvar(mvar: *mut u8) -> *mut u8 {
     }
     let value = m.value;
     m.full = false;
-    m.value = std::ptr::null_mut();
+    m.value = Slot::EMPTY;
     refill(sched(&mut guard), m);
+    drop(guard);
+    let value = value.resolve();
+    if crate::ffi::exception_pending() {
+        return std::ptr::null_mut();
+    }
     new_object(JUST, &[value])
 }
 
@@ -898,6 +962,20 @@ pub unsafe extern "C" fn bhc_try_take_mvar(mvar: *mut u8) -> *mut u8 {
 /// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_try_put_mvar(mvar: *mut u8, value: *mut u8) -> *mut u8 {
+    unsafe { try_put_mvar(mvar, Slot::new(value, false)) }
+}
+
+/// `tryPutMVar` of an unevaluated value: `thunk` is forced by its first reader.
+///
+/// # Safety
+///
+/// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_try_put_mvar_lazy(mvar: *mut u8, thunk: *mut u8) -> *mut u8 {
+    unsafe { try_put_mvar(mvar, Slot::new(thunk, true)) }
+}
+
+unsafe fn try_put_mvar(mvar: *mut u8, value: Slot) -> *mut u8 {
     const FALSE: i64 = 0;
     const TRUE: i64 = 1;
     let mut guard = lock();
@@ -926,7 +1004,7 @@ pub unsafe extern "C" fn bhc_mvar_finish(mvar: *mut u8, old: *mut u8, new: *mut 
     let mut guard = lock();
     // SAFETY: the caller passes an `MVar`, and the lock guards its fields.
     let m = unsafe { &mut *(mvar as *mut MVar) };
-    fill(sched(&mut guard), m, value);
+    fill(sched(&mut guard), m, Slot::new(value, false));
 }
 
 /// Finish `modifyMVar`: the action returned `pair`, `(new value, result)`. If
@@ -976,6 +1054,20 @@ pub extern "C" fn bhc_new_chan() -> *mut u8 {
 /// `chan` must be a pointer returned by `bhc_new_chan`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_write_chan(chan: *mut u8, value: *mut u8) {
+    unsafe { write_chan(chan, Slot::new(value, false)) }
+}
+
+/// `writeChan` of an unevaluated value: `thunk` is forced by its reader.
+///
+/// # Safety
+///
+/// `chan` must be a pointer returned by `bhc_new_chan`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_write_chan_lazy(chan: *mut u8, thunk: *mut u8) {
+    unsafe { write_chan(chan, Slot::new(thunk, true)) }
+}
+
+unsafe fn write_chan(chan: *mut u8, value: Slot) {
     if crate::ffi::exception_pending() {
         return;
     }
@@ -1004,15 +1096,15 @@ pub unsafe extern "C" fn bhc_read_chan(chan: *mut u8) -> *mut u8 {
     // SAFETY: the caller passes a `Chan`, and the lock guards its fields.
     let c = unsafe { &mut *(chan as *mut Chan) };
     if let Some(value) = c.items.pop_front() {
-        return value;
+        drop(guard);
+        return value.resolve();
     }
     c.readers.push_back(me);
     let (mut guard, woken) = park_blocked(guard, me, Blocked::ReadChan(c));
     if !woken {
         return std::ptr::null_mut();
     }
-    sched(&mut guard)
-        .delivered
-        .remove(&me)
-        .unwrap_or(std::ptr::null_mut())
+    let value = sched(&mut guard).delivered.remove(&me);
+    drop(guard);
+    value.unwrap_or(Slot::EMPTY).resolve()
 }

@@ -2502,6 +2502,11 @@ fn test_tier3_concurrent_pure_preemption_native() {
 }
 
 #[test]
+fn test_tier3_mvar_lazy_contents_native() {
+    run_native_test("tier3_io/mvar_lazy_contents", Profile::Default);
+}
+
+#[test]
 fn test_tier3_monad_poly_recursive_bind_native() {
     run_native_test("tier3_io/monad_poly_recursive_bind", Profile::Default);
 }

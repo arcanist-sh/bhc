@@ -28299,6 +28299,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.value_to_ptr(value)
     }
 
+    /// Lower a value an MVar or Chan stores. GHC's are lazy in their
+    /// contents, so an argument that is still a computation becomes a thunk,
+    /// run by the thread that first reads it rather than the one storing it.
+    /// Returns the value and whether it is such a thunk; the RTS has a `_lazy`
+    /// entry point for each store that records it, because nothing in a word
+    /// tells a thunk from an unboxed scalar.
+    fn lower_concurrency_stored_value(
+        &mut self,
+        expr: &Expr,
+    ) -> CodegenResult<(PointerValue<'ctx>, bool)> {
+        if matches!(
+            Self::peel_expr(expr),
+            Expr::App(..) | Expr::Case(..) | Expr::Let(..)
+        ) {
+            if let Some(thunk) = self.lower_lazy(expr)? {
+                return Ok((self.value_to_ptr(thunk)?, true));
+            }
+        }
+        Ok((self.lower_concurrency_value(expr)?, false))
+    }
+
+    /// `symbol`, or its `_lazy` variant when the stored value is a thunk.
+    fn lazy_store_symbol(symbol: &str, lazy: bool) -> String {
+        if lazy {
+            format!("{symbol}_lazy")
+        } else {
+            symbol.to_string()
+        }
+    }
+
     /// Run `f value`, for a function `f :: a -> IO b` passed to `withMVar` and
     /// friends.
     fn run_applied_action(
@@ -28366,8 +28396,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "newEmptyMVar" => self.call_concurrency_rts("bhc_new_empty_mvar", &[], true)?,
             "newMVar" => {
-                let value = self.lower_concurrency_value(args[0])?;
-                self.call_concurrency_rts("bhc_new_mvar", &[value], true)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[0])?;
+                let symbol = Self::lazy_store_symbol("bhc_new_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[value], true)?
             }
             "takeMVar" | "readMVar" | "tryTakeMVar" | "readChan" => {
                 let symbol = match name {
@@ -28386,19 +28417,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     "bhc_write_chan"
                 };
                 let handle = self.lower_concurrency_handle(args[0])?;
-                let value = self.lower_concurrency_value(args[1])?;
-                self.call_concurrency_rts(symbol, &[handle, value], false)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[1])?;
+                let symbol = Self::lazy_store_symbol(symbol, lazy);
+                self.call_concurrency_rts(&symbol, &[handle, value], false)?
             }
             "tryPutMVar" => {
                 let mvar = self.lower_concurrency_handle(args[0])?;
-                let value = self.lower_concurrency_value(args[1])?;
-                self.call_concurrency_rts("bhc_try_put_mvar", &[mvar, value], true)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[1])?;
+                let symbol = Self::lazy_store_symbol("bhc_try_put_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[mvar, value], true)?
             }
             "swapMVar" => {
                 let mvar = self.lower_concurrency_handle(args[0])?;
-                let new = self.lower_concurrency_value(args[1])?;
+                let (new, lazy) = self.lower_concurrency_stored_value(args[1])?;
                 let old = self.call_concurrency_rts("bhc_take_mvar", &[mvar], true)?;
-                self.call_concurrency_rts("bhc_put_mvar", &[mvar, new], false)?;
+                let symbol = Self::lazy_store_symbol("bhc_put_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[mvar, new], false)?;
                 old
             }
             "newChan" => self.call_concurrency_rts("bhc_new_chan", &[], true)?,

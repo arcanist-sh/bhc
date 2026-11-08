@@ -24,6 +24,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `newMVar`, `putMVar`, `tryPutMVar`, `swapMVar` and `writeChan` no longer
+  evaluate the value they store, as in GHC: `newMVar (error "x")` crashed at
+  once. A stored computation runs when `takeMVar`, `readMVar`,
+  `tryTakeMVar` or `readChan` first reads it, in the reading thread.
+
 - A top-level list defined in terms of itself works: `ones = 1 : ones`
   segfaulted, `nats = 0 : map (+ 1) nats` overflowed the stack, and
   `fibs = 0 : 1 : zipWith (+) fibs (tail fibs)` crashed. Inside such a

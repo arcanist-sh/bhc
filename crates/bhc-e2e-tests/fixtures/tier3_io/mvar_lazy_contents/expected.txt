@@ -1,0 +1,13 @@
+newMVar of a bottom
+5050
+55
+55
+12
+5
+'c'
+False
+10
+15
+500500
+21
+done

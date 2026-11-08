@@ -81,6 +81,11 @@ const EXC_TAG_ARITH_EXCEPTION: u64 = 4;
 /// The RTS exception tag of `AsyncException` (`EXC_TAG_ASYNC_EXCEPTION` in
 /// `bhc-rts`).
 const EXC_TAG_ASYNC_EXCEPTION: u64 = 5;
+
+/// The RTS masking states (`MASK_INTERRUPTIBLE`, `MASK_UNINTERRUPTIBLE` in
+/// `bhc-rts`).
+const MASK_INTERRUPTIBLE: u64 = 1;
+const MASK_UNINTERRUPTIBLE: u64 = 2;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::types::{BasicType, BasicTypeEnum};
@@ -16908,6 +16913,76 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// `mask`/`uninterruptibleMask` under the closure IO model: enter the
+    /// masked region, apply the body `f` to a `restore` built by the RTS, RUN
+    /// the resulting action inside the region, and leave it. Evaluating the
+    /// body there was not enough: it only built the action, which ran after
+    /// the mask was lifted, or never.
+    fn lower_mask_closure_model(
+        &mut self,
+        body: PointerValue<'ctx>,
+        state: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let i64_type = self.type_mapper().i64_type();
+        let ptr_type = self.type_mapper().ptr_type();
+        let enter = match self.module.get_function("bhc_mask_enter") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_mask_enter",
+                i64_type.fn_type(&[i64_type.into()], false),
+            ),
+        };
+        let exit = match self.module.get_function("bhc_mask_exit") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_mask_exit",
+                self.llvm_ctx.void_type().fn_type(&[i64_type.into()], false),
+            ),
+        };
+        let make_restore = match self.module.get_function("bhc_make_restore") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_make_restore",
+                ptr_type.fn_type(&[i64_type.into()], false),
+            ),
+        };
+        let old = self
+            .builder()
+            .build_call(
+                enter,
+                &[i64_type.const_int(state, false).into()],
+                "mask_old",
+            )
+            .map_err(|e| CodegenError::Internal(format!("mask enter: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("mask enter: void".to_string()))?;
+        let restore = self
+            .builder()
+            .build_call(make_restore, &[old.into()], "restore")
+            .map_err(|e| CodegenError::Internal(format!("make restore: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("make restore: void".to_string()))?;
+        let action = self.run_applied_action_value(body, restore)?;
+        self.builder()
+            .build_call(exit, &[old.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("mask exit: {e:?}")))?;
+        Ok(Some(action))
+    }
+
+    /// Apply the function closure `func` to `value` and run the IO action it
+    /// returns.
+    fn run_applied_action_value(
+        &mut self,
+        func: PointerValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let func = self.build_force(func.into())?;
+        let func = self.value_to_ptr(func)?;
+        self.run_applied_action(func, value)
+    }
+
     /// Lower `mask` — masking with restore function.
     ///
     /// mask :: ((IO a -> IO a) -> IO b) -> IO b
@@ -16920,6 +16995,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(action_expr)?
             .ok_or_else(|| CodegenError::Internal("mask: action has no value".to_string()))?;
         let action_closure = self.value_to_ptr(action_val)?;
+        if crate::io_closure_mode() {
+            return self.lower_mask_closure_model(action_closure, MASK_INTERRUPTIBLE);
+        }
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
 
         let rts_fn = self
@@ -16955,6 +17033,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             CodegenError::Internal("uninterruptibleMask: action has no value".to_string())
         })?;
         let action_closure = self.value_to_ptr(action_val)?;
+        if crate::io_closure_mode() {
+            return self.lower_mask_closure_model(action_closure, MASK_UNINTERRUPTIBLE);
+        }
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
 
         let rts_fn = self
@@ -56123,6 +56204,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "mask" => {
                 let action_closure = args[0].into_pointer_value();
+                if crate::io_closure_mode() {
+                    return self.lower_mask_closure_model(action_closure, MASK_INTERRUPTIBLE);
+                }
                 let action_fn = self.extract_closure_fn_ptr(action_closure)?;
                 let rts_fn = self.functions.get(&VarId::new(1000085)).ok_or_else(|| {
                     CodegenError::Internal("bhc_mask_with_restore not declared".to_string())
@@ -56142,6 +56226,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "uninterruptibleMask" => {
                 let action_closure = args[0].into_pointer_value();
+                if crate::io_closure_mode() {
+                    return self.lower_mask_closure_model(action_closure, MASK_UNINTERRUPTIBLE);
+                }
                 let action_fn = self.extract_closure_fn_ptr(action_closure)?;
                 let rts_fn = self.functions.get(&VarId::new(1000087)).ok_or_else(|| {
                     CodegenError::Internal(

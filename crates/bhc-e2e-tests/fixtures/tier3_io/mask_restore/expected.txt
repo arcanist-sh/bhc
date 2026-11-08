@@ -1,0 +1,11 @@
+a
+b
+c
+42
+d
+7
+"user error (e)"
+3
+finished with 10
+failed: user error (boom)
+end

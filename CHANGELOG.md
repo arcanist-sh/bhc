@@ -6,6 +6,13 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `mask $ \restore -> body` runs its body, `restore` runs its action, and an
+  exception thrown inside `restore` reaches the caller. Under the default IO
+  model the body never ran, so `forkFinally` and anything else built on
+  `mask` did not work (#91).
+
 ## [0.2.29] - 2026-11-08
 
 Threads take turns fairly, reading stdin no longer stops other threads, deep

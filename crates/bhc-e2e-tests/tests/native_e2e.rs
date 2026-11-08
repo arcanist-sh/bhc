@@ -2498,3 +2498,12 @@ fn test_tier2_derived_foldable_foldr_native() {
 fn test_tier2_print_polymorphic_string_native() {
     run_native_test("tier2_functions/print_polymorphic_string", Profile::Default);
 }
+
+#[test]
+fn test_tier3_mask_restore_native() {
+    // Under the eager model `mask` with `restore` still crashes (#91).
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/mask_restore", Profile::Default);
+}

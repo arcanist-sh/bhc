@@ -1,0 +1,11 @@
+"yes"
+"no"
+"aab"
+"tab\there"
+"!!"
+5
+[1,2,3]
+"plain"
+'c'
+["a","b"]
+Just "x"

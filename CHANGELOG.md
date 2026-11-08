@@ -8,6 +8,9 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `print` of a `String` that a polymorphic function returns (`print (pick True
+  "yes" "no")`) prints the string. It printed an address (#86).
+
 - `foldr` called directly on a type with only a derived `Foldable` instance
   works. Held in a variable, the container was folded as a list, which forced
   its raw elements and crashed, and an `Int` result printed as an address

@@ -17420,6 +17420,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
 
+        // A `String` per the type checker whose expression has no list type
+        // here (a polymorphic function's result, `pick True "yes" "no"` at
+        // `b`) prints through `show` typed at `String`. Without it the value
+        // fell through to the integer printer and printed an address (#86).
+        if let Ty::Fun(a, _) = &self.current_builtin_ty {
+            if self.is_string_type(a) && !self.is_list_type(&expr_ty) {
+                let span = bhc_span::Span::default();
+                let string_ty = a.as_ref().clone();
+                let show_var = Var {
+                    name: Symbol::intern("show"),
+                    id: VarId::new(usize::MAX - 31),
+                    ty: Ty::fun(string_ty.clone(), string_ty),
+                };
+                let shown = Expr::App(
+                    Box::new(Expr::Var(show_var, span)),
+                    Box::new(val_expr.clone()),
+                    span,
+                );
+                return self.lower_builtin_put_str_ln(&shown);
+            }
+        }
+
         // A Char prints as its `show` (`'B'`), not as its code point:
         // `putStrLn (show x)` with `show` typed at Char.
         if self.is_char_type(&expr_ty) {

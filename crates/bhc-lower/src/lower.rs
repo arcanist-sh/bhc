@@ -7856,6 +7856,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
     match expr {
         ast::Expr::Var(ident, span) => {
             let name = ident.name;
+            if let Some(desugared) = desugar_trace_helper(ctx, None, name, *span) {
+                return desugared;
+            }
             if let Some(def_id) = resolve_var(ctx, name, *span) {
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {
@@ -7870,6 +7873,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // Qualified variable like M.foo or Data.Map.lookup
             let qualifier = Symbol::intern(&module_name.to_string());
             let name = ident.name;
+            if let Some(desugared) = desugar_trace_helper(ctx, Some(qualifier), name, *span) {
+                return desugared;
+            }
 
             // Use the qualified name resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_var(qualifier, name) {
@@ -8882,6 +8888,69 @@ fn operator_is_builtin(ctx: &LowerContext, name: Symbol) -> bool {
     ctx.lookup_value(name)
         .and_then(|d| ctx.lookup_def(d))
         .is_some_and(|info| info.span == Span::DUMMY)
+}
+
+/// `Debug.Trace`'s helpers, in terms of `trace` and `show`, as base defines
+/// them:
+///
+/// - `traceShow a b`  is `trace (show a) b`
+/// - `traceShowId a`  is `trace (show a) a`
+/// - `traceM s`       is `trace s (pure ())`
+/// - `traceShowM a`   is `trace (show a) (pure ())`
+///
+/// Desugared here rather than given codegen of their own so `show` resolves
+/// through the usual class machinery, user types with a derived `Show`
+/// included. Only a reference that resolves to the `Debug.Trace` stub is
+/// rewritten; a user's own `traceM` is left alone.
+fn desugar_trace_helper(
+    ctx: &mut LowerContext,
+    qualifier: Option<Symbol>,
+    name: Symbol,
+    span: Span,
+) -> Option<hir::Expr> {
+    let helper = name.as_str();
+    if !matches!(
+        helper,
+        "traceShow" | "traceShowId" | "traceM" | "traceShowM"
+    ) {
+        return None;
+    }
+    let def_id = match qualifier {
+        Some(q) => ctx.resolve_qualified_var(q, name)?,
+        None => ctx.lookup_value(name)?,
+    };
+    if ctx.lookup_def(def_id).map(|info| info.kind) != Some(DefKind::StubValue) {
+        return None;
+    }
+    let ident = |s: &str| bhc_intern::Ident::new(Symbol::intern(s));
+    let var = |s: &str| ast::Expr::Var(ident(s), span);
+    let app = |f: ast::Expr, a: ast::Expr| ast::Expr::App(Box::new(f), Box::new(a), span);
+    let lam = |param: &str, body: ast::Expr| {
+        ast::Expr::Lam(
+            vec![ast::Pat::Var(ident(param), span)],
+            Box::new(body),
+            span,
+        )
+    };
+    let shown = |param: &str| app(var("builtin$show"), var(param));
+    let trace = |msg: ast::Expr, value: ast::Expr| app(app(var("builtin$trace"), msg), value);
+    let unit_action = || app(var("builtin$pure"), ast::Expr::Con(ident("()"), span));
+    let desugared = match helper {
+        "traceShow" => lam(
+            "trace$shown",
+            lam(
+                "trace$value",
+                trace(shown("trace$shown"), var("trace$value")),
+            ),
+        ),
+        "traceShowId" => lam(
+            "trace$value",
+            trace(shown("trace$value"), var("trace$value")),
+        ),
+        "traceM" => lam("trace$message", trace(var("trace$message"), unit_action())),
+        _ => lam("trace$shown", trace(shown("trace$shown"), unit_action())),
+    };
+    Some(lower_expr(ctx, &desugared))
 }
 
 /// Whether `name` is a MagicHash boxing constructor (`I#`, `C#`, `D#`, `F#`,

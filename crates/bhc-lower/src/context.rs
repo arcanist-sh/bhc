@@ -1329,6 +1329,15 @@ impl LowerContext {
             }
         }
 
+        // The builtins that desugarings refer to, under names no source can
+        // spell, so a user definition of the same name cannot capture them
+        // (see `builtin_ref`).
+        for name in ["show", "pure", "trace"] {
+            if let Some(def_id) = self.lookup_value(Symbol::intern(name)) {
+                self.bind_value(Symbol::intern(&format!("builtin${name}")), def_id);
+            }
+        }
+
         // Register monad transformer builtins at fixed DefIds (10000+).
         // These use explicit DefIds to avoid interfering with the sequential
         // allocation above. Must match bhc-typeck register_transformer_ops

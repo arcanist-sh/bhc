@@ -111,6 +111,11 @@ pub struct E2ETestCase {
     /// Expected stdout content.
     pub expected_stdout: String,
 
+    /// Expected stderr content, from an optional `expected_stderr.txt`.
+    /// Without one, stderr is not checked.
+    #[serde(default)]
+    pub expected_stderr: Option<String>,
+
     /// Expected exit code.
     #[serde(default)]
     pub expected_exit_code: i32,
@@ -138,6 +143,7 @@ impl E2ETestCase {
     /// The directory must contain:
     /// - `main.hs`: The Haskell source file
     /// - `expected.txt`: Expected stdout output
+    /// - `expected_stderr.txt` (optional): Expected stderr output
     /// - `test.toml` (optional): Test configuration
     pub fn from_fixture(fixture_path: &std::path::Path) -> Result<Self, E2EError> {
         let name = fixture_path
@@ -197,6 +203,15 @@ impl E2ETestCase {
             String::new()
         };
 
+        let stderr_path = fixture_path.join("expected_stderr.txt");
+        let expected_stderr = if stderr_path.exists() {
+            Some(std::fs::read_to_string(&stderr_path).map_err(|e| {
+                E2EError::InvalidFixture(format!("Failed to read expected_stderr.txt: {}", e))
+            })?)
+        } else {
+            None
+        };
+
         // Load optional test.toml
         let config_path = fixture_path.join("test.toml");
         let (backends, profile, expected_exit_code, timeout_secs, import_paths) =
@@ -247,6 +262,7 @@ impl E2ETestCase {
             backends,
             profile,
             expected_stdout,
+            expected_stderr,
             expected_exit_code,
             timeout_secs,
             import_paths,

@@ -21,6 +21,10 @@ All notable changes to BHC are recorded here. The format follows
 - `unsafePerformIO`, `unsafeDupablePerformIO`, `Debug.Trace.trace` and
   `traceIO` run; they were stubs that aborted. `trace` writes its message to
   stderr before its value is evaluated.
+- `traceShow`, `traceShowId`, `traceM` and `traceShowM` run too, defined as
+  in base through `trace` and `show`, so a user type's derived `Show` works.
+- An E2E fixture may give an `expected_stderr.txt`, checked like
+  `expected.txt`.
 
 ### Fixed
 

@@ -2520,3 +2520,8 @@ fn test_tier2_caf_sharing_native() {
 fn test_tier2_recursive_caf_lists_native() {
     run_native_test("tier2_functions/recursive_caf_lists", Profile::Default);
 }
+
+#[test]
+fn test_tier3_trace_helpers_native() {
+    run_native_test("tier3_io/trace_helpers", Profile::Default);
+}

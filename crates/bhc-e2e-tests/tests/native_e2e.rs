@@ -2525,3 +2525,8 @@ fn test_tier2_recursive_caf_lists_native() {
 fn test_tier3_trace_helpers_native() {
     run_native_test("tier3_io/trace_helpers", Profile::Default);
 }
+
+#[test]
+fn test_tier2_maybe_show_results_native() {
+    run_native_test("tier2_functions/maybe_show_results", Profile::Default);
+}

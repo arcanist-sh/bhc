@@ -1704,7 +1704,10 @@ impl<'a> WasmLowering<'a> {
             let (h, _) = collect_app_spine(arg);
             if let Expr::Var(v, _) = h {
                 if returns_maybe_fn(strip_qualifier(v.name.as_str())) {
-                    return self.emit_show_maybe(arg, instrs, locals, local_count);
+                    let kind = maybe_payload_ty(arg)
+                        .and_then(|t| scalar_show_kind(&t))
+                        .unwrap_or(ElemKind::Int);
+                    return self.emit_show_maybe(arg, kind, instrs, locals, local_count);
                 }
                 // span/break/partition/splitAt return a 2-tuple of lists; the
                 // type is erased at the show site, so render it by walking the
@@ -1717,10 +1720,21 @@ impl<'a> WasmLowering<'a> {
                 }
             }
         }
-        // A value typed `Maybe Int` (a top-level `r :: Maybe Int` computed
-        // through a `Monad m =>` function) renders the same way.
-        if is_maybe_int_ty(&arg.ty()) {
-            return self.emit_show_maybe(arg, instrs, locals, local_count);
+        // Any other value known to be a `Maybe` whose payload is a scalar (a
+        // call of a function returning one, `fmap` over one, a value typed
+        // `Maybe Int`) renders the same way. A `Just` applied to a literal
+        // field is left to the structural path below.
+        if !is_maybe_expr(arg) {
+            if let Some(payload) = maybe_payload_ty(arg) {
+                let kind = match scalar_show_kind(&payload) {
+                    Some(kind) => Some(kind),
+                    None if matches!(payload, Ty::Error | Ty::Var(_)) => Some(ElemKind::Int),
+                    None => None,
+                };
+                if let Some(kind) = kind {
+                    return self.emit_show_maybe(arg, kind, instrs, locals, local_count);
+                }
+            }
         }
         // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
         // not as a list of characters — so handle it before the list paths.
@@ -1860,11 +1874,14 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
-    /// Show a runtime `Maybe Int` value: `Nothing` (value < HEAP_BASE) or
-    /// `Just <n>` (a heap `[tag|field]`, field at offset 4).
+    /// Show a runtime `Maybe` of a scalar: `Nothing` (value < HEAP_BASE) or
+    /// `Just <x>` (a heap `[tag|field]`, field at offset 4), the field
+    /// rendered as `kind`. A negative number is parenthesised, as `show`
+    /// does at precedence 11.
     fn emit_show_maybe(
         &mut self,
         arg: &Expr,
+        kind: ElemKind,
         instrs: &mut Vec<WasmInstr>,
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
@@ -1872,7 +1889,8 @@ impl<'a> WasmLowering<'a> {
         let nothing = self.intern_pstr("Nothing") as i32;
         let just = self.intern_pstr("Just ");
         let v = *local_count;
-        *local_count += 1;
+        let field = *local_count + 1;
+        *local_count += 2;
         self.lower_expr(arg, instrs, locals, local_count, false)?;
         instrs.push(WasmInstr::LocalSet(v));
         instrs.push(WasmInstr::LocalGet(v));
@@ -1885,10 +1903,106 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::I32Const(just as i32));
         instrs.push(WasmInstr::LocalGet(v));
         instrs.push(WasmInstr::I32Load(2, 4));
-        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+        instrs.push(WasmInstr::LocalSet(field));
+        self.emit_show_elem(kind, field, true, instrs, local_count);
         instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
         instrs.push(WasmInstr::End);
         Ok(())
+    }
+
+    /// Push `show` of the scalar in local `value`, rendered as `kind`. With
+    /// `as_field`, a negative number is parenthesised (`Just (-3)`).
+    fn emit_show_elem(
+        &mut self,
+        kind: ElemKind,
+        value: u32,
+        as_field: bool,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        match kind {
+            ElemKind::Int => {
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+                if as_field {
+                    self.emit_paren_if_negative(value, false, instrs, local_count);
+                }
+            }
+            ElemKind::Double => {
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
+                if as_field {
+                    self.emit_paren_if_negative(value, true, instrs, local_count);
+                }
+            }
+            ElemKind::Bool => {
+                let true_ptr = self.intern_pstr("True") as i32;
+                let false_ptr = self.intern_pstr("False") as i32;
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(true_ptr));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(false_ptr));
+                instrs.push(WasmInstr::End);
+            }
+            ElemKind::Str => {
+                // The value as a flat `pstr` (nil is "", a cons `[Char]` is
+                // converted), then shown quoted.
+                let empty = self.intern_pstr("") as i32;
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::I32Eqz);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(empty));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+                instrs.push(WasmInstr::I32And);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::Else);
+                self.emit_charlist_to_pstr(value, instrs, local_count);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
+            }
+        }
+    }
+
+    /// With a rendered number on the stack, wrap it in parentheses when the
+    /// number in local `value` (an `i32`, or a pointer to a boxed `f64`) is
+    /// negative.
+    fn emit_paren_if_negative(
+        &mut self,
+        value: u32,
+        is_double: bool,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let open = self.intern_pstr("(") as i32;
+        let close = self.intern_pstr(")") as i32;
+        let rendered = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(rendered));
+        instrs.push(WasmInstr::LocalGet(value));
+        if is_double {
+            instrs.push(WasmInstr::F64Load(3, 0));
+            instrs.push(WasmInstr::F64Const(0.0));
+            instrs.push(WasmInstr::F64Lt);
+        } else {
+            instrs.push(WasmInstr::I32Const(0));
+            instrs.push(WasmInstr::I32LtS);
+        }
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        instrs.push(WasmInstr::I32Const(open));
+        instrs.push(WasmInstr::LocalGet(rendered));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        instrs.push(WasmInstr::I32Const(close));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(rendered));
+        instrs.push(WasmInstr::End);
     }
 
     /// Emit `length arg`, handling both string representations: a marked `pstr`
@@ -2693,8 +2807,6 @@ impl<'a> WasmLowering<'a> {
         instrs: &mut Vec<WasmInstr>,
         local_count: &mut u32,
     ) {
-        let true_ptr = self.intern_pstr("True");
-        let false_ptr = self.intern_pstr("False");
         let concat = self.runtime.concat_str_idx;
 
         // acc = "["
@@ -2732,46 +2844,7 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalSet(head));
         // acc = acc ++ show(head)
         instrs.push(WasmInstr::LocalGet(acc));
-        match kind {
-            ElemKind::Int => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
-            }
-            ElemKind::Double => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::F64Load(3, 0));
-                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
-            }
-            ElemKind::Bool => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::I32Const(true_ptr as i32));
-                instrs.push(WasmInstr::Else);
-                instrs.push(WasmInstr::I32Const(false_ptr as i32));
-                instrs.push(WasmInstr::End);
-            }
-            ElemKind::Str => {
-                // The element as a flat `pstr` (nil is "", a cons `[Char]` is
-                // converted), then shown quoted.
-                let empty = self.intern_pstr("") as i32;
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::I32Eqz);
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::I32Const(empty));
-                instrs.push(WasmInstr::Else);
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::I32Load(2, 0));
-                instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
-                instrs.push(WasmInstr::I32And);
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::Else);
-                self.emit_charlist_to_pstr(head, instrs, local_count);
-                instrs.push(WasmInstr::End);
-                instrs.push(WasmInstr::End);
-                instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
-            }
-        }
+        self.emit_show_elem(kind, head, false, instrs, local_count);
         instrs.push(WasmInstr::Call(concat));
         instrs.push(WasmInstr::LocalSet(acc));
         // first = 0; cur = cons.tail ([cur+8])
@@ -3714,7 +3787,7 @@ impl<'a> WasmLowering<'a> {
                     }
                 }
                 // 2. Maybe.
-                if is_maybe_expr(x) {
+                if maybe_payload_ty(x).is_some() {
                     let sym = Symbol::intern("__fmapMaybe");
                     return self.emit_known_call(sym, &[f, x], instrs, locals, local_count);
                 }
@@ -11057,17 +11130,6 @@ fn strip_qualifier(name: &str) -> &str {
     }
 }
 
-/// Whether `ty` is `Maybe Int`, whose `Just` field `emit_show_maybe` renders.
-fn is_maybe_int_ty(ty: &Ty) -> bool {
-    match ty {
-        Ty::App(f, a) => {
-            matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe")
-                && matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Int")
-        }
-        _ => false,
-    }
-}
-
 /// The element type of a list type `[e]`, if `ty` is one.
 fn list_element_ty(ty: &Ty) -> Option<&Ty> {
     match ty {
@@ -11291,6 +11353,98 @@ enum ElemKind {
     Bool,
     /// A `String` element, shown quoted (`["x","y z"]`, #41).
     Str,
+}
+
+/// How to render a scalar of type `ty`, if it is one. `Char` is not: a list
+/// element walks it as an Int, but a `Maybe Char` is left to the structural
+/// path.
+fn scalar_show_kind(ty: &Ty) -> Option<ElemKind> {
+    match ty {
+        Ty::Con(c) => match c.name.as_str() {
+            "Int" | "Integer" | "Word" => Some(ElemKind::Int),
+            "Double" | "Float" => Some(ElemKind::Double),
+            "Bool" => Some(ElemKind::Bool),
+            "String" => Some(ElemKind::Str),
+            _ => None,
+        },
+        _ if is_string_ty(ty) => Some(ElemKind::Str),
+        _ => None,
+    }
+}
+
+/// Whether `ty` is `String`, spelled `[Char]`.
+fn is_string_ty(ty: &Ty) -> bool {
+    matches!(list_element_ty(ty), Some(Ty::Con(c)) if c.name.as_str() == "Char")
+}
+
+/// If `expr` is known to be a `Maybe`, its payload type, `Ty::Error` where
+/// that is erased. Known from the expression's own type; from the signature
+/// of the function a call applies; from the builtins that return one
+/// (`lookup`'s payload is its pairs' second component, `find`'s the list's
+/// element, `elemIndex`'s an Int); and through `fmap` over one.
+fn maybe_payload_ty(expr: &Expr) -> Option<Ty> {
+    fn maybe_arg(ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Forall(_, inner) => maybe_arg(inner),
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe") => {
+                Some(a.as_ref().clone())
+            }
+            _ => None,
+        }
+    }
+    let e = peel_head(expr);
+    if let Some(payload) = maybe_arg(&e.ty()) {
+        return Some(payload);
+    }
+    let (head, args) = collect_app_spine(e);
+    let Expr::Var(v, _) = peel_head(head) else {
+        return None;
+    };
+    let erased = || Ty::Error;
+    match strip_qualifier(v.name.as_str()) {
+        "Just" => return Some(args.first().map_or_else(erased, |a| a.ty())),
+        "Nothing" => return Some(Ty::Error),
+        "lookup" if args.len() == 2 => {
+            return Some(match list_element_ty(&args[1].ty()) {
+                Some(Ty::Tuple(parts)) if parts.len() == 2 => parts[1].clone(),
+                _ => Ty::Error,
+            });
+        }
+        "find" if args.len() == 2 => {
+            return Some(list_element_ty(&args[1].ty()).cloned().unwrap_or(Ty::Error));
+        }
+        "elemIndex" | "findIndex" if args.len() == 2 => {
+            return Some(Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Int"),
+                bhc_types::Kind::Star,
+            )));
+        }
+        "readMaybe" if args.len() == 1 => return Some(Ty::Error),
+        "fmap" | "<$>" if args.len() == 2 => {
+            maybe_payload_ty(args[1])?;
+            let mut f_ty = args[0].ty();
+            while let Ty::Forall(_, inner) = f_ty {
+                f_ty = *inner;
+            }
+            return Some(match f_ty {
+                Ty::Fun(_, result) => *result,
+                _ => Ty::Error,
+            });
+        }
+        _ => {}
+    }
+    // A call of a function whose signature returns a `Maybe`.
+    let mut ty = v.ty.clone();
+    while let Ty::Forall(_, inner) = ty {
+        ty = *inner;
+    }
+    for _ in &args {
+        match ty {
+            Ty::Fun(_, result) => ty = *result,
+            _ => return None,
+        }
+    }
+    maybe_arg(&ty)
 }
 
 /// If `ty` is a list type `[e]` whose element is a renderable scalar, return its

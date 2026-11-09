@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- WebAssembly: `show` of a `Maybe` that a call returns renders its payload by
+  type, so `lookup 2 [(1, "a"), (2, "b")]` shows `Just "b"` rather than an
+  address, and a negative payload is parenthesised. `fmap` over such a call
+  takes the `Maybe` arm instead of yielding `Nothing`.
+
 - `newMVar`, `putMVar`, `tryPutMVar`, `swapMVar` and `writeChan` no longer
   evaluate the value they store, as in GHC: `newMVar (error "x")` crashed at
   once. A stored computation runs when `takeMVar`, `readMVar`,

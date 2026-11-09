@@ -1062,3 +1062,10 @@ fn test_tier3_show_string_list_wasm() {
 fn test_tier3_monad_poly_recursive_bind_wasm() {
     run_wasm_test("tier3_io/monad_poly_recursive_bind", Profile::Default);
 }
+
+// `show` of a Maybe that a call returns renders its payload by type, and
+// `fmap` over one takes the Maybe arm.
+#[test]
+fn test_tier2_maybe_show_results_wasm() {
+    run_wasm_test("tier2_functions/maybe_show_results", Profile::Default);
+}

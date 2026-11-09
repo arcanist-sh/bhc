@@ -3963,86 +3963,57 @@ pub extern "C" fn bhc_uninterruptible_mask(
     result
 }
 
-/// Mask with restore function (for `mask`).
+/// Run a `mask`/`uninterruptibleMask` body under the eager IO model.
 ///
-/// Sets masking state to MaskedInterruptible, creates a restore closure
-/// that temporarily restores the previous state, calls the action with
-/// the restore closure, then restores the original state.
-///
-/// The action is `(IO a -> IO a) -> IO b` — it takes the restore function
-/// as its first argument.
-#[no_mangle]
-pub extern "C" fn bhc_mask_with_restore(
-    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-    action_env: *mut u8,
-) -> *mut u8 {
+/// `body` is the body's function closure, `(IO a -> IO a) -> IO b`, called
+/// with a `restore` closure (`fn(closure, arg)`, the closure convention).
+/// Under the eager model calling it runs it, so the masking state is set
+/// around the call.
+fn mask_with_restore_eager(body: *mut u8, state: i64) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    set_mask_state(MASK_INTERRUPTIBLE);
-
-    // Create a restore closure: [fn_ptr, saved_state]
-    // The restore function temporarily sets masking state to old_state,
-    // runs the inner IO action, then re-sets to current state.
-    let restore_closure = unsafe {
-        let size = 2 * std::mem::size_of::<*mut u8>();
-        let closure = bhc_alloc(size) as *mut *mut u8;
-        // fn_ptr at offset 0
-        *closure = bhc_restore_fn as *mut u8;
-        // saved state at offset 1 (env[0])
-        *closure.add(1) = old_state as *mut u8;
-        closure as *mut u8
+    set_mask_state(state);
+    let restore = Box::into_raw(Box::new(RestoreFn {
+        code: restore_apply_eager,
+        arity: 1,
+        saved_state: old_state,
+    })) as *mut u8;
+    let result = unsafe {
+        let code = *(body as *const unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8);
+        code(body, restore)
     };
-
-    let result = action_fn(restore_closure, action_env);
     set_mask_state(old_state);
     result
 }
 
-/// Uninterruptible mask with restore function (for `uninterruptibleMask`).
+/// `restore` under the eager IO model. An IO argument has already run by
+/// the time a function receives it (the eager model evaluates arguments),
+/// so `restore` can only pass its result through: the action ran under the
+/// masked state rather than the restored one.
+///
+/// # Safety
+///
+/// Called through the closure convention with a `RestoreFn` closure.
+unsafe extern "C" fn restore_apply_eager(_closure: *mut u8, result: *mut u8) -> *mut u8 {
+    result
+}
+
+/// Mask with restore function (for `mask`) under the eager IO model.
+///
+/// The first argument is ignored (kept for the declared signature); `body`
+/// is the body's function closure.
+#[no_mangle]
+pub extern "C" fn bhc_mask_with_restore(_body_fn: *mut u8, body: *mut u8) -> *mut u8 {
+    mask_with_restore_eager(body, MASK_INTERRUPTIBLE)
+}
+
+/// Uninterruptible mask with restore function (for `uninterruptibleMask`)
+/// under the eager IO model.
 #[no_mangle]
 pub extern "C" fn bhc_uninterruptible_mask_with_restore(
-    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-    action_env: *mut u8,
+    _body_fn: *mut u8,
+    body: *mut u8,
 ) -> *mut u8 {
-    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    set_mask_state(MASK_UNINTERRUPTIBLE);
-
-    let restore_closure = unsafe {
-        let size = 2 * std::mem::size_of::<*mut u8>();
-        let closure = bhc_alloc(size) as *mut *mut u8;
-        *closure = bhc_restore_fn as *mut u8;
-        *closure.add(1) = old_state as *mut u8;
-        closure as *mut u8
-    };
-
-    let result = action_fn(restore_closure, action_env);
-    set_mask_state(old_state);
-    result
-}
-
-/// The restore function used inside `mask`/`uninterruptibleMask`.
-///
-/// Called as a BHC closure: `restore_fn(inner_io_closure, self_closure)`.
-/// Temporarily restores the masking state to the saved value, runs the
-/// inner IO action, then re-sets the masking state.
-extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mut u8 {
-    // Extract saved state from restore closure env[0]
-    let saved_state = unsafe {
-        let closure = restore_closure as *const *mut u8;
-        *closure.add(1) as i64
-    };
-
-    let current_state = BHC_MASK_STATE.with(|cell| cell.get());
-    set_mask_state(saved_state);
-
-    // inner_io is a closure: extract fn_ptr and call fn_ptr(inner_io)
-    let result = unsafe {
-        let closure = inner_io as *const *mut u8;
-        let fn_ptr: extern "C" fn(*mut u8) -> *mut u8 = std::mem::transmute(*closure);
-        fn_ptr(inner_io)
-    };
-
-    set_mask_state(current_state);
-    result
+    mask_with_restore_eager(body, MASK_UNINTERRUPTIBLE)
 }
 
 // ============================================================================

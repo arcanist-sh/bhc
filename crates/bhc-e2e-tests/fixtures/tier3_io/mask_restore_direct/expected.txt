@@ -1,0 +1,9 @@
+a
+b
+c
+42
+d
+7
+"user error (e)"
+3
+end

@@ -2479,7 +2479,9 @@ fn test_tier2_print_polymorphic_string_native() {
 
 #[test]
 fn test_tier3_mask_restore_native() {
-    // Under the eager model `mask` with `restore` still crashes (#91).
+    // Under the eager model an IO action passed to a user function runs at
+    // the call, so `forkFinally'`'s failing action escapes its `try`.
+    // `tier3_io/mask_restore_direct` covers `mask` itself in both models.
     if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
@@ -2488,8 +2490,8 @@ fn test_tier3_mask_restore_native() {
 
 #[test]
 fn test_tier3_concurrent_mask_deferral_native() {
-    // Its last case is `mask` with `restore`, which the eager model does not
-    // run yet (#91).
+    // Its last case needs `restore` to unmask; under the eager model the
+    // action given to `restore` has already run, masked, at the call.
     if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
@@ -2529,4 +2531,9 @@ fn test_tier3_trace_helpers_native() {
 #[test]
 fn test_tier2_maybe_show_results_native() {
     run_native_test("tier2_functions/maybe_show_results", Profile::Default);
+}
+
+#[test]
+fn test_tier3_mask_restore_direct_native() {
+    run_native_test("tier3_io/mask_restore_direct", Profile::Default);
 }

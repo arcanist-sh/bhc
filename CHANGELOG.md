@@ -28,6 +28,12 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `mask $ \restore -> …` and `uninterruptibleMask` under
+  `BHC_IO_MODEL=eager`: the body was called with its arguments swapped, so
+  it ran twice and `restore` crashed. It now runs once and `restore` returns
+  its action's result. The eager model still runs an IO action passed to a
+  function at the call, so the action given to `restore` runs masked.
+
 - WebAssembly: `show` of a `Maybe` that a call returns renders its payload by
   type, so `lookup 2 [(1, "a"), (2, "b")]` shows `Just "b"` rather than an
   address, and a negative payload is parenthesised. `fmap` over such a call

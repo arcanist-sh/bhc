@@ -2552,3 +2552,8 @@ fn test_tier2_reads_enum_native() {
 fn test_tier2_local_numeric_conversion_native() {
     run_native_test("tier2_functions/local_numeric_conversion", Profile::Default);
 }
+
+#[test]
+fn test_tier2_negation_precedence_native() {
+    run_native_test("tier2_functions/negation_precedence", Profile::Default);
+}

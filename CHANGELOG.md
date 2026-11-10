@@ -28,6 +28,9 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Prefix negation binds as Haskell's precedence 6: `-7 `mod` 3` is `-1`
+  and `-2 ^ 2` is `-4`; the minus applied to the first term only.
+
 - WebAssembly: `fromInteger` and `toInteger` are the identity (an `Integer`
   is an `Int` there) instead of an unknown function giving 0, and
   `fromIntegral` resolved at `Int -> Double` boxes the converted value, so a

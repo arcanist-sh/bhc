@@ -2554,6 +2554,21 @@ fn test_tier2_local_numeric_conversion_native() {
 }
 
 #[test]
+fn test_tier2_sort_derived_ord_native() {
+    run_native_test("tier2_functions/sort_derived_ord", Profile::Default);
+}
+
+#[test]
+fn test_tier2_map_runtime_string_keys_native() {
+    run_native_test("tier2_functions/map_runtime_string_keys", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_fractional_defaults_native() {
+    run_native_test("tier2_functions/show_fractional_defaults", Profile::Default);
+}
+
+#[test]
 fn test_tier2_negation_precedence_native() {
     run_native_test("tier2_functions/negation_precedence", Profile::Default);
 }

@@ -18720,6 +18720,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 return kind;
             }
         }
+        // The builtin's stamped type names the list's element type when the
+        // list's own does not (a comprehension).
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(elem) = param.as_ref() {
+                let kind = match (pair, elem.as_ref()) {
+                    (true, Ty::Tuple(ts)) if !ts.is_empty() => self.key_kind_of_ty(&ts[0]),
+                    (false, e) => self.key_kind_of_ty(e),
+                    _ => 0,
+                };
+                if kind != 0 {
+                    return kind;
+                }
+                break;
+            }
+            fn_ty = rest;
+        }
         // A list literal's own type is usually erased by the time Core reaches
         // codegen, but its first element is right there: `M.fromList [("a",1)]`
         // says what its keys are even when `[(String, Int)]` does not survive.
@@ -31188,19 +31208,63 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             ShowCoerce::Float => {
-                let int_val = self.coerce_to_int(val)?;
-                let truncated = self
-                    .builder()
-                    .build_int_truncate(int_val, self.llvm_context().i32_type(), "trunc32")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("{}: truncate failed: {:?}", label, e))
-                    })?;
-                let f32_val = self
-                    .builder()
-                    .build_bit_cast(truncated, self.type_mapper().f32_type(), "to_f32")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e))
-                    })?;
+                // A `Float` usually reaches here as an f64 (literals and the
+                // Floating builtins compute in double precision): narrow it.
+                // Raw bits are an f32's when the upper half is zero (an f64
+                // with a zero upper half is a denormal below 1e-300), an
+                // f64's otherwise. Reading every value as f32 bits printed
+                // `show (3.0 :: Float)` as "0".
+                let f32_ty = self.type_mapper().f32_type();
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("{label}: float coerce failed: {e:?}"))
+                };
+                let f32_val = match val {
+                    BasicValueEnum::FloatValue(f) if f.get_type() == f32_ty => f,
+                    BasicValueEnum::FloatValue(f) => self
+                        .builder()
+                        .build_float_trunc(f, f32_ty, "f64_to_f32")
+                        .map_err(err)?,
+                    other => {
+                        let i64_ty = self.type_mapper().i64_type();
+                        let bits = self.coerce_to_int(other)?;
+                        let high = self
+                            .builder()
+                            .build_right_shift(bits, i64_ty.const_int(32, false), false, "hi")
+                            .map_err(err)?;
+                        let is_f32_bits = self
+                            .builder()
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                high,
+                                i64_ty.const_zero(),
+                                "is_f32_bits",
+                            )
+                            .map_err(err)?;
+                        let low = self
+                            .builder()
+                            .build_int_truncate(bits, self.llvm_context().i32_type(), "lo")
+                            .map_err(err)?;
+                        let as_f32 = self
+                            .builder()
+                            .build_bit_cast(low, f32_ty, "as_f32")
+                            .map_err(err)?
+                            .into_float_value();
+                        let as_f64 = self
+                            .builder()
+                            .build_bit_cast(bits, f64_ty, "as_f64")
+                            .map_err(err)?
+                            .into_float_value();
+                        let narrowed = self
+                            .builder()
+                            .build_float_trunc(as_f64, f32_ty, "narrowed")
+                            .map_err(err)?;
+                        self.builder()
+                            .build_select(is_f32_bits, as_f32, narrowed, "float_val")
+                            .map_err(err)?
+                            .into_float_value()
+                    }
+                };
                 f32_val.into()
             }
             ShowCoerce::Char => {
@@ -35542,6 +35606,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            return self.lower_list_extreme_by(cmp, list_expr, 1);
+        }
         if self.list_builtin_at_integer() {
             return self.lower_integer_list_extreme(list_expr, true);
         }
@@ -35553,10 +35620,97 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            return self.lower_list_extreme_by(cmp, list_expr, 0);
+        }
         if self.list_builtin_at_integer() {
             return self.lower_integer_list_extreme(list_expr, false);
         }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SLT, "minimum")
+    }
+
+    /// For `sort`/`maximum`/`minimum` stamped at a list of a user type with a
+    /// derived `Ord`, a closure over its `$derived_compare_T` (the RTS calls
+    /// `code(closure, a, b)`, which is that function's `(env, lhs, rhs)`).
+    /// These builtins otherwise compare raw words, which for a boxed value is
+    /// its address: `sort [Hi, Lo, Mid]` came back in allocation order.
+    fn derived_ord_list_comparator(&mut self) -> CodegenResult<Option<PointerValue<'ctx>>> {
+        let elem = match &self.current_builtin_ty {
+            Ty::Fun(a, _) => match a.as_ref() {
+                Ty::List(e) => e.as_ref().clone(),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let Ty::Con(con) = elem else {
+            return Ok(None);
+        };
+        let Some(cmp_fn) = self
+            .derived_compare_fns
+            .get(con.name.as_str())
+            .and_then(|id| self.functions.get(id))
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let alloc_fn = *self
+            .functions
+            .get(&VarId::new(1000005))
+            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
+        let closure = self
+            .builder()
+            .build_call(
+                alloc_fn,
+                &[self.type_mapper().i64_type().const_int(8, false).into()],
+                "cmp_closure",
+            )
+            .map_err(|e| CodegenError::Internal(format!("cmp closure: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("cmp closure: void".to_string()))?
+            .into_pointer_value();
+        self.builder()
+            .build_store(closure, cmp_fn.as_global_value().as_pointer_value())
+            .map_err(|e| CodegenError::Internal(format!("cmp closure store: {e:?}")))?;
+        let _ = ptr_type;
+        Ok(Some(closure))
+    }
+
+    /// `maximum`/`minimum` under a comparison closure (`bhc_list_extreme_by`).
+    fn lower_list_extreme_by(
+        &mut self,
+        cmp: PointerValue<'ctx>,
+        list_expr: &Expr,
+        want_max: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("extreme: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let f = match self.module.get_function("bhc_list_extreme_by") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_list_extreme_by",
+                ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false),
+            ),
+        };
+        Ok(self
+            .builder()
+            .build_call(
+                f,
+                &[
+                    cmp.into(),
+                    list_ptr.into(),
+                    i64_type.const_int(want_max, false).into(),
+                ],
+                "extreme_by",
+            )
+            .map_err(|e| CodegenError::Internal(format!("extreme call: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
     }
 
     /// Whether this list builtin's stamped argument is `[Integer]`.
@@ -39177,6 +39331,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            let list_val = self
+                .lower_expr(list_expr)?
+                .ok_or_else(|| CodegenError::Internal("sort: no list".to_string()))?;
+            let list_ptr = self.value_to_ptr(list_val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000171)).ok_or_else(|| {
+                CodegenError::Internal("bhc_list_sort_by not declared".to_string())
+            })?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[cmp.into(), list_ptr.into()], "sort_derived")
+                .map_err(|e| CodegenError::Internal(format!("sort call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic());
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("sort: no list".to_string()))?;

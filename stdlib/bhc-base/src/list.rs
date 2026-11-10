@@ -179,6 +179,41 @@ pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mu
     vec_to_list(&vec)
 }
 
+/// The greatest (`want_max`) or least element of a non-empty list under a
+/// comparison closure, as `maximum`/`minimum` at a type with a derived `Ord`.
+/// Like `foldr1 max`, the LAST of equal maxima and the FIRST of equal minima.
+///
+/// # Safety
+///
+/// As for [`bhc_list_sort_by`]; `list` must be non-empty (an empty one
+/// returns null).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_extreme_by(
+    cmp_fn: *mut u8,
+    list: *mut u8,
+    want_max: i64,
+) -> *mut u8 {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(*(cmp_fn as *const *mut u8));
+    let vec = list_to_vec(list);
+    let mut best = match vec.first() {
+        Some(&e) => e,
+        None => return std::ptr::null_mut(),
+    };
+    for &e in &vec[1..] {
+        let ord = extract_ordering(fn_ptr(cmp_fn, e, best));
+        let better = if want_max != 0 {
+            ord != std::cmp::Ordering::Less
+        } else {
+            ord == std::cmp::Ordering::Less
+        };
+        if better {
+            best = e;
+        }
+    }
+    best
+}
+
 /// Remove duplicate elements from a list (by `i64` value comparison).
 ///
 /// Preserves the order of first occurrences.

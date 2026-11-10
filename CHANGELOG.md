@@ -28,6 +28,21 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `import Data.List` keeps the real types of `sort`, `sortBy`, `sortOn`,
+  `nub`, `group`, `isPrefixOf` and the other list functions it re-exports;
+  typed as placeholders, `print (sort xs)` at a user type printed
+  addresses.
+- `sort`, `maximum` and `minimum` at a type with a derived `Ord` use its
+  `compare`; they compared boxed values by address.
+- `comparing f` is `\a b -> compare (f a) (f b)` and `on op f` is
+  `\a b -> op (f a) (f b)`: `sortBy (comparing area)` with a `Double` key
+  was a type error, and ``groupBy ((==) `on` isDigit)`` crashed.
+- A `Map`/`Set` built from `String` keys computed at run time
+  (`M.fromListWith (+) [(w, 1) | w <- words s]`) merges equal keys.
+- An unannotated fractional value defaults to `Double`, as in Haskell, and
+  `show` of a `Float` narrows its value: `show 3.0` printed `"0"`, and
+  `show (sqrt 2)` and `show pi` printed garbage.
+
 - Prefix negation binds as Haskell's precedence 6: `-7 `mod` 3` is `-1`
   and `-2 ^ 2` is `-4`; the minus applied to the first term only.
 

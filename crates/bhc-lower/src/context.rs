@@ -1332,7 +1332,7 @@ impl LowerContext {
         // The builtins that desugarings refer to, under names no source can
         // spell, so a user definition of the same name cannot capture them
         // (see `builtin_ref`).
-        for name in ["show", "pure", "trace"] {
+        for name in ["show", "pure", "trace", "compare"] {
             if let Some(def_id) = self.lookup_value(Symbol::intern(name)) {
                 self.bind_value(Symbol::intern(&format!("builtin${name}")), def_id);
             }

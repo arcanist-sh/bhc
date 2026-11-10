@@ -1052,8 +1052,9 @@ impl TyCtxt {
                 Some(self.builtins.int_ty.clone())
             }
             "Fractional" | "Floating" | "RealFrac" | "RealFloat" => {
-                // Default to Double/Float
-                Some(self.builtins.float_ty.clone())
+                // Default to Double, as Haskell's `default (Integer, Double)`.
+                // `Float` made `show 3.0` take the Float path and print "0".
+                Some(self.builtins.double_ty.clone())
             }
             "IsString" => {
                 // Default to String ([Char]), matching GHC behavior
@@ -8077,6 +8078,32 @@ impl TyCtxt {
                         | "traverse"
                         | "for"
                         | "sequenceA"
+                        // `import Data.List` re-exports these with their exact
+                        // builtin schemes. Typed fresh, `print (sort xs)` at a
+                        // user type could not see the element type and
+                        // printed addresses.
+                        | "sort"
+                        | "sortBy"
+                        | "sortOn"
+                        | "nub"
+                        | "nubBy"
+                        | "group"
+                        | "groupBy"
+                        | "partition"
+                        | "isPrefixOf"
+                        | "isSuffixOf"
+                        | "isInfixOf"
+                        | "tails"
+                        | "inits"
+                        | "transpose"
+                        | "foldl'"
+                        | "insert"
+                        | "delete"
+                        | "union"
+                        | "intersect"
+                        | "find"
+                        | "zip3"
+                        | "unzip3"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))

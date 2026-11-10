@@ -1766,7 +1766,8 @@ pub extern "C" fn bhc_floor_float(a: f32) -> i64 {
 /// Show Float
 #[no_mangle]
 pub extern "C" fn bhc_show_float(n: f32) -> *mut c_char {
-    let s = format!("{}", n);
+    // Haskell's layout (`3.0`, `1.0e-2`), not Rust's `{}` (`3`, `0.01`).
+    let s = format_float(n);
     let c_string = std::ffi::CString::new(s).unwrap();
     c_string.into_raw()
 }

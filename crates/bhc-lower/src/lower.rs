@@ -7863,7 +7863,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
     match expr {
         ast::Expr::Var(ident, span) => {
             let name = ident.name;
-            if let Some(desugared) = desugar_trace_helper(ctx, None, name, *span) {
+            if let Some(desugared) = desugar_base_helper(ctx, None, name, *span) {
                 return desugared;
             }
             if let Some(def_id) = resolve_var(ctx, name, *span) {
@@ -7880,7 +7880,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // Qualified variable like M.foo or Data.Map.lookup
             let qualifier = Symbol::intern(&module_name.to_string());
             let name = ident.name;
-            if let Some(desugared) = desugar_trace_helper(ctx, Some(qualifier), name, *span) {
+            if let Some(desugared) = desugar_base_helper(ctx, Some(qualifier), name, *span) {
                 return desugared;
             }
 
@@ -7990,6 +7990,17 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
         }
 
         ast::Expr::Infix(lhs, op, rhs, span) => {
+            // A backtick-infix base helper (``(==) `on` isDigit``,
+            // ``f `comparing` g`` is rare but legal): the desugared lambda
+            // applied to both operands, as for the prefix spelling.
+            if matches!(op.name.as_str(), "on" | "comparing") {
+                if let Some(helper) = desugar_base_helper(ctx, None, op.name, *span) {
+                    let l = lower_expr(ctx, lhs);
+                    let r = lower_expr(ctx, rhs);
+                    let app1 = hir::Expr::App(Box::new(helper), Box::new(l), *span);
+                    return hir::Expr::App(Box::new(app1), Box::new(r), *span);
+                }
+            }
             // `f =<< m` IS `m >>= f` (Haskell report: `(=<<) = flip (>>=)`).
             // Carried through as its own operator, every later stage needs a
             // flipped twin of whatever it does for `>>=` — and the monad
@@ -8905,11 +8916,17 @@ fn operator_is_builtin(ctx: &LowerContext, name: Symbol) -> bool {
 /// - `traceM s`       is `trace s (pure ())`
 /// - `traceShowM a`   is `trace (show a) (pure ())`
 ///
-/// Desugared here rather than given codegen of their own so `show` resolves
-/// through the usual class machinery, user types with a derived `Show`
-/// included. Only a reference that resolves to the `Debug.Trace` stub is
-/// rewritten; a user's own `traceM` is left alone.
-fn desugar_trace_helper(
+/// and two `Data.Function`/`Data.Ord` combinators:
+///
+/// - `on op f a b`    is `op (f a) (f b)`
+/// - `comparing f a b` is `compare (f a) (f b)`
+///
+/// Desugared here rather than given codegen of their own so `show` and
+/// `compare` resolve through the usual class machinery, user types with
+/// derived instances included. Only a reference that resolves to the builtin
+/// (or the `Debug.Trace` stub) is rewritten; a user's own `traceM` or `on` is
+/// left alone.
+fn desugar_base_helper(
     ctx: &mut LowerContext,
     qualifier: Option<Symbol>,
     name: Symbol,
@@ -8918,7 +8935,7 @@ fn desugar_trace_helper(
     let helper = name.as_str();
     if !matches!(
         helper,
-        "traceShow" | "traceShowId" | "traceM" | "traceShowM"
+        "traceShow" | "traceShowId" | "traceM" | "traceShowM" | "comparing" | "on"
     ) {
         return None;
     }
@@ -8926,7 +8943,21 @@ fn desugar_trace_helper(
         Some(q) => ctx.resolve_qualified_var(q, name)?,
         None => ctx.lookup_value(name)?,
     };
-    if ctx.lookup_def(def_id).map(|info| info.kind) != Some(DefKind::StubValue) {
+    let info = ctx.lookup_def(def_id)?;
+    if matches!(helper, "comparing" | "on") {
+        // `comparing` is a real builtin, but its codegen compared the keys as
+        // machine integers (and its scheme fixed them to `Int`): `sortBy
+        // (comparing area)` with a `Double` key was a type error. As in base,
+        // `comparing f a b = compare (f a) (f b)`, so `compare` dispatches on
+        // the key's type. Only the builtin (no source span), not a user's
+        // own `comparing`. Likewise `on op f a b = op (f a) (f b)`: lowered
+        // only as a saturated builtin, `(==) \`on\` isDigit` passed to
+        // `groupBy` and applied there crashed.
+        if !matches!(info.kind, DefKind::Value | DefKind::StubValue) || info.span != Span::default()
+        {
+            return None;
+        }
+    } else if info.kind != DefKind::StubValue {
         return None;
     }
     let ident = |s: &str| bhc_intern::Ident::new(Symbol::intern(s));
@@ -8955,6 +8986,38 @@ fn desugar_trace_helper(
             trace(shown("trace$value"), var("trace$value")),
         ),
         "traceM" => lam("trace$message", trace(var("trace$message"), unit_action())),
+        "on" => lam(
+            "on$op",
+            lam(
+                "on$key",
+                lam(
+                    "on$a",
+                    lam(
+                        "on$b",
+                        app(
+                            app(var("on$op"), app(var("on$key"), var("on$a"))),
+                            app(var("on$key"), var("on$b")),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        "comparing" => lam(
+            "comparing$key",
+            lam(
+                "comparing$a",
+                lam(
+                    "comparing$b",
+                    app(
+                        app(
+                            var("builtin$compare"),
+                            app(var("comparing$key"), var("comparing$a")),
+                        ),
+                        app(var("comparing$key"), var("comparing$b")),
+                    ),
+                ),
+            ),
+        ),
         _ => lam("trace$shown", trace(shown("trace$shown"), unit_action())),
     };
     Some(lower_expr(ctx, &desugared))

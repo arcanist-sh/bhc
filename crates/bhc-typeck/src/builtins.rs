@@ -90,6 +90,9 @@ pub struct Builtins {
     pub int_ty: Ty,
     /// The `Float` type.
     pub float_ty: Ty,
+    /// The `Double` type: what a fractional literal defaults to and what the
+    /// `Floating` builtins (`sqrt`, `pi`, …) are typed at, as in GHC.
+    pub double_ty: Ty,
     /// The `Char` type.
     pub char_ty: Ty,
     /// The `Bool` type.
@@ -205,6 +208,7 @@ impl Builtins {
         // Convenient types
         let int_ty = Ty::Con(int_con.clone());
         let float_ty = Ty::Con(float_con.clone());
+        let double_ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
         let char_ty = Ty::Con(char_con.clone());
         let bool_ty = Ty::Con(bool_con.clone());
         // String is a type alias for [Char] in Haskell
@@ -257,6 +261,7 @@ impl Builtins {
             shape_witness_con,
             int_ty,
             float_ty,
+            double_ty,
             char_ty,
             bool_ty,
             string_ty,
@@ -2473,14 +2478,13 @@ impl Builtins {
             }),
             ("sortBy", {
                 // sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-                // Using Int as stand-in for Ordering (LT=-1, EQ=0, GT=1)
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()),
+                            Ty::fun(Ty::Var(a.clone()), self.ordering_ty.clone()),
                         ),
                         Ty::fun(list_a.clone(), list_a),
                     ),
@@ -2645,27 +2649,27 @@ impl Builtins {
             ),
             (
                 "sqrt",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "exp",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "log",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "sin",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "cos",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "tan",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             // Comparison
             ("compare", {
@@ -2970,8 +2974,8 @@ impl Builtins {
                 )
             }),
             ("realToFrac", {
-                // realToFrac :: Float -> Float (simplified, could be polymorphic)
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))
+                // realToFrac :: Double -> Double (simplified, could be polymorphic)
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone()))
             }),
             ("truncate", {
                 // truncate :: (RealFrac a, Integral b) => a -> b
@@ -3031,8 +3035,8 @@ impl Builtins {
             }),
             ("recip", {
                 // recip :: Fractional a => a -> a
-                // Using Float for now (no type class constraints)
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))
+                // Using Double for now (no type class constraints)
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone()))
             }),
             // Data.Function
             ("on", {
@@ -6065,7 +6069,7 @@ impl Builtins {
         env.register_value(
             DefId::new(10101),
             Symbol::intern("showDouble"),
-            Scheme::mono(Ty::fun(self.float_ty.clone(), self.string_ty.clone())),
+            Scheme::mono(Ty::fun(self.double_ty.clone(), self.string_ty.clone())),
         );
         env.register_value(
             DefId::new(10102),
@@ -6410,7 +6414,7 @@ impl Builtins {
         env.register_value(
             DefId::new(10351),
             Symbol::intern("pi"),
-            Scheme::mono(self.float_ty.clone()),
+            Scheme::mono(self.double_ty.clone()),
         );
 
         // IORef operations at fixed DefIds 10400-10404

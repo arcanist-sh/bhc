@@ -1048,6 +1048,40 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         }
         return;
     }
+    // A Map/Set built from a list orders its keys as machine words unless
+    // codegen knows they are strings, Text or an enumeration; a list
+    // comprehension's own type does not survive to codegen, so the occurrence
+    // carries it (`M.fromListWith (+) [(w, 1) | w <- words s]` kept every
+    // duplicate).
+    if matches!(
+        v.name.as_str(),
+        "Data.Map.fromList" | "Data.Map.fromListWith" | "Data.Set.fromList"
+    ) && matches!(v.ty, Ty::Error | Ty::Var(_) | Ty::Forall(..))
+    {
+        if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(span) {
+            if !has_type_variables(&resolved) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    // `sort`/`maximum`/`minimum` over a user type: codegen calls its derived
+    // `compare` instead of comparing raw words (addresses, for a boxed value).
+    if matches!(v.name.as_str(), "sort" | "maximum" | "minimum") {
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| crate::context::canonical_list_spelling(&t));
+        if let Some(resolved @ Ty::Fun(..)) = resolved {
+            let user_elem = matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(),
+                Ty::List(e) if matches!(e.as_ref(), Ty::Con(c) if !matches!(c.name.as_str(),
+                    "Int" | "Integer" | "Double" | "Float" | "Char" | "Bool" | "Word"
+                        | "Text" | "String" | "Ordering"))));
+            if user_elem {
+                v.ty = resolved;
+                return;
+            }
+        }
+    }
     if matches!(v.name.as_str(), "sum" | "product" | "maximum" | "minimum") {
         // The element type of a `sum`/`product` over `Integer` (boxed
         // bignums) or `Double`/`Float`; codegen's loop adds machine ints.

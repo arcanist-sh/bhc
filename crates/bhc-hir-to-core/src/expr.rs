@@ -1207,7 +1207,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             Ty::Fun(_, r) => matches!(**r, Ty::Var(_)),
             _ => false,
         };
-        if v.name.as_str() == "read" && generic {
+        if matches!(v.name.as_str(), "read" | "reads") && generic {
             if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 v.ty = resolved;
             }

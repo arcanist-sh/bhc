@@ -41206,6 +41206,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         str_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(names) = self.reads_enum_constructor_names() {
+            let str_val = self
+                .lower_expr(str_expr)?
+                .ok_or_else(|| CodegenError::Internal("reads: no string".to_string()))?;
+            let str_ptr = self.value_to_ptr(str_val)?;
+            let ptr_type = self.type_mapper().ptr_type();
+            let reads_enum = match self.module.get_function("bhc_reads_enum") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_reads_enum",
+                    ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            let names_ptr = self
+                .builder()
+                .build_global_string_ptr(&names.join("\n"), "reads_enum_names")
+                .map_err(|e| CodegenError::Internal(format!("reads names: {e:?}")))?
+                .as_pointer_value();
+            let result = self
+                .builder()
+                .build_call(
+                    reads_enum,
+                    &[str_ptr.into(), names_ptr.into()],
+                    "reads_enum",
+                )
+                .map_err(|e| CodegenError::Internal(format!("reads call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("reads: returned void".to_string()))?;
+            return Ok(Some(result));
+        }
         let str_val = self
             .lower_expr(str_expr)?
             .ok_or_else(|| CodegenError::Internal("reads: no string".to_string()))?;
@@ -41224,7 +41255,59 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
-    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.
+    /// The constructor names, in tag order, when this `reads` is at an
+    /// enumeration (every constructor nullary): its instantiated type is
+    /// `String -> [(T, String)]`. `None` otherwise, and `reads` reads an Int.
+    fn reads_enum_constructor_names(&self) -> Option<Vec<String>> {
+        let mut ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = ty {
+            ty = body;
+        }
+        let Ty::Fun(_, result) = ty else {
+            return None;
+        };
+        let elem = match result.as_ref() {
+            Ty::List(elem) => elem.as_ref(),
+            Ty::App(f, elem) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                elem.as_ref()
+            }
+            _ => return None,
+        };
+        let Ty::Tuple(parts) = elem else {
+            return None;
+        };
+        let Some(Ty::Con(target)) = parts.first() else {
+            return None;
+        };
+        let target = target.name.as_str();
+        let mut cons: Vec<(u32, &str)> = self
+            .constructor_metadata
+            .iter()
+            .filter(|(_, m)| m.type_name.as_deref() == Some(target))
+            // Keys also come qualified and disambiguated (`Color::Red#0`).
+            .map(|(n, m)| {
+                let bare = n.rsplit("::").next().unwrap_or(n);
+                (m.tag, bare.split('#').next().unwrap_or(bare))
+            })
+            .collect();
+        if cons.is_empty()
+            || self
+                .constructor_metadata
+                .values()
+                .any(|m| m.type_name.as_deref() == Some(target) && m.arity != 0)
+        {
+            return None;
+        }
+        cons.sort_unstable();
+        cons.dedup_by_key(|c| c.0);
+        // Tags must be 0..n, so a name's position is its tag.
+        if cons.iter().enumerate().any(|(i, c)| c.0 as usize != i) {
+            return None;
+        }
+        Some(cons.into_iter().map(|(_, n)| n.to_string()).collect())
+    }
+
+    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.
     /// 3-list parallel iteration, build 3-tuples.
     fn lower_builtin_zip3(
         &mut self,

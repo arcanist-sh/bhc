@@ -2544,6 +2544,11 @@ fn test_tier2_infix_constructor_lhs_native() {
 }
 
 #[test]
+fn test_tier2_reads_enum_native() {
+    run_native_test("tier2_functions/reads_enum", Profile::Default);
+}
+
+#[test]
 fn test_tier2_local_numeric_conversion_native() {
     run_native_test("tier2_functions/local_numeric_conversion", Profile::Default);
 }

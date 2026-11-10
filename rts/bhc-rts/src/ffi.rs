@@ -3056,6 +3056,66 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
     }
 }
 
+/// `reads :: String -> [(T, String)]` at an enumeration `T` with derived
+/// `Read`: optional leading whitespace, then an identifier token that is
+/// exactly one of the constructor names. `names` lists them, newline
+/// separated, in tag order. `[(con, rest)]` on success, `[]` otherwise
+/// (`reads "Greenish"` does not match `Green`, as `lex` reads the whole
+/// token).
+///
+/// # Safety
+///
+/// `str_list` must be a BHC list of characters (or a thunk evaluating to
+/// one), and `names` a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_reads_enum(str_list: *mut u8, names: *const c_char) -> *mut u8 {
+    unsafe {
+        let tag = |p: *mut u8| *(p as *const i64);
+        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let mut cells: Vec<*mut u8> = Vec::new();
+        let mut list = bhc_force(str_list);
+        while tag(list) != 0 {
+            cells.push(list);
+            list = bhc_force(field(list, 1));
+        }
+        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let as_char = |c: i64| u32::try_from(c).ok().and_then(char::from_u32);
+        let mut i = 0;
+        while i < chars.len() && as_char(chars[i]).is_some_and(char::is_whitespace) {
+            i += 1;
+        }
+        let start = i;
+        if !as_char(chars.get(i).copied().unwrap_or(-1))
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        {
+            return alloc_nil();
+        }
+        while i < chars.len()
+            && as_char(chars[i]).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+        {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().filter_map(|&c| as_char(c)).collect();
+        let names = CStr::from_ptr(names).to_str().unwrap_or("");
+        let Some(con_tag) = names.split('\n').position(|n| n == token) else {
+            return alloc_nil();
+        };
+        let rest = if i < cells.len() {
+            cells[i]
+        } else {
+            alloc_nil()
+        };
+        // A nullary constructor is its tag alone.
+        let con = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(8, 8));
+        *(con as *mut i64) = con_tag as i64;
+        let pair = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(24, 8));
+        *(pair as *mut i64) = 0;
+        *(pair.add(8) as *mut *mut u8) = con;
+        *(pair.add(16) as *mut *mut u8) = rest;
+        alloc_cons(pair, alloc_nil())
+    }
+}
+
 /// Print a newline to stdout
 #[no_mangle]
 pub extern "C" fn bhc_print_newline() {

@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `reads` at an enumeration with derived `Read` parses a constructor name
+  and returns the rest of the input: `reads "Green rest" :: [(Color,
+  String)]` is `[(Green," rest")]`. It read an `Int` and returned `[]`, so
+  pandoc's `readExtension` (`reads ("Ext_" ++ name)`) found nothing.
+
 - A local binding without a signature that converts a number,
   `where w = fromInteger n` used as an `Int`, takes the type its use gives
   it (the monomorphism restriction); the conversion compiled as the

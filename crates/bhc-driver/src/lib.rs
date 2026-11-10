@@ -8088,6 +8088,44 @@ exposed-modules: Data.Text Data.Text.Internal
         assert_eq!(missing, ["Foo.Bar.Baz"]);
     }
 
+    /// An import list naming something the module does not export warns
+    /// (GHC rejects it; bhc accepted it silently), and names it does export,
+    /// including a type known only through its constructors, do not.
+    #[test]
+    fn test_import_of_unexported_name_warns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("A.hs"),
+            "module A (Color(..), Shape(Circle), area) where\n\
+             data Color = Red | Green\n\
+             data Shape = Circle Int | Square Int\n\
+             area :: Shape -> Int\n\
+             area (Circle r) = r\n\
+             area (Square s) = s\n",
+        )
+        .unwrap();
+        let src = "import A (Color(..), Shape(..), area, Hidden, hidden)\nmain = print (area (Circle 2))\n";
+        let unit = CompilationUnit::from_source("Main", src);
+        let compiler = CompilerBuilder::new()
+            .import_path(Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap())
+            .build()
+            .unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let missing: Vec<&str> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::NotExported { module, name, .. } => {
+                    assert_eq!(module, "A");
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(missing, ["Hidden", "hidden"]);
+    }
+
     /// The interpreter forces `fst`/`snd` components and evaluates floating
     /// literals as Double (#17): this printed `expected Num, got <thunk>`,
     /// then `1.3333334`.

@@ -815,6 +815,44 @@ pub fn load_module(
     Ok(exports)
 }
 
+/// The names an `import M (…)` list asks for that `exports` does not have.
+///
+/// A capitalised item counts as present when it is a type, a class, the type
+/// of an exported constructor, a constructor or a value, so an interface
+/// that records a type only through its constructors is not reported. The
+/// members listed inside `T(…)` are not checked.
+#[must_use]
+pub fn missing_imports(exports: &ModuleExports, spec: &Option<ast::ImportSpec>) -> Vec<Symbol> {
+    let Some(ast::ImportSpec::Only(items)) = spec else {
+        return Vec::new();
+    };
+    let mut missing = Vec::new();
+    for item in items {
+        let (name, present) = match item {
+            ast::Import::Var(ident, _) | ast::Import::Pattern(ident, _) => (
+                ident.name,
+                exports.values.contains_key(&ident.name)
+                    || exports.constructors.contains_key(&ident.name),
+            ),
+            ast::Import::Type(ident, _, _) => (
+                ident.name,
+                exports.types.contains_key(&ident.name)
+                    || exports.class_methods.contains_key(&ident.name)
+                    || exports.constructors.contains_key(&ident.name)
+                    || exports
+                        .constructors
+                        .values()
+                        .any(|info| info.type_con_name == ident.name)
+                    || exports.values.contains_key(&ident.name),
+            ),
+        };
+        if !present {
+            missing.push(name);
+        }
+    }
+    missing
+}
+
 /// Apply an import specification to filter module exports.
 ///
 /// Handles both `import M (a, b, c)` (Only) and `import M hiding (a, b)` (Hiding).

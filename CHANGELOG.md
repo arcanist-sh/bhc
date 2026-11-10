@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `import M (x)` warns when `M` does not export `x`
+  (``warning: module `M` does not export `x` ``); the name was dropped
+  silently. GHC rejects this. It stays a warning because some interfaces
+  bhc provides are not complete.
+
 - A top-level infix definition whose left operand is a constructor pattern,
   `TagOpen n as ~== TagOpen p ps = …` (tagsoup's `~==`), parses; it was
   "unexpected constructor, expected declaration". Under `BHC_IO_MODEL=eager`,

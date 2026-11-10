@@ -328,6 +328,13 @@ fn process_imports(
         // Try to load the module from the file system
         match loader::load_module(&module_name, search_paths, cache, ctx) {
             Ok(exports) => {
+                for name in loader::missing_imports(&exports, &import.spec) {
+                    ctx.warnings.push(crate::LowerWarning::NotExported {
+                        module: module_name.clone(),
+                        name: name.as_str().to_string(),
+                        span: import.span,
+                    });
+                }
                 // Apply import specification (Only/Hiding)
                 let filtered = loader::apply_import_spec(&exports, &import.spec);
                 // Register the imported names

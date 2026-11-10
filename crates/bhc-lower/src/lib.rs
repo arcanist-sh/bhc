@@ -180,6 +180,17 @@ pub enum LowerWarning {
         /// Source location of the import.
         span: Span,
     },
+    /// An import list names something the imported module does not export
+    /// (`import A (Hidden)`). GHC rejects this; it is a warning here because
+    /// some module interfaces bhc provides are not complete.
+    NotExported {
+        /// The imported module.
+        module: String,
+        /// The name it does not export.
+        name: String,
+        /// Source location of the import.
+        span: Span,
+    },
 }
 
 impl std::fmt::Display for LowerWarning {
@@ -206,6 +217,9 @@ impl std::fmt::Display for LowerWarning {
             }
             LowerWarning::UnknownExtension { name, .. } => {
                 write!(f, "unknown extension `{name}`")
+            }
+            LowerWarning::NotExported { module, name, .. } => {
+                write!(f, "module `{module}` does not export `{name}`")
             }
             LowerWarning::ModuleNotFound { name, .. } => {
                 write!(

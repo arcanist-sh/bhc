@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- WebAssembly: `fromInteger` and `toInteger` are the identity (an `Integer`
+  is an `Int` there) instead of an unknown function giving 0, and
+  `fromIntegral` resolved at `Int -> Double` boxes the converted value, so a
+  let-bound `x = fromIntegral k` prints `10.0` rather than `0.0`.
+
 - `fromIntegral` from a machine integer to `Double`/`Float` converts the
   value itself. It relied on a float operator seeing the call, so bound
   first (`where x = fromIntegral k`, then `x / 4`), the integer's bits were

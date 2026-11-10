@@ -4877,9 +4877,38 @@ impl<'a> WasmLowering<'a> {
             // pass the value through unchanged (Int stays an i32; a Double stays
             // boxed). Float contexts intercept `fromIntegral` earlier and
             // convert with F64ConvertI32S instead.
-            Some("fromIntegral" | "GHC.Real.fromIntegral" | "Prelude.fromIntegral")
-                if !args.is_empty() =>
-            {
+            // Resolved at an integer to Double/Float (hir-to-core stamps the
+            // occurrence with its type): box the converted value. Passed
+            // through, `where x = fromIntegral k` then `show x` read the Int
+            // as a Double's address and printed 0.0.
+            Some(
+                "fromIntegral"
+                | "GHC.Real.fromIntegral"
+                | "Prelude.fromIntegral"
+                | "fromInteger"
+                | "GHC.Num.fromInteger",
+            ) if !args.is_empty() && func_expr_returns_floating(func_expr) => {
+                instrs.push(WasmInstr::I32Const(8));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                let ptr = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalTee(ptr));
+                self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64ConvertI32S);
+                instrs.push(WasmInstr::F64Store(3, 0));
+                instrs.push(WasmInstr::LocalGet(ptr));
+            }
+            // An Integer is an Int here, so the conversions between them are
+            // the identity (`fromInteger` was an unknown function, giving 0).
+            Some(
+                "fromIntegral"
+                | "GHC.Real.fromIntegral"
+                | "Prelude.fromIntegral"
+                | "fromInteger"
+                | "GHC.Num.fromInteger"
+                | "toInteger"
+                | "GHC.Real.toInteger",
+            ) if !args.is_empty() => {
                 self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
             }
             Some("realToFrac" | "GHC.Real.realToFrac") if !args.is_empty() => {
@@ -6097,6 +6126,24 @@ fn peel_head(expr: &Expr) -> &Expr {
             _ => return e,
         };
     }
+}
+
+/// Whether a call's head variable is typed with a `Double`/`Float` result
+/// once every arrow is applied (`fromIntegral :: Int -> Double`).
+fn func_expr_returns_floating(func_expr: &Expr) -> bool {
+    let Expr::Var(v, _) = func_expr else {
+        return false;
+    };
+    let mut ty = &v.ty;
+    while let Ty::Forall(_, body) = ty {
+        ty = body;
+    }
+    let mut arrows = 0;
+    while let Ty::Fun(_, r) = ty {
+        ty = r;
+        arrows += 1;
+    }
+    arrows > 0 && matches!(ty, Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float"))
 }
 
 /// If `expr` is `fromIntegral <value>` (possibly with leading dictionary

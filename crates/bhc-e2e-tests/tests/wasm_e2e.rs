@@ -1075,3 +1075,10 @@ fn test_tier2_maybe_show_results_wasm() {
 fn test_tier2_infix_constructor_lhs_wasm() {
     run_wasm_test("tier2_functions/infix_constructor_lhs", Profile::Default);
 }
+
+// Numeric conversions bound locally: `where w = fromInteger n` and a
+// let-bound `fromIntegral k` used as a Double.
+#[test]
+fn test_tier2_local_numeric_conversion_wasm() {
+    run_wasm_test("tier2_functions/local_numeric_conversion", Profile::Default);
+}

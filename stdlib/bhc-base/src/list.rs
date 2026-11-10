@@ -497,6 +497,64 @@ pub unsafe extern "C" fn bhc_list_intersect_by(
     vec_to_list(&result)
 }
 
+/// Whether `val` is in `list` under an equality closure (`elem` at a type
+/// whose values are boxed). Returns 1 or 0.
+///
+/// # Safety
+///
+/// As for [`bhc_list_nub_by`].
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_elem_by(eq_fn: *mut u8, val: *mut u8, list: *mut u8) -> i64 {
+    i64::from(
+        list_to_vec(list)
+            .iter()
+            .any(|&e| call_eq_closure(eq_fn, val, e)),
+    )
+}
+
+/// `xs \\ ys` under an equality closure: each element of `ys` removes the
+/// first equal element of `xs`.
+///
+/// # Safety
+///
+/// As for [`bhc_list_nub_by`].
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_difference_by(
+    eq_fn: *mut u8,
+    xs: *mut u8,
+    ys: *mut u8,
+) -> *mut u8 {
+    let mut result = list_to_vec(xs);
+    for y in list_to_vec(ys) {
+        if let Some(i) = result.iter().position(|&x| call_eq_closure(eq_fn, x, y)) {
+            result.remove(i);
+        }
+    }
+    vec_to_list(&result)
+}
+
+/// The code of an equality closure on `[Char]` (`eq_fn` for the `*_by`
+/// functions at `String`): equal when the two lists hold the same
+/// characters. Returns a Bool immediate (0 or 1).
+///
+/// # Safety
+///
+/// `a` and `b` must be BHC character lists (or thunks evaluating to them).
+unsafe extern "C" fn char_list_eq_code(_closure: *mut u8, a: *mut u8, b: *mut u8) -> *mut u8 {
+    let a = list_to_vec(bhc_prelude::force_heap_object(a));
+    let b = list_to_vec(bhc_prelude::force_heap_object(b));
+    let equal = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| *x as i64 == *y as i64);
+    usize::from(equal) as *mut u8
+}
+
+/// A closure comparing `[Char]` values, for the `*_by` list functions at
+/// `String` (`nub`, `group`, `elem`, … compared the lists' addresses).
+#[no_mangle]
+pub extern "C" fn bhc_string_eq_closure() -> *mut u8 {
+    // A closure is its code pointer followed by its environment (none).
+    Box::into_raw(Box::new([char_list_eq_code as *const () as usize, 0usize])) as *mut u8
+}
+
 /// Strip a prefix from a list, returning `Just remainder` or `Nothing`.
 ///
 /// Elements are compared as `i64` (pointer cast).

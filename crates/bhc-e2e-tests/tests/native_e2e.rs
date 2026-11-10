@@ -2572,3 +2572,19 @@ fn test_tier2_show_fractional_defaults_native() {
 fn test_tier2_negation_precedence_native() {
     run_native_test("tier2_functions/negation_precedence", Profile::Default);
 }
+
+#[test]
+fn test_tier2_list_eq_functions_native() {
+    run_native_test("tier2_functions/list_eq_functions", Profile::Default);
+}
+
+#[test]
+fn test_tier2_list_difference_native() {
+    // Under the eager model the `deleteBy` lambda that `\\` lowers to does not
+    // see its operands' boxed type and compares addresses (it did before, as
+    // a `filter`, too).
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier2_functions/list_difference", Profile::Default);
+}

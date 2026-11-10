@@ -28,6 +28,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `nub`, `group`, `elem`, `notElem`, `delete`, `union` and `intersect` at
+  strings and at types with a derived `Eq` compare elements by content;
+  they compared addresses (`nub ["a", "b", "a"]` kept both `"a"`s).
+- A derived `Eq` compares a field of a ground type by that type:
+  `P 1 "a" == P 1 "a"` compared the strings' addresses and was `False`.
+- `xs \\ ys` removes the first equal element for each element of `ys`, as
+  `Data.List` does; it removed every occurrence.
+
 - `import Data.List` keeps the real types of `sort`, `sortBy`, `sortOn`,
   `nub`, `group`, `isPrefixOf` and the other list functions it re-exports;
   typed as placeholders, `print (sort xs)` at a user type printed

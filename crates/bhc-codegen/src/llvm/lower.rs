@@ -7867,6 +7867,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "group" => self.lower_builtin_group(args[0]),
             "delete" => self.lower_builtin_delete(args[0], args[1]),
             "union" => self.lower_builtin_union(args[0], args[1]),
+            // `xs \\ ys` at boxed elements (strings, derived Eq): the RTS
+            // difference under an equality closure. Other element types keep
+            // the generic lowering.
+            "\\\\" if self.element_eq_closure_available() => {
+                let eq = self.element_eq_closure()?.ok_or_else(|| {
+                    CodegenError::Internal("list difference: no equality".to_string())
+                })?;
+                let r =
+                    self.call_list_by("bhc_list_difference_by", eq, &[args[0], args[1]], false)?;
+                Ok(Some(r))
+            }
             "intersect" => self.lower_builtin_intersect(args[0], args[1]),
             "sortOn" => self.lower_builtin_sort_on(args[0], args[1]),
             "nubBy" => self.lower_builtin_nub_by(args[0], args[1]),
@@ -35677,6 +35688,141 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure))
     }
 
+    /// An equality closure for the elements of the list this builtin is
+    /// stamped at (hir-to-core records the type), when they are boxed values
+    /// whose machine words do not decide equality: `[Char]` (the RTS's
+    /// string closure) or a user type with a derived `Eq` (a closure over
+    /// `$derived_eq_T`). `nub`, `group`, `elem`, … compared those by address.
+    fn element_eq_closure(&mut self) -> CodegenResult<Option<PointerValue<'ctx>>> {
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        // The LAST list parameter: `delete :: a -> [a] -> [a]` at `String`
+        // has a list as its first parameter too.
+        let mut elem = None;
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(e) = param.as_ref() {
+                elem = Some(e.as_ref().clone());
+            }
+            fn_ty = rest;
+        }
+        let Some(elem) = elem else {
+            return Ok(None);
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        if self.is_string_type(&elem) {
+            let f = match self.module.get_function("bhc_string_eq_closure") {
+                Some(f) => f,
+                None => self
+                    .module
+                    .add_function("bhc_string_eq_closure", ptr_type.fn_type(&[], false)),
+            };
+            let closure = self
+                .builder()
+                .build_call(f, &[], "string_eq")
+                .map_err(|e| CodegenError::Internal(format!("string eq closure: {e:?}")))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("string eq closure: void".to_string()))?;
+            return Ok(Some(closure.into_pointer_value()));
+        }
+        let Ty::Con(con) = &elem else {
+            return Ok(None);
+        };
+        let Some(eq_fn) = self
+            .derived_eq_fns
+            .get(con.name.as_str())
+            .and_then(|id| self.functions.get(id))
+            .copied()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.code_closure(eq_fn)?))
+    }
+
+    /// Whether [`Self::element_eq_closure`] would give a closure, without
+    /// emitting one.
+    fn element_eq_closure_available(&self) -> bool {
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        let mut available = false;
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(e) = param.as_ref() {
+                available = self.is_string_type(e)
+                    || matches!(e.as_ref(), Ty::Con(c) if self.derived_eq_fns.contains_key(c.name.as_str()));
+            }
+            fn_ty = rest;
+        }
+        available
+    }
+
+    /// A one-word closure whose code is `f`, a top-level function taking
+    /// `(env, a, b)`, for the RTS `*_by` list functions.
+    fn code_closure(&mut self, f: FunctionValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        let alloc_fn = *self
+            .functions
+            .get(&VarId::new(1000005))
+            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
+        let closure = self
+            .builder()
+            .build_call(
+                alloc_fn,
+                &[self.type_mapper().i64_type().const_int(8, false).into()],
+                "code_closure",
+            )
+            .map_err(|e| CodegenError::Internal(format!("code closure: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("code closure: void".to_string()))?
+            .into_pointer_value();
+        self.builder()
+            .build_store(closure, f.as_global_value().as_pointer_value())
+            .map_err(|e| CodegenError::Internal(format!("code closure store: {e:?}")))?;
+        Ok(closure)
+    }
+
+    /// Call an RTS `*_by` list function: `name(eq_closure, args…)`, every
+    /// argument a pointer, returning `ret` (a pointer, or an i64 flag).
+    fn call_list_by(
+        &mut self,
+        name: &str,
+        eq: PointerValue<'ctx>,
+        args: &[&Expr],
+        returns_flag: bool,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let mut vals: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![eq.into()];
+        for a in args {
+            let v = self
+                .lower_expr(a)?
+                .ok_or_else(|| CodegenError::Internal(format!("{name}: argument has no value")))?;
+            vals.push(self.value_to_ptr(v)?.into());
+        }
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+            vals.iter().map(|_| ptr_type.into()).collect();
+        let f = match self.module.get_function(name) {
+            Some(f) => f,
+            None => {
+                let ty = if returns_flag {
+                    i64_type.fn_type(&params, false)
+                } else {
+                    ptr_type.fn_type(&params, false)
+                };
+                self.module.add_function(name, ty)
+            }
+        };
+        self.builder()
+            .build_call(f, &vals, name)
+            .map_err(|e| CodegenError::Internal(format!("{name} call failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{name}: returned void")))
+    }
+
     /// `maximum`/`minimum` under a comparison closure (`bhc_list_extreme_by`).
     fn lower_list_extreme_by(
         &mut self,
@@ -37056,6 +37202,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let flag = self
+                .call_list_by("bhc_list_elem_by", eq, &[val_expr, list_expr], true)?
+                .into_int_value();
+            return Ok(Some(self.int_to_ptr(flag)?.into()));
+        }
         // Lower the value to search for
         let val_val = self
             .lower_expr(val_expr)?
@@ -37311,6 +37463,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let flag = self
+                .call_list_by("bhc_list_elem_by", eq, &[val_expr, list_expr], true)?
+                .into_int_value();
+            let flag = self
+                .builder()
+                .build_xor(
+                    flag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "not_elem",
+                )
+                .map_err(|e| CodegenError::Internal(format!("notElem: {e:?}")))?;
+            return Ok(Some(self.int_to_ptr(flag)?.into()));
+        }
         // Lower the value to search for
         let val_val = self
             .lower_expr(val_expr)?
@@ -39308,6 +39474,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_nub_by", eq, &[list_expr], false)?;
+            return Ok(Some(r));
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("nub: no list".to_string()))?;
@@ -39397,6 +39567,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_group_by", eq, &[list_expr], false)?;
+            return Ok(Some(r));
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("group: no list".to_string()))?;
@@ -39750,6 +39924,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_delete_by", eq, &[val_expr, list_expr], false)?;
+            return Ok(Some(r));
+        }
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("delete: no value".to_string()))?;
@@ -39929,6 +40107,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_union_by", eq, &[list1_expr, list2_expr], false)?;
+            return Ok(Some(r));
+        }
         // `union xs ys = xs ++ filter (\y -> not (elem y xs)) (nub ys)`: the
         // elements of `ys` not already in `xs`, without duplicates. This was
         // a plain append, so `union [1,2] [2,3]` kept the second `2`.
@@ -39988,6 +40170,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by(
+                "bhc_list_intersect_by",
+                eq,
+                &[list1_expr, list2_expr],
+                false,
+            )?;
+            return Ok(Some(r));
+        }
         let list1_val = self
             .lower_expr(list1_expr)?
             .ok_or_else(|| CodegenError::Internal("intersect: list1 has no value".to_string()))?;
@@ -64906,6 +65097,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "nub" => Some(1),
         "delete" => Some(2),
         "union" => Some(2),
+        "\\\\" => Some(2),
         "intersect" => Some(2),
         "sort" => Some(1),
         "sortBy" => Some(2),

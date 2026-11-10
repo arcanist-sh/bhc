@@ -1065,6 +1065,25 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         }
         return;
     }
+    // List functions that compare elements for equality: codegen reads the
+    // element type off the occurrence and, for strings or a user type with a
+    // derived Eq, compares through an equality closure instead of by address
+    // (`nub ["a", "b", "a"]` kept both "a"s).
+    if matches!(
+        v.name.as_str(),
+        "nub" | "group" | "delete" | "union" | "intersect" | "elem" | "notElem" | "\\\\"
+    ) && matches!(v.ty, Ty::Error | Ty::Var(_) | Ty::Forall(..))
+    {
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| crate::context::canonical_list_spelling(&t));
+        if let Some(resolved @ Ty::Fun(..)) = resolved {
+            if !has_type_variables(&resolved) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
     // `sort`/`maximum`/`minimum` over a user type: codegen calls its derived
     // `compare` instead of comparing raw words (addresses, for a boxed value).
     if matches!(v.name.as_str(), "sort" | "maximum" | "minimum") {
@@ -6788,11 +6807,10 @@ fn try_lower_text_group_by(
 
 /// `xs \\ ys` (Data.List; codegen has no implementation and stubbed — pandoc's
 /// HTML writer takes header classes out of a section's with it) as
-/// `filter (\x -> not (any (\y -> x == y) ys)) xs`. The `==` carries the
-/// element type from the occurrence, so `Text` and tuples compare by contents.
-/// Unlike the real `(\\)`, which removes one occurrence of `x` per `y`, every
-/// occurrence is removed: the two differ only when `xs` repeats an element of
-/// `ys`.
+/// `foldl (\acc y -> deleteBy (\a b -> a == b) y acc) xs ys`: each `y` removes
+/// the first equal element, as the real `(\\)` does. The `==` carries the
+/// element type from the occurrence, so `Text`, strings, tuples and derived-Eq
+/// types compare by contents. (A `filter` removed every occurrence.)
 fn try_lower_list_difference(
     ctx: &mut LowerContext,
     f: &hir::Expr,
@@ -6824,6 +6842,8 @@ fn try_lower_list_difference(
         |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
     let a = ctx.fresh_var("diff_x", elem_ty.clone(), span);
     let b = ctx.fresh_var("diff_y", elem_ty.clone(), span);
+    let acc = ctx.fresh_var("diff_acc", Ty::List(Box::new(elem_ty.clone())), span);
+    let y = ctx.fresh_var("diff_del", elem_ty.clone(), span);
     let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
     let eq = core::Expr::Var(
         Var {
@@ -6834,16 +6854,33 @@ fn try_lower_list_difference(
         span,
     );
     let same = core::Expr::Lam(
-        b.clone(),
-        Box::new(app(
-            app(eq, core::Expr::Var(a.clone(), span)),
-            core::Expr::Var(b, span),
+        a.clone(),
+        Box::new(core::Expr::Lam(
+            b.clone(),
+            Box::new(app(
+                app(eq, core::Expr::Var(a, span)),
+                core::Expr::Var(b, span),
+            )),
+            span,
         )),
         span,
     );
-    let found = app(app(nullary_var("any", span), same), ys);
-    let keep = core::Expr::Lam(a, Box::new(app(nullary_var("not", span), found)), span);
-    Ok(Some(app(app(nullary_var("filter", span), keep), xs)))
+    let delete_one = app(
+        app(
+            app(nullary_var("deleteBy", span), same),
+            core::Expr::Var(y.clone(), span),
+        ),
+        core::Expr::Var(acc.clone(), span),
+    );
+    let step = core::Expr::Lam(
+        acc,
+        Box::new(core::Expr::Lam(y, Box::new(delete_one), span)),
+        span,
+    );
+    Ok(Some(app(
+        app(app(nullary_var("foldl", span), step), xs),
+        ys,
+    )))
 }
 
 /// `elem v xs` / `notElem v xs` as `any (\y -> y == v) xs`, with `==` typed

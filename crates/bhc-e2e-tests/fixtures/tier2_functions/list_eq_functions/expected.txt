@@ -1,0 +1,13 @@
+[3,1,2]
+["a","b"]
+["x","y"]
+[Lo,Hi]
+(True,False)
+[P 1 "a",P 2 "b"]
+[[Lo,Lo],[Hi]]
+[["a","a"],["b"]]
+(True,True,True)
+(True,True)
+([Hi,Lo],["b","a"])
+([Lo,Hi],[Hi])
+(["a","b","c"],["a","c"])

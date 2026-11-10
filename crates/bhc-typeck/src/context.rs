@@ -8104,6 +8104,9 @@ impl TyCtxt {
                         | "find"
                         | "zip3"
                         | "unzip3"
+                        // `a -> a -> a` (shared with Data.Set), which keeps
+                        // the operands' type on the result.
+                        | "\\\\"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))

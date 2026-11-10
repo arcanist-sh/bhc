@@ -1459,7 +1459,12 @@ impl DerivingContext {
     /// `newtype Day = Day Integer` compared its fields as pointers).
     fn typed_operand(v: &Var, field_ty: Option<&Ty>) -> Var {
         match field_ty {
-            Some(t @ Ty::Con(c)) if c.name.as_str() == "Integer" => Var {
+            // A field of a ground type carries it, so the comparison is chosen
+            // by type: a `String`/list field by content, `Integer` as a bignum,
+            // `Text` through the RTS. Untyped, `P 1 "a" == P 1 "a"` compared
+            // the two strings' addresses and was False. A field whose type
+            // mentions the data type's parameters stays untyped.
+            Some(t) if !crate::context::has_type_variables(t) => Var {
                 ty: t.clone(),
                 ..v.clone()
             },

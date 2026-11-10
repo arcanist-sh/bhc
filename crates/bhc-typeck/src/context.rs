@@ -3307,6 +3307,25 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // Numeric.showFFloat :: Maybe Int -> Double -> ShowS
+                "showFFloat" | "Numeric.showFFloat" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::mono(Ty::fun(
+                        self.builtins.maybe_of(self.builtins.int_ty.clone()),
+                        Ty::fun(
+                            self.builtins.double_ty.clone(),
+                            Ty::fun(string.clone(), string),
+                        ),
+                    ))
+                }
+                // showHex, showOct :: Int -> ShowS
+                "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::mono(Ty::fun(
+                        self.builtins.int_ty.clone(),
+                        Ty::fun(string.clone(), string),
+                    ))
+                }
                 "comparing" => {
                     let ordering_ty = Ty::Con(self.builtins.ordering_con.clone());
                     Scheme::poly(

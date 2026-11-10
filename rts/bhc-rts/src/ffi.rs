@@ -317,6 +317,230 @@ fn format_float(n: f32) -> String {
     }
 }
 
+/// The shortest decimal digits of a positive finite `x` and its exponent
+/// `e`, with `x = 0.d1 d2 … × 10^e` (Haskell's `floatToDigits 10`).
+fn float_to_digits(x: f64) -> (Vec<u8>, i32) {
+    if x == 0.0 {
+        return (vec![0], 0);
+    }
+    let s = format!("{x:e}");
+    let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let mut digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+    (digits, exp + 1)
+}
+
+/// Haskell's `roundTo 10 d is` (GHC.Float): `is` rounded to `d` digits, half
+/// to even when the dropped digits are exactly half, with the carry out of
+/// the top digit.
+fn round_to(d: usize, is: &[u8]) -> (u8, Vec<u8>) {
+    fn go(n: usize, even: bool, xs: &[u8]) -> (u8, Vec<u8>) {
+        match xs.split_first() {
+            None => (0, vec![0; n]),
+            Some((&x, rest)) if n == 0 => {
+                let exactly_half = x == 5 && even && rest.iter().all(|&r| r == 0);
+                (u8::from(x >= 5 && !exactly_half), Vec::new())
+            }
+            Some((&x, rest)) => {
+                let (c, mut ds) = go(n - 1, x % 2 == 0, rest);
+                let i = c + x;
+                if i == 10 {
+                    ds.insert(0, 0);
+                    (1, ds)
+                } else {
+                    ds.insert(0, i);
+                    (0, ds)
+                }
+            }
+        }
+    }
+    let (c, mut ds) = go(d, true, is);
+    if c == 1 {
+        ds.insert(0, 1);
+    }
+    (c, ds)
+}
+
+/// `Numeric.showFFloat`: fixed-point, never scientific, `decimals` digits
+/// after the point (all of the shortest representation when `None`), with
+/// GHC's half-up rounding of the decimal digits (`showFFloat (Just 2) 2.675`
+/// is `2.68`, where rounding the binary value gives `2.67`).
+fn format_ffloat(x: f64, decimals: Option<usize>) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if x < 0.0 || (x == 0.0 && x.is_sign_negative()) {
+        return format!("-{}", format_ffloat(-x, decimals));
+    }
+    let digit = |d: &u8| char::from(b'0' + d);
+    let (is, e) = float_to_digits(x);
+    match decimals {
+        None => {
+            if e <= 0 {
+                let zeros = "0".repeat((-e) as usize);
+                format!("0.{zeros}{}", is.iter().map(digit).collect::<String>())
+            } else {
+                let e = e as usize;
+                let mut int: String = is.iter().take(e).map(digit).collect();
+                while int.len() < e {
+                    int.push('0');
+                }
+                let frac: String = is.iter().skip(e).map(digit).collect();
+                let frac = if frac.is_empty() {
+                    "0".to_string()
+                } else {
+                    frac
+                };
+                format!("{int}.{frac}")
+            }
+        }
+        Some(dec) => {
+            if e >= 0 {
+                let e = e as usize;
+                let (ei, rounded) = round_to(dec + e, &is);
+                let split = e + ei as usize;
+                let text: String = rounded.iter().map(digit).collect();
+                let (ls, rs) = text.split_at(split.min(text.len()));
+                let ls = if ls.is_empty() { "0" } else { ls };
+                if rs.is_empty() {
+                    ls.to_string()
+                } else {
+                    format!("{ls}.{rs}")
+                }
+            } else {
+                let mut padded = vec![0; (-e) as usize];
+                padded.extend_from_slice(&is);
+                let (ei, rounded) = round_to(dec, &padded);
+                let ds: Vec<u8> = if ei > 0 {
+                    rounded
+                } else {
+                    let mut v = vec![0];
+                    v.extend(rounded);
+                    v
+                };
+                let text: String = ds.iter().map(digit).collect();
+                let (d, rest) = text.split_at(1);
+                if rest.is_empty() {
+                    d.to_string()
+                } else {
+                    format!("{d}.{rest}")
+                }
+            }
+        }
+    }
+}
+
+/// Prepend `s`'s characters to the BHC list `tail`.
+///
+/// # Safety
+///
+/// `tail` must be a BHC list (or a thunk evaluating to one).
+unsafe fn chars_onto(s: &str, tail: *mut u8) -> *mut u8 {
+    let mut list = tail;
+    for c in s.chars().rev() {
+        list = unsafe { alloc_cons(c as u32 as usize as *mut u8, list) };
+    }
+    list
+}
+
+/// `Numeric.showFFloat digits x suffix`: `digits` is a `Maybe Int`.
+///
+/// # Safety
+///
+/// `digits` must be a BHC `Maybe Int` (or a thunk evaluating to one) and
+/// `suffix` a BHC character list.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_show_ffloat(digits: *mut u8, x: f64, suffix: *mut u8) -> *mut u8 {
+    unsafe {
+        let m = bhc_force(digits);
+        let decimals = if m.is_null() || *(m as *const i64) == 0 {
+            None
+        } else {
+            let field = *(m.add(8) as *const *mut u8) as i64;
+            Some(field.max(0) as usize)
+        };
+        chars_onto(&format_ffloat(x, decimals), suffix)
+    }
+}
+
+/// `printf`'s `%.Nf`: `x` fixed-point with `digits` decimals (GHC's
+/// rounding, as `showFFloat`).
+///
+/// # Safety
+///
+/// Always safe; `unsafe` only for the list allocation.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_printf_fixed(digits: i64, x: f64) -> *mut u8 {
+    unsafe { chars_onto(&format_ffloat(x, Some(digits.max(0) as usize)), alloc_nil()) }
+}
+
+/// `printf`'s field width: `text` padded to `width` characters, on the
+/// right when `left` is set, else on the left with spaces or (`zero`, for a
+/// number) zeros after any sign.
+///
+/// # Safety
+///
+/// `text` must be a BHC character list (or a thunk evaluating to one).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_printf_pad(
+    width: i64,
+    left: i64,
+    zero: i64,
+    text: *mut u8,
+) -> *mut u8 {
+    unsafe {
+        let mut chars: Vec<char> = Vec::new();
+        let mut list = bhc_force(text);
+        while *(list as *const i64) != 0 {
+            let c = *(list.add(8) as *const u64) as u32;
+            chars.push(char::from_u32(c).unwrap_or('?'));
+            list = bhc_force(*(list.add(16) as *const *mut u8));
+        }
+        let s: String = chars.into_iter().collect();
+        let len = s.chars().count();
+        let width = width.max(0) as usize;
+        let padded = if len >= width {
+            s
+        } else if left != 0 {
+            format!("{s}{}", " ".repeat(width - len))
+        } else if zero != 0 {
+            let (sign, digits) = match s.strip_prefix('-') {
+                Some(rest) => ("-", rest.to_string()),
+                None => ("", s.clone()),
+            };
+            format!("{sign}{}{digits}", "0".repeat(width - len))
+        } else {
+            format!("{}{s}", " ".repeat(width - len))
+        };
+        chars_onto(&padded, alloc_nil())
+    }
+}
+
+/// `Numeric.showHex n suffix` / `showOct`: `radix` is 16 or 8.
+///
+/// # Safety
+///
+/// `suffix` must be a BHC character list.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_show_radix(n: i64, radix: i64, suffix: *mut u8) -> *mut u8 {
+    let s = if radix == 8 {
+        format!("{n:o}")
+    } else {
+        format!("{n:x}")
+    };
+    unsafe { chars_onto(&s, suffix) }
+}
+
 /// Format an `f64` the way Haskell's `show` does: whole numbers keep a trailing
 /// `.0` (`show 6.0 == "6.0"`), and non-finite values use `Infinity` /
 /// `-Infinity` / `NaN`. Shared by `print`/`show` of a `Double`.
@@ -6443,5 +6667,31 @@ mod tests {
 
         unsafe { bhc_close_handle(h) };
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod ffloat_tests {
+    use super::format_ffloat;
+
+    #[test]
+    fn show_ffloat_matches_ghc() {
+        assert_eq!(format_ffloat(3.14159, Some(2)), "3.14");
+        assert_eq!(format_ffloat(2.675, Some(2)), "2.68");
+        assert_eq!(format_ffloat(0.001234, Some(3)), "0.001");
+        assert_eq!(format_ffloat(0.0016, Some(3)), "0.002");
+        assert_eq!(format_ffloat(9.999, Some(2)), "10.00");
+        assert_eq!(format_ffloat(1.5, Some(0)), "2");
+        assert_eq!(format_ffloat(-2.5, Some(1)), "-2.5");
+        assert_eq!(format_ffloat(3.0, None), "3.0");
+        assert_eq!(format_ffloat(0.01, None), "0.01");
+        assert_eq!(format_ffloat(1e22, None), "10000000000000000000000.0");
+        assert_eq!(format_ffloat(123.456, Some(1)), "123.5");
+        assert_eq!(format_ffloat(0.0, Some(2)), "0.00");
+        // Exactly half rounds to even, as GHC's roundTo.
+        assert_eq!(format_ffloat(2.25, Some(1)), "2.2");
+        assert_eq!(format_ffloat(2.35, Some(1)), "2.4");
+        assert_eq!(format_ffloat(0.5, Some(0)), "0");
+        assert_eq!(format_ffloat(2.5, Some(0)), "2");
     }
 }

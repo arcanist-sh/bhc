@@ -8,6 +8,12 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Added
 
+- `Numeric.showFFloat`, `showHex` and `showOct`, which aborted as stubs.
+  `showFFloat` rounds the shortest decimal digits as GHC does (half to even
+  when exactly half).
+- `Text.Printf.printf` with a literal format string: `%d %s %c %f %x %%`,
+  precision, width and the `-`/`0` flags, as an `IO` action or a `String`.
+  A computed format, `%e` and `%g` are still unimplemented.
 - Release archives include `bhci`, the REPL that `bhc repl` starts, and `bhi`,
   the IR inspector; the install script and the Homebrew formula install them
   (#50).

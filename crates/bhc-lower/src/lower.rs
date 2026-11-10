@@ -622,6 +622,13 @@ pub(crate) fn is_prelude_export(name: &str) -> bool {
 /// import alias (e.g., `T.pack` for `import qualified Data.Text as T`).
 ///
 /// Returns whether bhc knows the module, i.e. it has an export table here.
+/// Exports of a module bhc otherwise stubs that codegen implements by name
+/// (`Numeric.showFFloat`, …): they are values, not stubs, so using one
+/// neither warns nor aborts.
+fn is_implemented_module_export(module_name: &str, export: &str) -> bool {
+    module_name == "Numeric" && matches!(export, "showFFloat" | "showHex" | "showOct")
+}
+
 fn register_standard_module_exports(
     ctx: &mut LowerContext,
     module_name: &str,
@@ -6467,6 +6474,9 @@ fn register_standard_module_exports(
             };
             if is_constructor {
                 ctx.define(def_id, def_name, DefKind::StubConstructor, Span::default());
+            } else if is_implemented_module_export(module_name, export) {
+                // Implemented by codegen by name; not a stub.
+                ctx.define(def_id, def_name, DefKind::Value, Span::default());
             } else {
                 ctx.define(def_id, def_name, DefKind::StubValue, Span::default());
             }
@@ -7858,6 +7868,24 @@ fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
     }
 }
 
+/// Whether `fun arg` is an application of `printf` whose first argument (the
+/// format) is a string literal.
+fn printf_with_literal_format(fun: &ast::Expr, arg: &ast::Expr) -> bool {
+    let mut head = fun;
+    let mut first = arg;
+    while let ast::Expr::App(g, a, _) = head {
+        first = a.as_ref();
+        head = g.as_ref();
+    }
+    let is_printf = match head {
+        ast::Expr::Var(ident, _) | ast::Expr::QualVar(_, ident, _) => {
+            ident.name.as_str() == "printf"
+        }
+        _ => false,
+    };
+    is_printf && matches!(first, ast::Expr::Lit(ast::Lit::String(_), _))
+}
+
 /// Lower an expression.
 fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
     match expr {
@@ -7984,7 +8012,23 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     return lower_expr(ctx, arg);
                 }
             }
+            let warnings_before = ctx.warnings.len();
             let f = lower_expr(ctx, fun);
+            // `printf "<literal>" …` is implemented (hir-to-core formats it);
+            // only a computed format string is left to the stub.
+            if printf_with_literal_format(fun, arg) {
+                let mut i = warnings_before;
+                while i < ctx.warnings.len() {
+                    let is_printf_stub = matches!(&ctx.warnings[i],
+                        crate::LowerWarning::StubUsed { name, .. }
+                            if name.rsplit('.').next() == Some("printf"));
+                    if is_printf_stub {
+                        ctx.warnings.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
             let a = lower_expr(ctx, arg);
             hir::Expr::App(Box::new(f), Box::new(a), *span)
         }

@@ -6843,6 +6843,234 @@ fn try_lower_text_group_by(
     Ok(None)
 }
 
+/// One piece of a `printf` format string.
+enum PrintfPiece {
+    /// Literal text (with `%%` already turned into `%`).
+    Text(String),
+    /// A conversion: `-` flag, `0` flag, width, precision, conversion char.
+    Spec {
+        left: bool,
+        zero: bool,
+        width: Option<usize>,
+        precision: Option<usize>,
+        conv: char,
+    },
+}
+
+/// Parse a `printf` format, or `None` for one this lowering does not handle.
+fn parse_printf_format(fmt: &str) -> Option<Vec<PrintfPiece>> {
+    let mut pieces = Vec::new();
+    let mut text = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            text.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            text.push('%');
+            continue;
+        }
+        let (mut left, mut zero) = (false, false);
+        while let Some(&f) = chars.peek() {
+            match f {
+                '-' => left = true,
+                '0' => zero = true,
+                _ => break,
+            }
+            chars.next();
+        }
+        let mut width = String::new();
+        while let Some(&d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+            width.push(d);
+            chars.next();
+        }
+        let mut precision = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut p = String::new();
+            while let Some(&d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+                p.push(d);
+                chars.next();
+            }
+            precision = Some(p.parse().unwrap_or(0));
+        }
+        let conv = chars.next()?;
+        if !matches!(conv, 'd' | 'i' | 's' | 'c' | 'f' | 'x' | 'v') {
+            return None;
+        }
+        if !text.is_empty() {
+            pieces.push(PrintfPiece::Text(std::mem::take(&mut text)));
+        }
+        pieces.push(PrintfPiece::Spec {
+            left,
+            zero,
+            width: width.parse().ok(),
+            precision,
+            conv,
+        });
+    }
+    if !text.is_empty() {
+        pieces.push(PrintfPiece::Text(text));
+    }
+    Some(pieces)
+}
+
+/// `printf "<literal>" a1 … an` (Text.Printf, which bhc only stubbed) as the
+/// formatted string, wrapped in `putStr` when the call is resolved at `IO`.
+/// The format is parsed here; each argument becomes a `String` by its
+/// conversion and type: `%d` a typed `show`, `%s` the string itself, `%c`
+/// the character, `%f` fixed-point (`%.2f`), `%x` hexadecimal, with width
+/// and the `-`/`0` flags. A format or argument this does not cover leaves the
+/// stub in place.
+fn try_lower_printf(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let mut args: Vec<&hir::Expr> = vec![x];
+    let mut head = f;
+    while let Expr::App(g, a, _) = head {
+        args.push(a.as_ref());
+        head = g.as_ref();
+    }
+    args.reverse();
+    let Expr::Var(dr) = head else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(name.as_str(), "printf" | "Text.Printf.printf") {
+        return Ok(None);
+    }
+    let Some((fmt_expr, values)) = args.split_first() else {
+        return Ok(None);
+    };
+    let Expr::Lit(hir::Lit::String(fmt), _) = fmt_expr else {
+        return Ok(None);
+    };
+    let Some(pieces) = parse_printf_format(fmt.as_str()) else {
+        return Ok(None);
+    };
+    let specs = pieces
+        .iter()
+        .filter(|p| matches!(p, PrintfPiece::Spec { .. }))
+        .count();
+    if specs != values.len() {
+        return Ok(None);
+    }
+    // The call's own span can carry an enclosing statement's type (a `do`
+    // statement shares it with its `>>`); `printf`'s type at its head, with
+    // one arrow per argument applied, is the result.
+    let result_ty = ctx.resolved_expr_ty_opt(dr.span).and_then(|mut t| {
+        for _ in 0..args.len() {
+            match t {
+                Ty::Fun(_, r) => t = *r,
+                _ => return None,
+            }
+        }
+        Some(t)
+    });
+    let to_io = match result_ty.map(|t| crate::context::canonical_list_spelling(&t)) {
+        Some(Ty::App(m, _)) if matches!(m.as_ref(), Ty::Con(c) if c.name.as_str() == "IO") => true,
+        Some(Ty::List(e)) if matches!(e.as_ref(), Ty::Con(c) if c.name.as_str() == "Char") => false,
+        Some(Ty::Con(c)) if c.name.as_str() == "String" => false,
+        _ => return Ok(None),
+    };
+    let char_ty = Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star));
+    let string_ty = Ty::List(Box::new(char_ty));
+    let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let lit_str = |s: &str| {
+        core::Expr::Lit(
+            Literal::String(Symbol::intern(s)),
+            Ty::List(Box::new(Ty::Con(TyCon::new(
+                Symbol::intern("Char"),
+                Kind::Star,
+            )))),
+            span,
+        )
+    };
+    let lit_int = |n: i64| core::Expr::Lit(Literal::Int(n), int_ty.clone(), span);
+    let mut parts: Vec<core::Expr> = Vec::new();
+    let mut values = values.iter();
+    for piece in &pieces {
+        match piece {
+            PrintfPiece::Text(t) => parts.push(lit_str(t)),
+            PrintfPiece::Spec {
+                left,
+                zero,
+                width,
+                precision,
+                conv,
+            } => {
+                let Some(value) = values.next() else {
+                    return Ok(None);
+                };
+                let value_ty = ctx
+                    .resolved_expr_ty_opt(value.span())
+                    .map(|t| crate::context::canonical_list_spelling(&t));
+                let is_string = matches!(&value_ty, Some(Ty::List(e))
+                    if matches!(e.as_ref(), Ty::Con(c) if c.name.as_str() == "Char"));
+                let lowered = lower_expr(ctx, value)?;
+                let formatted = match conv {
+                    's' | 'v' if is_string => lowered,
+                    'c' => app(app(nullary_var("replicate", span), lit_int(1)), lowered),
+                    'f' => app(
+                        app(
+                            nullary_var("$printf_fixed", span),
+                            lit_int(precision.unwrap_or(6) as i64),
+                        ),
+                        lowered,
+                    ),
+                    'x' => app(app(nullary_var("showHex", span), lowered), lit_str("")),
+                    _ => {
+                        let Some(ty) = value_ty.filter(|t| !has_type_variables(t)) else {
+                            return Ok(None);
+                        };
+                        let show = core::Expr::Var(
+                            Var {
+                                name: Symbol::intern("show"),
+                                id: VarId::new(0),
+                                ty: Ty::fun(ty, string_ty.clone()),
+                            },
+                            span,
+                        );
+                        app(show, lowered)
+                    }
+                };
+                let formatted = match width {
+                    Some(w) => app(
+                        app(
+                            app(
+                                app(nullary_var("$printf_pad", span), lit_int(*w as i64)),
+                                lit_int(i64::from(*left)),
+                            ),
+                            lit_int(i64::from(*zero)),
+                        ),
+                        formatted,
+                    ),
+                    None => formatted,
+                };
+                parts.push(formatted);
+            }
+        }
+    }
+    let mut text = parts.pop().unwrap_or_else(|| lit_str(""));
+    while let Some(prev) = parts.pop() {
+        text = app(app(nullary_var("++", span), prev), text);
+    }
+    Ok(Some(if to_io {
+        app(nullary_var("putStr", span), text)
+    } else {
+        text
+    }))
+}
+
 /// `xs \\ ys` (Data.List; codegen has no implementation and stubbed — pandoc's
 /// HTML writer takes header classes out of a section's with it) as
 /// `foldl (\acc y -> deleteBy (\a b -> a == b) y acc) xs ys`: each `y` removes
@@ -7526,6 +7754,9 @@ fn lower_app(
         return Ok(result);
     }
     if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_printf(ctx, f, x, span)? {
         return Ok(result);
     }
     if let Some(result) = try_lower_text_group_by(ctx, f, x, span)? {

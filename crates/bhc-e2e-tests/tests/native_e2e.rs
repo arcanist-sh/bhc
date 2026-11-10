@@ -2603,3 +2603,13 @@ fn test_tier2_map_key_traversals_native() {
 fn test_tier2_replicate_m_list_native() {
     run_native_test("tier2_functions/replicate_m_list", Profile::Default);
 }
+
+#[test]
+fn test_tier2_numeric_show_native() {
+    run_native_test("tier2_functions/numeric_show", Profile::Default);
+}
+
+#[test]
+fn test_tier2_printf_basic_native() {
+    run_native_test("tier2_functions/printf_basic", Profile::Default);
+}

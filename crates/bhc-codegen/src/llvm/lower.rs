@@ -7892,6 +7892,146 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "sortBy" => self.lower_builtin_sort_by(args[0], args[1]),
             "group" => self.lower_builtin_group(args[0]),
             "delete" => self.lower_builtin_delete(args[0], args[1]),
+            // Numeric: `showFFloat digits x s`, `showHex n s`, `showOct n s`
+            // (they were stubs that aborted).
+            "showFFloat" | "Numeric.showFFloat" => {
+                let digits = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no digits".to_string()))?;
+                let digits = self.value_to_ptr(digits)?;
+                let x = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no value".to_string()))?;
+                let x = self.coerce_float_operand(args[1], x)?;
+                let x = self.coerce_to_f64(x.into())?;
+                let suffix = self
+                    .lower_expr(args[2])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no suffix".to_string()))?;
+                let suffix = self.value_to_ptr(suffix)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f64_type = self.type_mapper().f64_type();
+                let f = match self.module.get_function("bhc_show_ffloat") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_show_ffloat",
+                        ptr_type
+                            .fn_type(&[ptr_type.into(), f64_type.into(), ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[digits.into(), x.into(), suffix.into()], "show_ffloat")
+                    .map_err(|e| CodegenError::Internal(format!("showFFloat: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            // printf's desugaring (hir-to-core): `%.Nf` and field widths.
+            "$printf_fixed" => {
+                let digits = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("printf: no precision".to_string()))?;
+                let digits = self.coerce_to_int(digits)?;
+                let x = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("printf: no value".to_string()))?;
+                let x = self.coerce_float_operand(args[1], x)?;
+                let x = self.coerce_to_f64(x.into())?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_printf_fixed") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_printf_fixed",
+                        ptr_type.fn_type(
+                            &[
+                                self.type_mapper().i64_type().into(),
+                                self.type_mapper().f64_type().into(),
+                            ],
+                            false,
+                        ),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[digits.into(), x.into()], "printf_fixed")
+                    .map_err(|e| CodegenError::Internal(format!("printf fixed: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            "$printf_pad" => {
+                let i64_type = self.type_mapper().i64_type();
+                let mut ints = Vec::new();
+                for a in &args[..3] {
+                    let v = self.lower_expr(a)?.ok_or_else(|| {
+                        CodegenError::Internal("printf pad: no value".to_string())
+                    })?;
+                    ints.push(self.coerce_to_int(v)?);
+                }
+                let text = self
+                    .lower_expr(args[3])?
+                    .ok_or_else(|| CodegenError::Internal("printf pad: no text".to_string()))?;
+                let text = self.value_to_ptr(text)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_printf_pad") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_printf_pad",
+                        ptr_type.fn_type(
+                            &[
+                                i64_type.into(),
+                                i64_type.into(),
+                                i64_type.into(),
+                                ptr_type.into(),
+                            ],
+                            false,
+                        ),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(
+                        f,
+                        &[ints[0].into(), ints[1].into(), ints[2].into(), text.into()],
+                        "printf_pad",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("printf pad: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
+                let radix = if name.ends_with("showOct") { 8 } else { 16 };
+                let n = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("showHex: no value".to_string()))?;
+                let n = self.coerce_to_int(n)?;
+                let suffix = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("showHex: no suffix".to_string()))?;
+                let suffix = self.value_to_ptr(suffix)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let f = match self.module.get_function("bhc_show_radix") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_show_radix",
+                        ptr_type
+                            .fn_type(&[i64_type.into(), i64_type.into(), ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(
+                        f,
+                        &[
+                            n.into(),
+                            i64_type.const_int(radix, false).into(),
+                            suffix.into(),
+                        ],
+                        "show_radix",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("showHex: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
             "union" => self.lower_builtin_union(args[0], args[1]),
             // `xs \\ ys` at boxed elements (strings, derived Eq): the RTS
             // difference under an equality closure. Other element types keep
@@ -65123,6 +65263,10 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "nub" => Some(1),
         "delete" => Some(2),
         "union" => Some(2),
+        "showFFloat" | "Numeric.showFFloat" => Some(3),
+        "$printf_fixed" => Some(2),
+        "$printf_pad" => Some(4),
+        "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => Some(2),
         "\\\\" => Some(2),
         "intersect" => Some(2),
         "sort" => Some(1),

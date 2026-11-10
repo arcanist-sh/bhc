@@ -28,6 +28,16 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `import Data.Maybe` / `import Data.Either` keep the types of `lefts`,
+  `rights`, `partitionEithers`, `catMaybes`, `mapMaybe` and the rest;
+  `print (lefts es)` printed addresses.
+- `Data.Map.foldrWithKey`, `foldlWithKey`, `mapWithKey` and
+  `filterWithKey` have their real types; their results printed as
+  addresses.
+- `replicateM` works in any monad: in the list monad it is every
+  combination (`replicateM 2 "ab"` is `["aa","ab","ba","bb"]`); it was
+  typed at `IO` and printed nothing.
+
 - `nub`, `group`, `elem`, `notElem`, `delete`, `union` and `intersect` at
   strings and at types with a derived `Eq` compare elements by content;
   they compared addresses (`nub ["a", "b", "a"]` kept both `"a"`s).

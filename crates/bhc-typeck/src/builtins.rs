@@ -1119,16 +1119,19 @@ impl Builtins {
                 )
             }),
             ("replicateM", {
-                // replicateM :: Int -> IO a -> IO [a]
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
+                // replicateM :: Monad m => Int -> m a -> m [a]
+                // In any monad, not only IO: at a list it is every
+                // combination (`replicateM 2 "ab"`).
+                let m = TyVar::new(
+                    BUILTIN_TYVAR_M,
+                    Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                 );
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let io_list_a = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(list_a));
+                let m_list_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_a));
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.int_ty.clone(), Ty::fun(io_a, io_list_a)),
+                    vec![m, a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(m_a, m_list_a)),
                 )
             }),
             ("replicateM_", {
@@ -7064,12 +7067,19 @@ impl Builtins {
                 Box::new(Ty::Con(self.io_con.clone())),
                 Box::new(list_a.clone()),
             );
+            let m = TyVar::new(
+                BUILTIN_TYVAR_M,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+            let m_list_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_a.clone()));
+            let _ = io_list_a2;
             env.register_value(
                 DefId::new(11003),
                 Symbol::intern("replicateM"),
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.int_ty.clone(), Ty::fun(io_a.clone(), io_list_a2)),
+                    vec![m, a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(m_a, m_list_a)),
                 ),
             );
 

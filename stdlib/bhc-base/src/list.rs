@@ -497,6 +497,31 @@ pub unsafe extern "C" fn bhc_list_intersect_by(
     vec_to_list(&result)
 }
 
+/// `sequence` in the list monad: every list made of one element from each
+/// list, in order (`sequence [[1, 2], [3]] = [[1, 3], [2, 3]]`).
+///
+/// # Safety
+///
+/// `lists` must be a BHC list of BHC lists.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_sequence(lists: *mut u8) -> *mut u8 {
+    let mut combos: Vec<Vec<*mut u8>> = vec![Vec::new()];
+    for list in list_to_vec(lists) {
+        let elems = list_to_vec(bhc_prelude::force_heap_object(list));
+        let mut next = Vec::with_capacity(combos.len() * elems.len());
+        for combo in &combos {
+            for &e in &elems {
+                let mut c = combo.clone();
+                c.push(e);
+                next.push(c);
+            }
+        }
+        combos = next;
+    }
+    let rows: Vec<*mut u8> = combos.iter().map(|c| vec_to_list(c)).collect();
+    vec_to_list(&rows)
+}
+
 /// Whether `val` is in `list` under an equality closure (`elem` at a type
 /// whose values are boxed). Returns 1 or 0.
 ///

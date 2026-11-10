@@ -7749,6 +7749,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "mapM_" => self.lower_builtin_mapm_(args[0], args[1]),
             "forM" => self.lower_builtin_mapm(args[1], args[0]),
             "forM_" => self.lower_builtin_mapm_(args[1], args[0]),
+            // Typed `[[a]] -> [[a]]`: the list monad's `sequence`, every
+            // combination of one element from each list.
+            "sequence"
+                if matches!(&self.current_builtin_ty, Ty::Fun(a, r)
+                    if matches!(a.as_ref(), Ty::List(e) if matches!(e.as_ref(), Ty::List(_)))
+                        && matches!(r.as_ref(), Ty::List(e) if matches!(e.as_ref(), Ty::List(_)))) =>
+            {
+                let lists = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("sequence: no list".to_string()))?;
+                let lists = self.value_to_ptr(lists)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_list_sequence") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_list_sequence",
+                        ptr_type.fn_type(&[ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[lists.into()], "list_sequence")
+                    .map_err(|e| CodegenError::Internal(format!("sequence: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
             "sequence" => self.lower_builtin_sequence(args[0]),
             "sequence_" => self.lower_builtin_sequence_(args[0]),
             "traverse" => self.lower_builtin_traverse(args[0], args[1]),

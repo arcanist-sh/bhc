@@ -5564,13 +5564,60 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // The key-aware traversals, at their real types. Permissive
+                // (`a -> b`), `M.foldrWithKey (\k v acc -> k ++ show v ++
+                // acc) "" m` had no result type and printed an address.
+                "Data.Map.foldrWithKey"
+                | "Data.Map.foldlWithKey"
+                | "Data.Map.mapWithKey"
+                | "Data.Map.filterWithKey" => {
+                    let map_con = TyCon::new(
+                        Symbol::intern("Map"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    let k = TyVar::new_star(0xFFFF_0003);
+                    let v = a.clone();
+                    let r = b.clone();
+                    let map_of = |key: &TyVar, val: Ty| {
+                        Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(map_con.clone())),
+                                Box::new(Ty::Var(key.clone())),
+                            )),
+                            Box::new(val),
+                        )
+                    };
+                    let (kt, vt, rt) = (Ty::Var(k.clone()), Ty::Var(v.clone()), Ty::Var(r.clone()));
+                    let body = match name {
+                        // (k -> v -> b -> b) -> b -> Map k v -> b
+                        "Data.Map.foldrWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), Ty::fun(rt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (b -> k -> v -> b) -> b -> Map k v -> b
+                        "Data.Map.foldlWithKey" => Ty::fun(
+                            Ty::fun(rt.clone(), Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (k -> v -> w) -> Map k v -> Map k w
+                        "Data.Map.mapWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone())),
+                            Ty::fun(map_of(&k, vt), map_of(&k, rt)),
+                        ),
+                        // (k -> v -> Bool) -> Map k v -> Map k v
+                        _ => Ty::fun(
+                            Ty::fun(kt, Ty::fun(vt.clone(), self.builtins.bool_ty.clone())),
+                            Ty::fun(map_of(&k, vt.clone()), map_of(&k, vt)),
+                        ),
+                    };
+                    Scheme::poly(vec![v, r, k], body)
+                }
                 "Data.Map.differenceWith"
                 | "Data.Map.unionWithKey"
-                | "Data.Map.mapWithKey"
                 | "Data.Map.mapKeys"
-                | "Data.Map.filterWithKey"
-                | "Data.Map.foldrWithKey"
-                | "Data.Map.foldlWithKey"
                 | "Data.Map.keysSet"
                 | "Data.Map.mapMaybeWithKey" => {
                     // Permissive fallback: a -> b
@@ -8107,6 +8154,22 @@ impl TyCtxt {
                         // `a -> a -> a` (shared with Data.Set), which keeps
                         // the operands' type on the result.
                         | "\\\\"
+                        // Data.Maybe / Data.Either re-exports, exact schemes.
+                        // Typed fresh, `print (lefts es)` printed addresses.
+                        | "lefts"
+                        | "rights"
+                        | "partitionEithers"
+                        | "either"
+                        | "catMaybes"
+                        | "mapMaybe"
+                        | "fromMaybe"
+                        | "listToMaybe"
+                        | "maybeToList"
+                        | "isJust"
+                        | "isNothing"
+                        | "maybe"
+                        // `import Control.Monad (replicateM)`, in any monad.
+                        | "replicateM"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))

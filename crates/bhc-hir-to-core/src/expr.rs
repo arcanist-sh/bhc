@@ -5742,6 +5742,44 @@ fn try_lower_monadic_traversal(
         },
         _ => return Ok(None),
     };
+    // `replicateM n xs` in the list monad is `sequence (replicate n xs)`:
+    // every combination. The traversal below runs actions, and at a list it
+    // produced nothing (`print (replicateM 2 "ab")` printed no line).
+    if args.len() == 2
+        && ctx
+            .lookup_var(head_ref.def_id)
+            .is_some_and(|v| v.name.as_str() == "replicateM")
+        && matches!(
+            ctx.resolved_expr_ty_opt(args[1].span())
+                .map(|t| crate::context::canonical_list_spelling(&t)),
+            Some(Ty::List(_))
+        )
+    {
+        let n = lower_expr(ctx, args[0])?;
+        let xs = lower_expr(ctx, args[1])?;
+        let app =
+            |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+        let replicated = app(app(nullary_var("replicate", span), n), xs);
+        // Typed `[[a]] -> [[a]]`, which codegen reads as the list monad's
+        // `sequence` (the cartesian product); untyped it is IO's.
+        let elem = match ctx
+            .resolved_expr_ty_opt(args[1].span())
+            .map(|t| crate::context::canonical_list_spelling(&t))
+        {
+            Some(Ty::List(e)) => *e,
+            _ => Ty::Error,
+        };
+        let lists = Ty::List(Box::new(Ty::List(Box::new(elem))));
+        let sequence = core::Expr::Var(
+            Var {
+                name: Symbol::intern("sequence"),
+                id: VarId::new(0),
+                ty: Ty::fun(lists.clone(), lists),
+            },
+            span,
+        );
+        return Ok(Some(app(sequence, replicated)));
+    }
     lower_monadic_traversal_spine(ctx, head_ref, args, span)
 }
 

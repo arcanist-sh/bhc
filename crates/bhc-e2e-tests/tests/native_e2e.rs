@@ -2588,3 +2588,18 @@ fn test_tier2_list_difference_native() {
     }
     run_native_test("tier2_functions/list_difference", Profile::Default);
 }
+
+#[test]
+fn test_tier2_maybe_either_reexports_native() {
+    run_native_test("tier2_functions/maybe_either_reexports", Profile::Default);
+}
+
+#[test]
+fn test_tier2_map_key_traversals_native() {
+    run_native_test("tier2_functions/map_key_traversals", Profile::Default);
+}
+
+#[test]
+fn test_tier2_replicate_m_list_native() {
+    run_native_test("tier2_functions/replicate_m_list", Profile::Default);
+}

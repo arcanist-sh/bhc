@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A local binding without a signature that converts a number,
+  `where w = fromInteger n` used as an `Int`, takes the type its use gives
+  it (the monomorphism restriction); the conversion compiled as the
+  identity and `w + 1` added 1 to the `Integer`'s address.
+
 - `import M (x)` warns when `M` does not export `x`
   (``warning: module `M` does not export `x` ``); the name was dropped
   silently. GHC rejects this. It stays a warning because some interfaces

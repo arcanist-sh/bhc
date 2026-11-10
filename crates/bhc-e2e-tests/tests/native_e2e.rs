@@ -2542,3 +2542,8 @@ fn test_tier3_mask_restore_direct_native() {
 fn test_tier2_infix_constructor_lhs_native() {
     run_native_test("tier2_functions/infix_constructor_lhs", Profile::Default);
 }
+
+#[test]
+fn test_tier2_local_numeric_conversion_native() {
+    run_native_test("tier2_functions/local_numeric_conversion", Profile::Default);
+}

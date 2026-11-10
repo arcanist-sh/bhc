@@ -118,6 +118,10 @@ pub struct TyCtxt {
     /// The builtin `$`, so a local binding's uses can tell `f $ x` (an
     /// application of `f`) from `f` passed as a value.
     pub(crate) dollar_def: Option<DefId>,
+    /// The builtin numeric conversions (`fromInteger`, `fromIntegral`,
+    /// `realToFrac`, `truncate`, …), whose result type a local value binding
+    /// must not generalize (see the monomorphism restriction in `infer`).
+    pub(crate) numeric_conversion_defs: rustc_hash::FxHashSet<DefId>,
 
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
@@ -246,6 +250,7 @@ impl TyCtxt {
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
             dollar_def: None,
+            numeric_conversion_defs: rustc_hash::FxHashSet::default(),
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -2473,6 +2478,22 @@ impl TyCtxt {
         if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
             self.dollar_def = Some(*id);
         }
+        self.numeric_conversion_defs = defs
+            .iter()
+            .filter(|(_, d)| {
+                matches!(
+                    d.name.as_str(),
+                    "fromInteger"
+                        | "fromIntegral"
+                        | "realToFrac"
+                        | "truncate"
+                        | "round"
+                        | "floor"
+                        | "ceiling"
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
 
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {

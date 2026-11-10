@@ -28,6 +28,11 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- `fromIntegral` from a machine integer to `Double`/`Float` converts the
+  value itself. It relied on a float operator seeing the call, so bound
+  first (`where x = fromIntegral k`, then `x / 4`), the integer's bits were
+  read as a double and printed `1.0e-323`.
+
 - `reads` at an enumeration with derived `Read` parses a constructor name
   and returns the rest of the input: `reads "Green rest" :: [(Color,
   String)]` is `[(Green," rest")]`. It read an `Int` and returned `[]`, so

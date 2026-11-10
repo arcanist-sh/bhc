@@ -7513,6 +7513,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromIntegral" | "fromInteger" if self.is_integer_to_floating() => {
                 self.lower_integer_to_floating(args[0])
             }
+            // A machine integer to Double/Float converts here. Lowered as the
+            // identity, it only converted when a float operator saw the
+            // `fromIntegral` itself; bound first (`where x = fromIntegral k`,
+            // then `x / 4`), the integer's bits were read as a double.
+            "fromIntegral" if self.is_machine_int_to_floating() => {
+                let v = self.lower_expr(args[0])?.ok_or_else(|| {
+                    CodegenError::Internal("fromIntegral: no argument value".to_string())
+                })?;
+                let i = self.coerce_to_int(v)?;
+                let f = self
+                    .builder()
+                    .build_signed_int_to_float(i, self.type_mapper().f64_type(), "int_to_double")
+                    .map_err(|e| CodegenError::Internal(format!("fromIntegral: {e:?}")))?;
+                Ok(Some(f.into()))
+            }
             "fromIntegral" | "toInteger" if self.is_machine_int_to_integer() => {
                 let v = self.lower_expr(args[0])?.ok_or_else(|| {
                     CodegenError::Internal("toInteger: no argument value".to_string())
@@ -49821,6 +49836,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
         matches!(t, Ty::Fun(a, r)
             if self.is_integer_type(a)
+                && matches!(r.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")))
+    }
+
+    /// Whether this `fromIntegral` is resolved at a machine integer (`Int`,
+    /// `Word`, the sized ones) to `Double`/`Float`.
+    fn is_machine_int_to_floating(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        matches!(t, Ty::Fun(a, r)
+            if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(),
+                "Int" | "Word" | "Int8" | "Int16" | "Int32" | "Int64"
+                    | "Word8" | "Word16" | "Word32" | "Word64"))
                 && matches!(r.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")))
     }
 

@@ -255,10 +255,19 @@ fn type_equality_operator(
     // type is some other expression's — `(== '\n')` came out `Text -> Text ->
     // Bool` and crashed every markdown read in `anyLine`.
     let is_text = |o: &hir::Expr| matches!(ctx.resolved_expr_ty_opt(o.span()), Some(Ty::Con(c)) if c.name.as_str() == "Text");
-    if !(is_text(a) && is_text(x)) {
+    let t = if is_text(a) && is_text(x) {
+        Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star))
+    } else if let Some(list) = ground_list_operands(ctx, a, x) {
+        // Likewise a list (`String` included) that both operands are
+        // resolved at. The operator's span is the whole expression's, so
+        // where the type recorded there is the result `Bool`, the operator
+        // kept `t -> t -> Bool` and codegen compared two pattern-bound
+        // strings by address (`TagOpen n ~== TagOpen p` in a function with a
+        // guarded clause, under the eager IO model).
+        list
+    } else {
         return e;
-    }
-    let t = Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star));
+    };
     let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
     match e {
         core::Expr::App(g, rhs, sp) => match *g {
@@ -283,6 +292,22 @@ fn type_equality_operator(
         },
         other => other,
     }
+}
+
+/// The list type both operands of an (in)equality are resolved at, when it
+/// is the same ground type on each side (`String` spelled as `[Char]`).
+fn ground_list_operands(ctx: &LowerContext, a: &hir::Expr, x: &hir::Expr) -> Option<Ty> {
+    let list_of = |o: &hir::Expr| -> Option<Ty> {
+        match ctx.resolved_expr_ty_opt(o.span())? {
+            Ty::Con(c) if c.name.as_str() == "String" => Some(Ty::List(Box::new(Ty::Con(
+                TyCon::new(Symbol::intern("Char"), Kind::Star),
+            )))),
+            t @ Ty::List(_) if !has_type_variables(&t) => Some(t),
+            _ => None,
+        }
+    };
+    let lhs = list_of(a)?;
+    (list_of(x)? == lhs).then_some(lhs)
 }
 
 fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {

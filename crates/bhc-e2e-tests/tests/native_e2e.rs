@@ -2537,3 +2537,8 @@ fn test_tier2_maybe_show_results_native() {
 fn test_tier3_mask_restore_direct_native() {
     run_native_test("tier3_io/mask_restore_direct", Profile::Default);
 }
+
+#[test]
+fn test_tier2_infix_constructor_lhs_native() {
+    run_native_test("tier2_functions/infix_constructor_lhs", Profile::Default);
+}

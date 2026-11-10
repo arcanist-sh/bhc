@@ -1451,6 +1451,36 @@ x <&&> y = x && y
     }
 
     #[test]
+    fn test_top_level_infix_definition_with_constructor_operand() {
+        // tagsoup's `~==`: the left operand is a constructor pattern, at top
+        // level (it was "unexpected constructor, expected declaration").
+        let src = r#"module Test where
+
+TagOpen n atts ~== TagOpen p patts = n == p && present
+  where present = length atts >= length patts
+_ ~== _ = False
+
+Box a `plus` Box b = Box (a + b)
+
+Box seven = Box 7
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        let names: Vec<String> = module
+            .expect("module")
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::FunBind(f) => Some(f.name.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.iter().any(|n| n == "~=="), "{names:?}");
+        assert!(names.iter().any(|n| n == "plus"), "{names:?}");
+        assert!(names.iter().any(|n| n == "$patbind"), "{names:?}");
+    }
+
+    #[test]
     fn test_primed_identifier_case_pattern() {
         // Test primed identifiers (f', xs') in case patterns
         let src = r#"module Test where

@@ -805,6 +805,10 @@ impl<'src> Parser<'src> {
             | TokenKind::IntLit(_)
             | TokenKind::CharLit(_)
             | TokenKind::StringLit(_) => self.parse_value_decl_with_doc(doc),
+            // An infix definition whose left operand is a constructor
+            // pattern, `TagOpen n as ~== TagOpen p ps = …`, or a top-level
+            // pattern binding `Box x = …`.
+            TokenKind::ConId(_) | TokenKind::QualConId(_, _) => self.parse_value_decl_with_doc(doc),
             // Top-level Template Haskell declaration splice: `$(deriver ... ''T)`.
             TokenKind::Operator(sym) if sym.as_str() == "$" => self.parse_decl_splice(),
             _ => Err(ParseError::Unexpected {

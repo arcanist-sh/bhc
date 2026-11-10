@@ -28,6 +28,12 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- A top-level infix definition whose left operand is a constructor pattern,
+  `TagOpen n as ~== TagOpen p ps = …` (tagsoup's `~==`), parses; it was
+  "unexpected constructor, expected declaration". Under `BHC_IO_MODEL=eager`,
+  `==` on two pattern-bound `String`s in a function with a guarded clause
+  compared addresses; it is now typed from its operands.
+
 - `mask $ \restore -> …` and `uninterruptibleMask` under
   `BHC_IO_MODEL=eager`: the body was called with its arguments swapped, so
   it ran twice and `restore` crashed. It now runs once and `restore` returns

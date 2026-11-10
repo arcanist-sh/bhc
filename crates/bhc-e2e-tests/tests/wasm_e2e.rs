@@ -1069,3 +1069,9 @@ fn test_tier3_monad_poly_recursive_bind_wasm() {
 fn test_tier2_maybe_show_results_wasm() {
     run_wasm_test("tier2_functions/maybe_show_results", Profile::Default);
 }
+
+// A top-level infix definition whose left operand is a constructor pattern.
+#[test]
+fn test_tier2_infix_constructor_lhs_wasm() {
+    run_wasm_test("tier2_functions/infix_constructor_lhs", Profile::Default);
+}

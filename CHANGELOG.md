@@ -34,6 +34,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Ranges over a derived `Enum`: `[x ..]`, `[x, y ..]` and `[x, y .. z]`
+  step through the constructors (they were empty, one element, or a
+  crash).
+- `minBound`/`maxBound` at `Int`, the sized `Int`s and `Char` are their
+  real bounds; with one user `Bounded` type in the program,
+  `maxBound :: Int` was that type's last constructor.
+- `round` rounds half to even, as Haskell does (`round 2.5` is 2).
+
 - `import Data.Maybe` / `import Data.Either` keep the types of `lefts`,
   `rights`, `partitionEithers`, `catMaybes`, `mapMaybe` and the rest;
   `print (lefts es)` printed addresses.

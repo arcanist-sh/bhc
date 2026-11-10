@@ -1,0 +1,12 @@
+[Wed,Thu,Fri,Sat,Sun]
+[Mon,Tue,Wed,Thu]
+[Mon,Wed,Fri]
+[Mon,Wed,Fri,Sun]
+[Sun,Fri,Wed,Mon]
+[Sat,Fri,Thu,Wed,Tue]
+[Mon,Tue,Wed,Thu,Fri,Sat,Sun]
+(Tue,Sat,2,Fri)
+(9223372036854775807,-9223372036854775808)
+9223372036854775808
+1114111
+[0,2,2,4,-2]

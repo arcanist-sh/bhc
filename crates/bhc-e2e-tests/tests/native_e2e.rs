@@ -2613,3 +2613,8 @@ fn test_tier2_numeric_show_native() {
 fn test_tier2_printf_basic_native() {
     run_native_test("tier2_functions/printf_basic", Profile::Default);
 }
+
+#[test]
+fn test_tier2_enum_ranges_bounds_round_native() {
+    run_native_test("tier2_functions/enum_ranges_bounds_round", Profile::Default);
+}

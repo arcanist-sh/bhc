@@ -34248,10 +34248,94 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `enumFrom` - [n..] (infinite list, capped at 10000 elements as fallback).
+    /// `[x ..]`, `[x, y ..]` and `[x, y .. z]` at an enumeration with a
+    /// derived `Enum` (every constructor nullary): the constructors whose tags
+    /// step from `x`'s, up to the last constructor (or down to the first) when
+    /// no end is given. The integer paths these took otherwise produced an
+    /// empty list, `[x]`, or a crash. `None` when the type is not such an
+    /// enumeration.
+    fn lower_user_enum_range(
+        &mut self,
+        from_expr: &Expr,
+        then_expr: Option<&Expr>,
+        to_expr: Option<&Expr>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let Some(type_name) = self.infer_adt_type_from_expr(from_expr) else {
+            return Ok(None);
+        };
+        if !self.derived_from_enum_fns.contains_key(&type_name) {
+            return Ok(None);
+        }
+        let metas: Vec<&ConstructorMeta> = self
+            .constructor_metadata
+            .values()
+            .filter(|m| m.type_name.as_deref() == Some(type_name.as_str()))
+            .collect();
+        if metas.is_empty() || metas.iter().any(|m| m.arity != 0) {
+            return Ok(None);
+        }
+        let last_tag = metas.iter().map(|m| m.tag).max().unwrap_or(0);
+        let i64_ty = self.type_mapper().i64_type();
+        let tag_of = |this: &mut Self, e: &Expr| -> CodegenResult<IntValue<'ctx>> {
+            let v = this
+                .lower_expr(e)?
+                .ok_or_else(|| CodegenError::Internal("enum range: no value".to_string()))?;
+            this.call_derived_from_enum(&type_name, v)
+        };
+        let from = tag_of(self, from_expr)?;
+        let (then, has_then) = match then_expr {
+            Some(e) => (tag_of(self, e)?, i64_ty.const_int(1, false)),
+            None => (from, i64_ty.const_zero()),
+        };
+        let to = match to_expr {
+            Some(e) => tag_of(self, e)?,
+            None => {
+                // No end: the last constructor going up, the first going down.
+                let last = i64_ty.const_int(u64::from(last_tag), false);
+                if then_expr.is_none() {
+                    last
+                } else {
+                    let down = self
+                        .builder()
+                        .build_int_compare(inkwell::IntPredicate::SLT, then, from, "enum_down")
+                        .map_err(|e| CodegenError::Internal(format!("enum range: {e:?}")))?;
+                    self.builder()
+                        .build_select(down, i64_ty.const_zero(), last, "enum_end")
+                        .map_err(|e| CodegenError::Internal(format!("enum range: {e:?}")))?
+                        .into_int_value()
+                }
+            }
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let f = match self.module.get_function("bhc_enum_ctor_range") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_enum_ctor_range",
+                ptr_type.fn_type(
+                    &[i64_ty.into(), i64_ty.into(), i64_ty.into(), i64_ty.into()],
+                    false,
+                ),
+            ),
+        };
+        Ok(self
+            .builder()
+            .build_call(
+                f,
+                &[from.into(), then.into(), has_then.into(), to.into()],
+                "enum_range",
+            )
+            .map_err(|e| CodegenError::Internal(format!("enum range call: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
+    }
+
     fn lower_builtin_enum_from(
         &mut self,
         from_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, None, None)? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(1000505, &[from_expr], "enum_from_integer");
         }
@@ -34286,6 +34370,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         from_expr: &Expr,
         then_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, Some(then_expr), None)? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(
                 1000506,
@@ -34316,6 +34403,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         then_expr: &Expr,
         to_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, Some(then_expr), Some(to_expr))? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(
                 1000508,

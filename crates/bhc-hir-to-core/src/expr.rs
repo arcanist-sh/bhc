@@ -1249,7 +1249,36 @@ fn lower_function_arrow_combinator(
     ))
 }
 
+/// `minBound`/`maxBound` resolved at a builtin bounded type, as the literal.
+/// Codegen answers a bare `maxBound` with the program's only user `Bounded`
+/// type when there is one, so `maxBound :: Int` printed that type's last
+/// constructor.
+fn builtin_bound_literal(ctx: &LowerContext, def_ref: &DefRef) -> Option<core::Expr> {
+    let name = ctx.lookup_var(def_ref.def_id)?.name;
+    let is_max = match name.as_str() {
+        "maxBound" => true,
+        "minBound" => false,
+        _ => return None,
+    };
+    let ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
+    let Ty::Con(c) = &ty else {
+        return None;
+    };
+    let lit = match c.name.as_str() {
+        "Int" | "Int64" => Literal::Int(if is_max { i64::MAX } else { i64::MIN }),
+        "Int32" => Literal::Int(i64::from(if is_max { i32::MAX } else { i32::MIN })),
+        "Int16" => Literal::Int(i64::from(if is_max { i16::MAX } else { i16::MIN })),
+        "Int8" => Literal::Int(i64::from(if is_max { i8::MAX } else { i8::MIN })),
+        "Char" => Literal::Char(if is_max { char::MAX } else { '\0' }),
+        _ => return None,
+    };
+    Some(core::Expr::Lit(lit, ty, def_ref.span))
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
+    if let Some(bound) = builtin_bound_literal(ctx, def_ref) {
+        return Ok(bound);
+    }
     let mut expr = lower_var_inner(ctx, def_ref)?;
     // The builtin `read` is dispatched on its result type in codegen
     // (`read "3.25" :: Double`). Its own type is `String -> a`, so give the

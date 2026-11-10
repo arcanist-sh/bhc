@@ -526,6 +526,44 @@ pub unsafe extern "C" fn bhc_printf_pad(
     }
 }
 
+/// A range of an enumeration's nullary constructors (each a tag box) for
+/// `[x ..]`, `[x, y ..]` and `[x, y .. z]`: tags from `from`, stepping by
+/// `then - from` (1 without `then`), while they stay within `to`.
+///
+/// # Safety
+///
+/// Always safe; `unsafe` only for the list allocation.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_enum_ctor_range(
+    from: i64,
+    then: i64,
+    has_then: i64,
+    to: i64,
+) -> *mut u8 {
+    let step = if has_then != 0 { then - from } else { 1 };
+    let mut tags = Vec::new();
+    let mut t = from;
+    if step == 0 {
+        // `[x, x ..]` repeats `x` forever; give the one element rather than
+        // hang building an infinite list eagerly.
+        tags.push(t);
+    } else {
+        while (step > 0 && t <= to) || (step < 0 && t >= to) {
+            tags.push(t);
+            t += step;
+        }
+    }
+    unsafe {
+        let mut list = alloc_nil();
+        for &tag in tags.iter().rev() {
+            let con = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(8, 8));
+            *(con as *mut i64) = tag;
+            list = alloc_cons(con, list);
+        }
+        list
+    }
+}
+
 /// `Numeric.showHex n suffix` / `showOct`: `radix` is 16 or 8.
 ///
 /// # Safety
@@ -1969,10 +2007,10 @@ pub extern "C" fn bhc_truncate_float(a: f32) -> i64 {
     a.trunc() as i64
 }
 
-/// Round Float to Int
+/// Round Float to Int, half to even as Haskell's `round` (`round 2.5 == 2`).
 #[no_mangle]
 pub extern "C" fn bhc_round_float(a: f32) -> i64 {
-    a.round() as i64
+    a.round_ties_even() as i64
 }
 
 /// Ceiling of Float
@@ -2207,10 +2245,11 @@ pub extern "C" fn bhc_truncate_double(a: f64) -> i64 {
     a.trunc() as i64
 }
 
-/// Round Double to Int
+/// Round Double to Int, half to even as Haskell's `round` (`round 2.5 == 2`,
+/// `round 3.5 == 4`); Rust's `round` goes half away from zero.
 #[no_mangle]
 pub extern "C" fn bhc_round_double(a: f64) -> i64 {
-    a.round() as i64
+    a.round_ties_even() as i64
 }
 
 /// Ceiling of Double

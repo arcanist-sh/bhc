@@ -2144,6 +2144,11 @@ fn test_tier3_read_derived_and_compound_native() {
 }
 
 #[test]
+fn test_tier3_set_map_and_filters_native() {
+    run_native_test("tier3_io/set_map_and_filters", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

@@ -41,6 +41,13 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `Data.Set`'s `map`, `insert`, `delete`, `union`, `intersection`,
+  `difference`, `isSubsetOf`, `isProperSubsetOf`, `deleteMin`, `deleteMax`
+  and `empty` had permissive types (`map :: (a -> b) -> a -> b`), so
+  `S.map (+ 1) s` was rejected with `No instance for Num (Set Int)` (#102).
+- `Set.filter`, `Map.filter` and `Map.filterWithKey` with a comparison as the
+  predicate (`S.filter (> 2) s`) crashed: the result of a comparison was
+  read as a `Bool` object.
 - `read`, `readMaybe` and `reads` at a data type that derives `Read`
   (enumerations, constructors with fields, records, recursive and
   parameterized types, newtypes), at tuples, nested lists, `Maybe`, `Either`,

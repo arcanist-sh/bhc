@@ -2570,6 +2570,17 @@ impl TyCtxt {
                 } else {
                     raw_name
                 };
+            // `Set e`, as `Data.Set.fromList` and the other Set schemes
+            // below spell it.
+            let set_of = |elem: Ty| {
+                Ty::App(
+                    Box::new(Ty::Con(TyCon::new(
+                        Symbol::intern("Set"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    ))),
+                    Box::new(elem),
+                )
+            };
             let scheme = match name {
                 // Arithmetic operators
                 // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
@@ -5646,7 +5657,7 @@ impl TyCtxt {
                     )
                 }
                 // Data.Set operations
-                "Data.Set.empty" => Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
+                "Data.Set.empty" => Scheme::poly(vec![a.clone()], set_of(Ty::Var(a.clone()))),
                 "Data.Set.fromList" => {
                     // fromList :: Ord a => [a] -> Set a
                     let set_con = TyCon::new(
@@ -5758,36 +5769,42 @@ impl TyCtxt {
                         ),
                     )
                 }
-                "Data.Set.insert" | "Data.Set.delete" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
-                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.Set.deleteMin" | "Data.Set.deleteMax" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                ),
+                // These were permissive (`insert :: a -> b -> b`, `map ::
+                // (a -> b) -> a -> b`): with the set standing where the
+                // element should, `S.map (+ 1) s` asked for `Num (Set Int)`.
+                "Data.Set.insert" | "Data.Set.delete" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(set_a.clone(), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            set_a.clone(),
+                            Ty::fun(set_a, self.builtins.bool_ty.clone()),
+                        ),
+                    )
+                }
+                "Data.Set.deleteMin" | "Data.Set.deleteMax" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(vec![a.clone()], Ty::fun(set_a.clone(), set_a))
+                }
                 "Data.Set.map" => Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(set_of(Ty::Var(a.clone())), set_of(Ty::Var(b.clone()))),
                     ),
                 ),
                 "Data.Set.filter" => {

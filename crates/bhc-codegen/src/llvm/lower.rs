@@ -43345,7 +43345,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero tag)
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -43386,7 +43393,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -43947,7 +43954,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -43985,7 +43999,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -44584,7 +44598,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero tag)
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -44625,7 +44646,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -47211,7 +47232,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
         let is_true = self
             .builder()
             .build_int_compare(

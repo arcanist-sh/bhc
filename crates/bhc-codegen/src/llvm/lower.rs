@@ -8719,6 +8719,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000422, "bs_read_file")
             }
             "Data.ByteString.writeFile" => self.lower_builtin_bs_write_file(args[0], args[1]),
+            // The bytes as they are, to stdout; `putStrLn` adds a newline.
+            "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => {
+                let bytes = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("bs putStr: no value".to_string()))?;
+                let bytes = self.value_to_ptr(bytes)?;
+                let bytes = self.build_force(bytes.into())?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let put = match self.module.get_function("bhc_bs_put") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_bs_put",
+                        self.llvm_ctx
+                            .void_type()
+                            .fn_type(&[ptr_type.into(), i64_type.into()], false),
+                    ),
+                };
+                let newline = u64::from(name == "Data.ByteString.putStrLn");
+                self.builder()
+                    .build_call(
+                        put,
+                        &[bytes.into(), i64_type.const_int(newline, false).into()],
+                        "",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("bs putStr: {e:?}")))?;
+                Ok(None)
+            }
 
             // ByteArray operations (used by Data.ByteString internals)
             "Data.ByteString.bhc_bytearray_malloc" => {
@@ -65998,6 +66026,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.ByteString.isSuffixOf" => Some(2),
         "Data.ByteString.readFile" => Some(1),
         "Data.ByteString.writeFile" => Some(2),
+        "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => Some(1),
 
         // Data.Text.Lazy operations
         "Data.Text.Lazy.empty" => Some(0),

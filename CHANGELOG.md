@@ -8,6 +8,8 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Added
 
+- `putStr` and `putStrLn` for `Data.ByteString` and `Data.ByteString.Char8`
+  (the bytes as they are, to stdout), and `map` for both.
 - `Numeric.showFFloat`, `showHex` and `showOct`, which aborted as stubs.
   `showFFloat` rounds the shortest decimal digits as GHC does (half to even
   when exactly half).
@@ -41,6 +43,15 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `Data.ByteString.Char8`: every function aborted as an unimplemented stub.
+  `pack`, `unpack`, `length`, `null`, `empty`, `singleton`, `append`, `cons`,
+  `snoc`, `head`, `last`, `tail`, `init`, `take`, `drop`, `reverse`, `elem`,
+  `index`, `isPrefixOf`, `isSuffixOf`, `readFile` and `writeFile` are the
+  strict ByteString primitives at `Char`; `BC.putStrLn` was not exported
+  (#109).
+- `==` and `/=` on two ByteStrings compared their handles (always unequal),
+  and `show`/`print` of one printed the handle's contents.
+- `BC.snoc` had `cons`'s argument order and `BC.index` answered an `Int`.
 - An exception inside a container was shown as an address: `print r` for
   `r :: Either ArithException Int` printed `Left 4387778608`, and likewise
   for `IOException` and in lists, tuples and `Maybe` (#103).

@@ -2537,39 +2537,39 @@ impl TyCtxt {
             let normalized_name;
             let _is_char8 = raw_name.starts_with("Data.ByteString.Char8.")
                 || raw_name.starts_with("Data.ByteString.Lazy.Char8.");
-            let name =
-                if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
-                    // Char8 functions that use Char where strict ByteString uses Word8/Int
-                    // are handled separately below — don't normalize them.
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name =
-                                raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
-                            normalized_name.as_str()
-                        }
+            let name = if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
+                // Char8 functions that use Char where strict ByteString uses Word8/Int
+                // are handled separately below — don't normalize them.
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'"
+                    | "index" => raw_name,
+                    _ => {
+                        normalized_name =
+                            raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
+                        normalized_name.as_str()
                     }
-                } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name = raw_name.replacen(
-                                "Data.ByteString.Lazy.Char8.",
-                                "Data.ByteString.Lazy.",
-                                1,
-                            );
-                            normalized_name.as_str()
-                        }
+                }
+            } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'" => {
+                        raw_name
                     }
-                } else {
-                    raw_name
-                };
+                    _ => {
+                        normalized_name = raw_name.replacen(
+                            "Data.ByteString.Lazy.Char8.",
+                            "Data.ByteString.Lazy.",
+                            1,
+                        );
+                        normalized_name.as_str()
+                    }
+                }
+            } else {
+                raw_name
+            };
             // `Set e`, as `Data.Set.fromList` and the other Set schemes
             // below spell it.
             let set_of = |elem: Ty| {
@@ -4546,6 +4546,16 @@ impl TyCtxt {
                         self.builtins.char_ty.clone(),
                     ))
                 }
+                "Data.ByteString.Char8.index" => {
+                    // index :: ByteString -> Int -> Char
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.int_ty.clone(),
+                            self.builtins.char_ty.clone(),
+                        ),
+                    ))
+                }
                 "Data.ByteString.Char8.singleton" | "Data.ByteString.Lazy.Char8.singleton" => {
                     // singleton :: Char -> ByteString
                     Scheme::mono(Ty::fun(
@@ -4553,16 +4563,23 @@ impl TyCtxt {
                         self.builtins.bytestring_ty.clone(),
                     ))
                 }
-                "Data.ByteString.Char8.cons"
-                | "Data.ByteString.Lazy.Char8.cons"
-                | "Data.ByteString.Char8.snoc"
-                | "Data.ByteString.Lazy.Char8.snoc" => {
+                "Data.ByteString.Char8.cons" | "Data.ByteString.Lazy.Char8.cons" => {
                     // cons :: Char -> ByteString -> ByteString
-                    // snoc :: ByteString -> Char -> ByteString (same signature shape for permissiveness)
                     Scheme::mono(Ty::fun(
                         self.builtins.char_ty.clone(),
                         Ty::fun(
                             self.builtins.bytestring_ty.clone(),
+                            self.builtins.bytestring_ty.clone(),
+                        ),
+                    ))
+                }
+                "Data.ByteString.Char8.snoc" | "Data.ByteString.Lazy.Char8.snoc" => {
+                    // snoc :: ByteString -> Char -> ByteString. It shared
+                    // `cons`'s scheme, which rejected every correct use.
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.char_ty.clone(),
                             self.builtins.bytestring_ty.clone(),
                         ),
                     ))
@@ -4872,6 +4889,14 @@ impl TyCtxt {
                             ),
                         ),
                     )
+                }
+                // Data.ByteString: ByteString -> IO ()
+                "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.bytestring_ty.clone(), io_unit))
                 }
                 // Data.ByteString: Handle -> ByteString -> IO ()
                 "Data.ByteString.hPutStr" | "Data.ByteString.hPut" => {

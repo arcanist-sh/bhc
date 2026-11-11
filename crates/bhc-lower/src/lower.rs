@@ -1786,6 +1786,9 @@ fn register_standard_module_exports(
             "hPutNonBlocking",
         ],
         "Data.ByteString.Char8" => &[
+            "putStr",
+            "putStrLn",
+            "reverse",
             "uncons",
             "ByteString",
             "pack",
@@ -6286,12 +6289,15 @@ fn register_standard_module_exports(
                             Span::default(),
                         );
                     } else {
-                        ctx.define(
-                            qual_def_id,
-                            qual_def_name,
-                            DefKind::StubValue,
-                            Span::default(),
-                        );
+                        // A function the backend implements is an ordinary
+                        // value: as a stub it warned "external package not
+                        // implemented" at every use.
+                        let kind = if implemented_bytestring_export(module_name, export) {
+                            DefKind::Value
+                        } else {
+                            DefKind::StubValue
+                        };
+                        ctx.define(qual_def_id, qual_def_name, kind, Span::default());
                     }
                     ctx.bind_value(aliased_qualified, qual_def_id);
                 }
@@ -10387,4 +10393,40 @@ mod tests {
 
         assert!(matches!(result, hir::Expr::App(_, _, _)));
     }
+}
+
+/// Whether `export` of the strict `Data.ByteString` or of
+/// `Data.ByteString.Char8` is implemented: by a strict-ByteString primitive
+/// (the Char8 functions are those primitives at `Char`; hir-to-core renames
+/// them) or by a rewrite there (`map`).
+fn implemented_bytestring_export(module: &str, export: &str) -> bool {
+    matches!(module, "Data.ByteString" | "Data.ByteString.Char8")
+        && matches!(
+            export,
+            "empty"
+                | "singleton"
+                | "pack"
+                | "unpack"
+                | "null"
+                | "length"
+                | "head"
+                | "last"
+                | "tail"
+                | "init"
+                | "append"
+                | "cons"
+                | "snoc"
+                | "take"
+                | "drop"
+                | "reverse"
+                | "elem"
+                | "index"
+                | "isPrefixOf"
+                | "isSuffixOf"
+                | "readFile"
+                | "writeFile"
+                | "putStr"
+                | "putStrLn"
+                | "map"
+        )
 }

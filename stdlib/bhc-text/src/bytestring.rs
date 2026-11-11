@@ -539,6 +539,23 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     }
 }
 
+/// Write a ByteString's bytes to stdout as they are, followed by a newline
+/// when `newline` is non-zero (`Data.ByteString.Char8.putStrLn`).
+///
+/// Through the same handle `putStrLn` prints to, so output stays in order.
+#[no_mangle]
+pub extern "C" fn bhc_bs_put(bs: *const u8, newline: i64) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if !bs.is_null() {
+        // A closed stdout is not this function's to report.
+        let _ = out.write_all(unsafe { bs_bytes(bs) });
+    }
+    if newline != 0 {
+        let _ = out.write_all(b"\n");
+    }
+}
+
 /// Write a ByteString to a file.
 ///
 /// Takes a BHC cons-list of Char (the file path) and a ByteString.

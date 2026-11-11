@@ -1200,6 +1200,8 @@ impl LowerContext {
             "Data.ByteString.isSuffixOf",
             "Data.ByteString.readFile",
             "Data.ByteString.writeFile",
+            "Data.ByteString.putStr",
+            "Data.ByteString.putStrLn",
             // Container PrimOps: Data.Text.Lazy (chunked lazy text)
             "Data.Text.Lazy.empty",
             "Data.Text.Lazy.fromStrict",
@@ -1737,6 +1739,8 @@ impl LowerContext {
             (11271, "Data.ByteString.isSuffixOf"),
             (11272, "Data.ByteString.readFile"),
             (11273, "Data.ByteString.writeFile"),
+            (11274, "Data.ByteString.putStr"),
+            (11275, "Data.ByteString.putStrLn"),
         ];
 
         for &(id, name) in e20_bs_builtins {

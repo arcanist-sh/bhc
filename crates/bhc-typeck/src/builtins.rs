@@ -7660,8 +7660,23 @@ impl Builtins {
             env.register_value(
                 DefId::new(11273),
                 Symbol::intern("Data.ByteString.writeFile"),
-                Scheme::mono(Ty::fun(string_ty.clone(), Ty::fun(bs_ty.clone(), io_unit))),
+                Scheme::mono(Ty::fun(
+                    string_ty.clone(),
+                    Ty::fun(bs_ty.clone(), io_unit.clone()),
+                )),
             );
+
+            // ByteString -> IO () (putStr, putStrLn)
+            for (id, name) in [
+                (11274, "Data.ByteString.putStr"),
+                (11275, "Data.ByteString.putStrLn"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(bs_ty.clone(), io_unit.clone())),
+                );
+            }
         }
 
         // E.25: String type class methods at fixed DefIds 11300-11302

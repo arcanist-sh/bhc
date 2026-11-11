@@ -1327,6 +1327,38 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(reader);
             }
         }
+        let name = v.name;
+        if let Some(op) = bytestring_class_op(ctx, name.as_str(), def_ref.span) {
+            return Ok(op);
+        }
+        // `Data.ByteString.Char8` is the strict ByteString at `Char`: a
+        // character and a byte are both the machine word, so the function is
+        // the strict primitive of the same name. The type checker has given
+        // the occurrence its `Char` type by now.
+        if let Some(op) = v.name.as_str().strip_prefix("Data.ByteString.Char8.") {
+            if char8_is_strict_primitive(op) {
+                v.name = Symbol::intern(&format!("Data.ByteString.{op}"));
+            }
+        }
+        if v.name.as_str() == "Data.ByteString.map" {
+            return Ok(bytestring_map(ctx, def_ref.span));
+        }
+        // As a value (`mapM_ BC.putStrLn xs`, `BC.putStrLn . f`) the action
+        // builtin has no wrapper; under a lambda the call is saturated.
+        if matches!(
+            v.name.as_str(),
+            "Data.ByteString.putStr" | "Data.ByteString.putStrLn"
+        ) {
+            let name = v.name;
+            let span = def_ref.span;
+            let bytes = ctx.fresh_var("$bs_put", Ty::Error, span);
+            let call = core::Expr::App(
+                Box::new(nullary_var(name.as_str(), span)),
+                Box::new(core::Expr::Var(bytes.clone(), span)),
+                span,
+            );
+            return Ok(core::Expr::Lam(bytes, Box::new(call), span));
+        }
         if matches!(v.name.as_str(), "read" | "reads") && generic {
             if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 v.ty = resolved;
@@ -1396,6 +1428,125 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
     Ok(expr)
+}
+
+/// `show`, `print`, `==` and `/=` at the strict `ByteString`.
+///
+/// A ByteString is an opaque runtime handle, and codegen picks these
+/// operations from the shape of their operands, which says nothing here:
+/// `==` compared two handles by address (always `False`) and `show` printed
+/// whatever the handle's words held. The resolved type does say, so:
+/// equality is the runtime's `Data.ByteString.eq`, and showing goes through
+/// the bytes as a `String`, which is how `bytestring` shows one.
+fn bytestring_class_op(ctx: &mut LowerContext, name: &str, span: Span) -> Option<core::Expr> {
+    if !matches!(name, "show" | "print" | "==" | "/=") {
+        return None;
+    }
+    let resolved = ctx.resolved_expr_ty_opt(span)?;
+    let Ty::Fun(operand, result) = &resolved else {
+        return None;
+    };
+    if !matches!(operand.as_ref(), Ty::Con(c) if c.name.as_str() == "ByteString") {
+        return None;
+    }
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let string_ty = Ty::List(Box::new(Ty::Con(TyCon::new(
+        Symbol::intern("Char"),
+        Kind::Star,
+    ))));
+    if matches!(name, "show" | "print") {
+        let bytes = ctx.fresh_var("$bs_shown", operand.as_ref().clone(), span);
+        let unpacked = app(
+            nullary_var("Data.ByteString.unpack", span),
+            core::Expr::Var(bytes.clone(), span),
+        );
+        // The same operation, at the string of the bytes.
+        let at_string = core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Fun(Box::new(string_ty), result.clone()),
+            },
+            span,
+        );
+        return Some(core::Expr::Lam(
+            bytes,
+            Box::new(app(at_string, unpacked)),
+            span,
+        ));
+    }
+    let lhs = ctx.fresh_var("$bs_lhs", operand.as_ref().clone(), span);
+    let rhs = ctx.fresh_var("$bs_rhs", operand.as_ref().clone(), span);
+    let mut equal = app(
+        app(
+            nullary_var("Data.ByteString.eq", span),
+            core::Expr::Var(lhs.clone(), span),
+        ),
+        core::Expr::Var(rhs.clone(), span),
+    );
+    if name == "/=" {
+        equal = app(nullary_var("not", span), equal);
+    }
+    Some(core::Expr::Lam(
+        lhs,
+        Box::new(core::Expr::Lam(rhs, Box::new(equal), span)),
+        span,
+    ))
+}
+
+/// The `Data.ByteString.Char8` functions that are a strict-ByteString
+/// primitive (or, for `map`, the rewrite below) at `Char`.
+fn char8_is_strict_primitive(op: &str) -> bool {
+    matches!(
+        op,
+        "empty"
+            | "singleton"
+            | "pack"
+            | "unpack"
+            | "null"
+            | "length"
+            | "head"
+            | "last"
+            | "tail"
+            | "init"
+            | "append"
+            | "cons"
+            | "snoc"
+            | "take"
+            | "drop"
+            | "reverse"
+            | "elem"
+            | "index"
+            | "isPrefixOf"
+            | "isSuffixOf"
+            | "readFile"
+            | "writeFile"
+            | "putStr"
+            | "putStrLn"
+            | "map"
+    )
+}
+
+/// `Data.ByteString.map` as `\\f bs -> pack (map f (unpack bs))`: the
+/// backend has no primitive for it.
+fn bytestring_map(ctx: &mut LowerContext, span: Span) -> core::Expr {
+    let f = ctx.fresh_var("$bs_map_f", Ty::Error, span);
+    let bytes = ctx.fresh_var("$bs_map_bs", Ty::Error, span);
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let unpacked = app(
+        nullary_var("Data.ByteString.unpack", span),
+        core::Expr::Var(bytes.clone(), span),
+    );
+    let mapped = app(
+        app(nullary_var("map", span), core::Expr::Var(f.clone(), span)),
+        unpacked,
+    );
+    let packed = app(nullary_var("Data.ByteString.pack", span), mapped);
+    core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(bytes, Box::new(packed), span)),
+        span,
+    )
 }
 
 /// `read`, `readMaybe` or `reads` at a type the runtime's generic reader

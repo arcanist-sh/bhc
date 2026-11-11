@@ -2154,6 +2154,11 @@ fn test_tier3_show_exception_in_container_native() {
 }
 
 #[test]
+fn test_tier3_bytestring_char8_native() {
+    run_native_test("tier3_io/bytestring_char8", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

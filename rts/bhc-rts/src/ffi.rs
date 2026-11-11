@@ -2706,6 +2706,8 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///   19=Adt with type arguments: `child1` holds the type's derived
 ///      `$derived_showt_*` function (`fn(env, targs, value) -> [Char]`) and
 ///      `child2` a null-terminated array of the type arguments' descriptors.
+///   20=exception object (`IOException`, `ErrorCall`, `ArithException`, …):
+///      shown by `bhc_show_exception`, never parenthesized.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2820,6 +2822,16 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 read_char_list(result)
             }
             18 => format!("{}", ptr as i64),
+            20 => {
+                let text = bhc_show_exception(bhc_force(ptr as *mut u8));
+                if text.is_null() {
+                    "<<exception>>".to_string()
+                } else {
+                    CStr::from_ptr(text as *const c_char)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            }
             19 => {
                 let raw = desc.child1 as *const ();
                 let show_fn: extern "C" fn(*const u8, *const u8, *const u8) -> *const u8 =

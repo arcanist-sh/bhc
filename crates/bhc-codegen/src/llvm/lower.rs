@@ -30954,6 +30954,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if let Some(desc) = self.try_build_container_show_desc(&expr.ty()) {
             return desc;
         }
+        // An exception inside a container (`Left e` from `try`) is an RTS
+        // exception object; described as nothing in particular, it was shown
+        // as its address.
+        if Self::is_exception_object_ty(&expr.ty()) {
+            return self.create_show_desc_global(20, None, None);
+        }
         // First determine the coerce type
         let coerce = if let Some((c, _, _)) = self.infer_show_from_expr(expr) {
             c

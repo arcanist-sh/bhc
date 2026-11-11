@@ -2149,6 +2149,11 @@ fn test_tier3_set_map_and_filters_native() {
 }
 
 #[test]
+fn test_tier3_show_exception_in_container_native() {
+    run_native_test("tier3_io/show_exception_in_container", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

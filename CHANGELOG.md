@@ -41,6 +41,9 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- An exception inside a container was shown as an address: `print r` for
+  `r :: Either ArithException Int` printed `Left 4387778608`, and likewise
+  for `IOException` and in lists, tuples and `Maybe` (#103).
 - `Data.Set`'s `map`, `insert`, `delete`, `union`, `intersection`,
   `difference`, `isSubsetOf`, `isProperSubsetOf`, `deleteMin`, `deleteMax`
   and `empty` had permissive types (`map :: (a -> b) -> a -> b`), so

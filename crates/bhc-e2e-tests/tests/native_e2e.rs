@@ -2113,6 +2113,22 @@ fn test_tier3_gadt_basic_native() {
 }
 
 #[test]
+fn test_tier2_numeric_functions_as_values() {
+    run_native_test(
+        "tier2_functions/numeric_functions_as_values",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_numeric_functions_as_values_numeric_profile() {
+    run_native_test(
+        "tier2_functions/numeric_functions_as_values",
+        Profile::Numeric,
+    );
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

@@ -27319,6 +27319,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.builtin_at_integer(expr) {
             return self.call_integer_rts(1000608, &[expr], "integer_negate");
         }
+        if self.builtin_at_floating(expr) {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
+            let f = self.coerce_to_f64(val)?;
+            let neg = self
+                .builder()
+                .build_float_neg(f, "fneg")
+                .map_err(|e| CodegenError::Internal(format!("negate fneg failed: {:?}", e)))?;
+            return Ok(Some(self.f64_to_ptr(neg)?.into()));
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
@@ -27344,7 +27355,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Double dispatch: a `Double` value is a boxed f64, so integer abs on its
         // bits would corrupt it (clearing the sign of `-2.5`'s bit pattern gives
         // 1.75). Use floating-point abs instead.
-        if self.expr_returns_double(expr) {
+        if self.builtin_at_floating(expr) {
             let val = self
                 .lower_expr(expr)?
                 .ok_or_else(|| CodegenError::Internal("abs: no value".to_string()))?;
@@ -27395,6 +27406,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // A bignum at `Integer` (#57): its pointer is not the value.
         if self.builtin_at_integer(expr) {
             return self.call_integer_rts(1000610, &[expr], "integer_signum");
+        }
+        if self.builtin_at_floating(expr) {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("signum: no value".to_string()))?;
+            let f = self.coerce_to_f64(val)?;
+            let f64_ty = self.type_mapper().f64_type();
+            let zero = f64_ty.const_float(0.0);
+            let is_pos = self
+                .builder()
+                .build_float_compare(inkwell::FloatPredicate::OGT, f, zero, "is_pos")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?;
+            let is_neg = self
+                .builder()
+                .build_float_compare(inkwell::FloatPredicate::OLT, f, zero, "is_neg")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?;
+            // Zero and NaN are returned as they are, as GHC does.
+            let step1 = self
+                .builder()
+                .build_select(is_pos, f64_ty.const_float(1.0), f, "fsignum_step1")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?
+                .into_float_value();
+            let result = self
+                .builder()
+                .build_select(is_neg, f64_ty.const_float(-1.0), step1, "fsignum")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?
+                .into_float_value();
+            return Ok(Some(self.f64_to_ptr(result)?.into()));
         }
         let val = self
             .lower_expr(expr)?
@@ -27701,6 +27740,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Whether this builtin occurrence works at `Integer` (boxed BigInts):
     /// its stamped argument type says so, or its first argument's type does.
+    /// Whether the unary numeric builtin being lowered acts on a `Double` or
+    /// `Float`: by its resolved occurrence type, or by the argument's shape.
+    /// A double travels as its bits in a word, so integer arithmetic on it
+    /// gives another double's bits (`negate 1.5` was `-3.0`).
+    fn builtin_at_floating(&self, first_arg: &Expr) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _)
+            if self.is_double_type(a) || self.is_float_type(a))
+            || self.expr_returns_double(first_arg)
+    }
+
     fn builtin_at_integer(&self, first_arg: &Expr) -> bool {
         matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_integer_type(a))
             || self.is_integer_type(&first_arg.ty())
@@ -53339,6 +53388,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         self.lower_builtin(name, &[])
                     } else if let Some(lam) = Self::typed_show_lambda(name, var)
                         .or_else(|| Self::typed_arith_lambda(name, var))
+                        .or_else(|| Self::typed_conversion_lambda(name, var))
                     {
                         // `map show xs`: a generic wrapper closure has no
                         // argument type and showed every element as an Int.
@@ -53950,7 +54000,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// or `Float` (`foldr (+) 0 xs`): a generic wrapper closure has no operand
     /// types and did machine-int arithmetic on bignums and doubles.
     fn typed_arith_lambda(name: &str, var: &Var) -> Option<Expr> {
-        if !matches!(name, "+" | "-" | "*") {
+        if !matches!(name, "+" | "-" | "*" | "/") {
             return None;
         }
         let Ty::Fun(a, _) = &var.ty else {
@@ -54028,6 +54078,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             span,
         );
         Some(call)
+    }
+
+    /// A numeric conversion passed as a value (`map fromIntegral xs`),
+    /// eta-expanded with its resolved argument type so the saturated path
+    /// converts. The generic wrapper closure has no types and returned its
+    /// argument unchanged, so an `Int` was read back as a `Double`'s bits.
+    fn typed_conversion_lambda(name: &str, var: &Var) -> Option<Expr> {
+        if !matches!(name, "fromIntegral" | "fromInteger" | "toInteger") {
+            return None;
+        }
+        let Ty::Fun(arg_ty, result_ty) = &var.ty else {
+            return None;
+        };
+        if !matches!(arg_ty.as_ref(), Ty::Con(_)) || !matches!(result_ty.as_ref(), Ty::Con(_)) {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$conv_arg"),
+            id: VarId::new(usize::MAX - 39),
+            ty: arg_ty.as_ref().clone(),
+        };
+        let body = Expr::App(
+            Box::new(Expr::Var(var.clone(), span)),
+            Box::new(Expr::Var(x.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(x, Box::new(body), span))
     }
 
     fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
@@ -54312,6 +54390,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "even" | "odd" | "negate" | "abs" | "signum" => match &var.ty {
                 Ty::Fun(a, _) if self.is_integer_type(a) => 1,
+                // `map negate xs` over doubles: the wrapper negated the bits
+                // as a machine integer.
+                Ty::Fun(a, _)
+                    if !matches!(var.name.as_str(), "even" | "odd")
+                        && (self.is_double_type(a) || self.is_float_type(a)) =>
+                {
+                    1
+                }
                 _ => return None,
             },
             _ => return None,

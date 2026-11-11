@@ -34,6 +34,15 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Fixed
 
+- Negating a `Double` held in a variable (`negate x`, `-x`), and `signum` of
+  one, did integer arithmetic on the double's bits: `negate 1.5` was `-3.0`.
+  `abs` had the same fault for a lambda parameter.
+- `fromIntegral`, `toInteger`, `(/)`, `negate`, `abs` and `signum` passed as
+  function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
+  `map negate xs`) did not convert or used integer arithmetic (#100, native
+  only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `data T :: Type -> Type where ...`, a GADT declaration with a kind signature
+  in place of named parameters, is parsed (#107).
 - Ranges over a derived `Enum`: `[x ..]`, `[x, y ..]` and `[x, y .. z]`
   step through the constructors (they were empty, one element, or a
   crash).

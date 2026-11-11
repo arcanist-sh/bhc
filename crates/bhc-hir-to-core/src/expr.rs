@@ -1003,6 +1003,7 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         v.name.as_str(),
         "+" | "-"
             | "*"
+            | "/"
             | "=="
             | "/="
             | "<"
@@ -1030,8 +1031,10 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
                     if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
             // Arithmetic on Double/Float: passed as a function value
             // (`foldr (+) 0 xs`) the operator has no operands to read it from.
-            let floating = matches!(v.name.as_str(), "+" | "-" | "*")
-                && matches!(&resolved, Ty::Fun(a, _)
+            let floating = matches!(
+                v.name.as_str(),
+                "+" | "-" | "*" | "/" | "negate" | "abs" | "signum"
+            ) && matches!(&resolved, Ty::Fun(a, _)
                     if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")));
             if integer || ground_list_eq || floating {
                 v.ty = resolved;
@@ -1044,6 +1047,14 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
                 // so the type found there is the RESULT (`[x * x | x <- xs]`,
                 // #51). These operators' operands share the result's type.
                 v.ty = Ty::fun(resolved.clone(), Ty::fun(resolved.clone(), resolved));
+            } else if matches!(v.name.as_str(), "negate" | "abs" | "signum")
+                && matches!(&resolved, Ty::Con(c)
+                    if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            {
+                // Unary minus desugars to `negate e` with the whole
+                // expression's span on `negate`, so the type found there is
+                // again the result, which is also the operand's.
+                v.ty = Ty::fun(resolved.clone(), resolved);
             }
         }
         return;

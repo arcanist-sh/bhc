@@ -1,0 +1,29 @@
+True
+(True,True)
+(True,False,False)
+(LT,False,True,True)
+Node (Node Leaf 2 Leaf) 4 (Node Leaf 6 Leaf)
+(6,6,3,3,1)
+([1,2,3],[1,2,3])
+(6,[3,2,1])
+[1,1,2,2,3,3]
+(True,True,False,False,True)
+1
+2
+3
+1
+2
+3
+1
+2
+3
+Node (Node Leaf 2 Leaf) 3 (Node Leaf 4 Leaf)
+2
+7
+9
+Just (Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf))
+Nothing
+10
+20
+30
+(6,[1,1,2,2])

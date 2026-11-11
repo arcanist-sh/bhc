@@ -113,14 +113,20 @@ impl DerivingContext {
         Self::head_type_con(ty).filter(|n| self.local_ord.contains(n))
     }
 
-    /// The head type-constructor name of a field type, for a directly-named
-    /// user ADT (`Color`, `Tree`). Parameterized types (`Maybe a`, `[a]`,
-    /// tuples) and type variables return `None` — those keep the generic
-    /// `==`/`compare`, which the library/backends handle.
+    /// The head type-constructor name of a field type: a user ADT named
+    /// directly (`Color`) or applied to arguments (`Tree a`, the recursive
+    /// field of a parameterized type). Callers keep only names that derive
+    /// the class in this module, so `Maybe a`, `[a]`, tuples and type
+    /// variables still get the generic `==`/`compare`.
     fn head_type_con(ty: &Ty) -> Option<Symbol> {
         let mut t = ty;
         while let Ty::Forall(_, inner) = t {
             t = inner;
+        }
+        // Without this, `Node l x r == Node l' x' r'` compared the subtrees
+        // `l` and `l'` with the generic `==`, by address.
+        while let Ty::App(f, _) = t {
+            t = f;
         }
         match t {
             Ty::Con(c) => Some(c.name),

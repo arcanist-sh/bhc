@@ -6139,14 +6139,19 @@ fn register_standard_module_exports(
         //
         // Likewise `nubOrd`/`nubInt` are `nub` (same result, only faster for
         // `Ord` keys); stubbed, pandoc's header identifiers aborted on them.
+        //
+        // `Data.Foldable`'s `for_`, `traverse_` and `foldl'` are the builtins
+        // of those names; as `Data.Foldable.for_` stubs they aborted at run
+        // time, on lists too.
         if matches!(
             module_name,
-            "Data.Traversable" | "Data.Containers.ListUtils"
+            "Data.Traversable" | "Data.Containers.ListUtils" | "Data.Foldable"
         ) {
-            let target = match export {
-                "fmapDefault" => Some("fmap"),
-                "foldMapDefault" => Some("foldMap"),
-                "nubOrd" | "nubInt" => Some("nub"),
+            let target = match (module_name, export) {
+                (_, "fmapDefault") => Some("fmap"),
+                (_, "foldMapDefault") => Some("foldMap"),
+                (_, "nubOrd" | "nubInt") => Some("nub"),
+                ("Data.Foldable", "for_" | "traverse_" | "foldl'" | "foldMap") => Some(export),
                 _ => None,
             };
             if let Some(def) = target.and_then(|t| ctx.lookup_value(Symbol::intern(t))) {

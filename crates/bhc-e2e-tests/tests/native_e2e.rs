@@ -2129,6 +2129,11 @@ fn test_tier2_numeric_functions_as_values_numeric_profile() {
 }
 
 #[test]
+fn test_tier3_derived_tree_eq_foldable_native() {
+    run_native_test("tier3_io/derived_tree_eq_foldable", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

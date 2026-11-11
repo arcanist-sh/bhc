@@ -6009,6 +6009,8 @@ fn lower_foldable_consumer(
         ("sum" | "product" | "length" | "null" | "maximum" | "minimum" | "toList", 1) => 0,
         ("elem" | "notElem" | "any" | "all" | "mapM_" | "traverse_", 2) => 1,
         ("forM_" | "for_", 2) => 0,
+        ("foldl" | "foldl'", 3) => 2,
+        ("foldMap", 2) => 1,
         _ => return Ok(None),
     };
     let Some(container_ty) = call_arg_ty(ctx, head_ref, args, container_pos) else {
@@ -6521,8 +6523,19 @@ fn lower_monadic_traversal_spine_inner(
                 None => lowered,
             }
         }
-        (None, Some(v)) if foldable_cty.is_none() => core::Expr::Var(v.clone(), span),
-        (None, Some(_)) => return Ok(None),
+        (None, Some(v)) => {
+            let param = core::Expr::Var(v.clone(), span);
+            match &foldable_cty {
+                // Point-free over another `Foldable` (`mapM_ print =<< m` at
+                // a `Tree`): the parameter is the container, folded through
+                // its list. Given up on, the builtin walked it as a list.
+                Some(cty) => match foldable_list(ctx, cty, param, span) {
+                    Some(list) => list,
+                    None => return Ok(None),
+                },
+                None => param,
+            }
+        }
         (None, None) => return Ok(None),
     };
     let fn_core = match fn_expr {

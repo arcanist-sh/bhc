@@ -41,6 +41,13 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- Derived `Eq` and `Ord` on a recursive parameterized type (`data Tree a =
+  Leaf | Node (Tree a) a (Tree a)`) compared the subtrees by address, so two
+  equal trees built separately were unequal (#104).
+- `Data.Foldable`'s `for_`, `traverse_`, `foldl'` and `foldMap`, imported by
+  name, aborted as unimplemented stubs, on lists too.
+- `foldl`, `foldl'` and `foldMap` over a type with a derived `Foldable`, and
+  `mapM_ f =<< m` at one, walked the value as a list and crashed (#104).
 - `data T :: Type -> Type where ...`, a GADT declaration with a kind signature
   in place of named parameters, is parsed (#107).
 - Ranges over a derived `Enum`: `[x ..]`, `[x, y ..]` and `[x, y .. z]`

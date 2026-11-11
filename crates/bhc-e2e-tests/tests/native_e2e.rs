@@ -26,6 +26,54 @@ fn run_native_test(fixture_name: &str, profile: Profile) {
     );
 }
 
+/// Check that a program under `fixtures/rejected/` does not type-check, and
+/// that the error says `needle`.
+fn expect_rejected(file: &str, needle: &str) {
+    let path = bhc_e2e_tests::fixtures_dir().join("rejected").join(file);
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--", "check"])
+        .arg(&path)
+        .output()
+        .expect("failed to run the compiler");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "{file} was accepted, expected an error containing `{needle}`:\n{text}"
+    );
+    assert!(
+        text.contains(needle),
+        "{file} was rejected, but not with `{needle}`:\n{text}"
+    );
+}
+
+// =============================================================================
+// Programs the type checker must reject
+// =============================================================================
+
+#[test]
+fn test_rejected_show_function() {
+    expect_rejected("show_function.hs", "No instance for `Show (Int -> Int)`");
+}
+
+#[test]
+fn test_rejected_show_tuple_section() {
+    expect_rejected("show_tuple_section.hs", "No instance for `Show (");
+}
+
+#[test]
+fn test_rejected_compare_functions() {
+    // The operand type is not fully resolved in the message (`t1 -> t1`).
+    expect_rejected("compare_functions.hs", "No instance for `Eq (");
+    expect_rejected(
+        "compare_functions.hs",
+        "No instance for `Ord (Bool -> Bool)`",
+    );
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================

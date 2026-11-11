@@ -45,6 +45,12 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             let scheme = ctx.env.lookup_def_id(def_ref.def_id).cloned();
             if let Some(s) = scheme {
                 let result = ctx.instantiate(&s);
+                if let Some(class) = ctx.class_op_defs.get(&def_ref.def_id).copied() {
+                    if let Ty::Fun(operand, _) = &result {
+                        ctx.class_op_uses
+                            .push((class, operand.as_ref().clone(), def_ref.span));
+                    }
+                }
                 // For rank-2: if the result resolves to a Forall type (e.g., a lambda
                 // parameter with type `forall a. a -> a`), instantiate it so each use
                 // gets independent type variables.

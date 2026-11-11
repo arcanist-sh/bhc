@@ -862,6 +862,7 @@ pub fn type_check_module_with_imports(
 
     // Solve type class constraints (defaults ambiguous type variables)
     ctx.solve_constraints();
+    ctx.check_class_ops_not_at_functions();
 
     if ctx.has_errors() {
         Err(ctx.take_diagnostics())

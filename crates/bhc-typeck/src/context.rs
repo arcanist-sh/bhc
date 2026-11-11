@@ -123,6 +123,14 @@ pub struct TyCtxt {
     /// must not generalize (see the monomorphism restriction in `infer`).
     pub(crate) numeric_conversion_defs: rustc_hash::FxHashSet<DefId>,
 
+    /// The builtin operations of `Show`, `Eq` and `Ord` whose schemes carry
+    /// no class constraint (`show :: a -> String`), with their class.
+    pub(crate) class_op_defs: FxHashMap<DefId, &'static str>,
+    /// For each occurrence of one of those, the type its first argument was
+    /// instantiated at, checked once the module is solved
+    /// ([`Self::check_class_ops_not_at_functions`]).
+    pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
+
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
     /// are universally quantified, not unification variables).
@@ -251,6 +259,8 @@ impl TyCtxt {
             def_schemes: FxHashMap::default(),
             dollar_def: None,
             numeric_conversion_defs: rustc_hash::FxHashSet::default(),
+            class_op_defs: FxHashMap::default(),
+            class_op_uses: Vec::new(),
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -441,6 +451,35 @@ impl TyCtxt {
 
         // Add all new constraints
         self.constraints.extend(new_constraints);
+    }
+
+    /// Reject `show`, `print`, `==`, `<`, … used at a function type.
+    ///
+    /// The builtin schemes of these operations have no class constraint
+    /// (`show :: a -> String`), so nothing else objects to `print id` or to
+    /// `f == g`: the program compiled and printed an empty line. Until the
+    /// standard classes are real classes with instances, this catches the
+    /// one case that can never have an instance. It sees the type an
+    /// occurrence ends up at in this module; a function reaching `show`
+    /// through another polymorphic function is not caught.
+    pub fn check_class_ops_not_at_functions(&mut self) {
+        for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
+            let operand = self.subst.apply(&operand);
+            if !matches!(operand, Ty::Fun(..)) {
+                continue;
+            }
+            // A function type is printed in its own parentheses.
+            let shown = crate::diagnostics::pretty_ty(&operand);
+            let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                .with_label(
+                    self.full_span(span),
+                    format!("used here at the function type `{shown}`"),
+                )
+                .with_note(format!(
+                    "a function has no `{class}` instance; maybe an argument is missing"
+                ));
+            self.emit_error(diag);
+        }
     }
 
     /// Solve collected constraints using instance resolution.
@@ -2479,6 +2518,25 @@ impl TyCtxt {
         if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
             self.dollar_def = Some(*id);
         }
+        self.class_op_defs = defs
+            .iter()
+            // The Prelude's own: not a name this module defines, a pattern
+            // variable, or a value another module's interface gave a type.
+            .filter(|(id, d)| {
+                !local_value_ids.contains(id)
+                    && !matches!(d.kind, DefKind::PatVar | DefKind::ImportedValue)
+                    && d.type_scheme.is_none()
+            })
+            .filter_map(|(id, d)| {
+                let class = match d.name.as_str() {
+                    "show" | "print" => "Show",
+                    "==" | "/=" => "Eq",
+                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => "Ord",
+                    _ => return None,
+                };
+                Some((*id, class))
+            })
+            .collect();
         self.numeric_conversion_defs = defs
             .iter()
             .filter(|(_, d)| {

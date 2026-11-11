@@ -43,6 +43,9 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `show`, `print`, `==`, `/=`, `<`, `<=`, `>`, `>=`, `max` and `min` used at
+  a function type are a type error (`No instance for Show (Int -> Int)`).
+  `print id` compiled and printed an empty line (#106).
 - `Data.ByteString.Char8`: every function aborted as an unimplemented stub.
   `pack`, `unpack`, `length`, `null`, `empty`, `singleton`, `append`, `cons`,
   `snoc`, `head`, `last`, `tail`, `init`, `take`, `drop`, `reverse`, `elem`,

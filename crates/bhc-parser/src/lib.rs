@@ -605,6 +605,32 @@ mod tests {
     }
 
     #[test]
+    fn test_data_decl_kind_signature() {
+        for (kind, arity) in [
+            ("* -> *", 1),
+            ("Type -> Type", 1),
+            ("Type -> (Type -> Type) -> Type", 2),
+            ("Type", 0),
+        ] {
+            let src = format!("data T :: {kind} where\n  C :: T\n");
+            let module = parse_module_ok(&src);
+            match &module.decls[0] {
+                Decl::DataDecl(d) => {
+                    assert_eq!(d.params.len(), arity, "kind {kind}");
+                    assert_eq!(d.gadt_constrs.len(), 1, "kind {kind}");
+                }
+                other => panic!("expected data declaration, got {other:?}"),
+            }
+        }
+        // Named parameters and a kind signature add up.
+        let module = parse_module_ok("data T a :: Type -> Type where\n  C :: T a b\n");
+        match &module.decls[0] {
+            Decl::DataDecl(d) => assert_eq!(d.params.len(), 2),
+            other => panic!("expected data declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parser_creation() {
         let parser = Parser::new("let x = 1 in x", FileId::new(0));
         assert!(!parser.at_eof());

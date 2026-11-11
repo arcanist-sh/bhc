@@ -2113,6 +2113,11 @@ fn test_tier3_gadt_basic_native() {
 }
 
 #[test]
+fn test_tier3_gadt_kind_signature_native() {
+    run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_phantom_native() {
     run_native_test("tier3_io/gadt_phantom", Profile::Default);
 }

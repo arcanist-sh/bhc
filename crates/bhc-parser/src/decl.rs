@@ -1621,6 +1621,26 @@ impl<'src> Parser<'src> {
             (name, params)
         };
 
+        // A kind signature on the head: `data T :: Type -> Type where ...`
+        // (KindSignatures). Each arrow in the kind is one more type parameter
+        // that the head did not name, so give it a name the source cannot
+        // spell. The kind itself is not tracked, as for `(a :: k)` binders.
+        let mut params = params;
+        if self.check(&TokenKind::DoubleColon) {
+            let kind_span = self.current_span();
+            self.advance();
+            let mut kind = self.parse_kind()?;
+            let mut index = 0usize;
+            while let Kind::Arrow(_, result) = kind {
+                params.push(TyVar {
+                    name: Ident::new(Symbol::intern(&format!("k$arg{index}"))),
+                    span: kind_span,
+                });
+                index += 1;
+                kind = *result;
+            }
+        }
+
         // A Haddock comment may sit between the head and the `=` (it documents
         // the first constructor, e.g. `data T\n  -- | doc\n  = Con1 ...`). Skip
         // it so the form below is recognized — otherwise `eat(Eq)` sees the doc

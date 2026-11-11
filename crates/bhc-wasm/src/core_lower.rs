@@ -153,6 +153,7 @@ pub fn lower_core_module(
     wasm: &mut WasmModule,
     runtime: &RuntimeIndices,
 ) -> WasmResult<u32> {
+    let core = &restore_plain_read(core);
     // A WASI module has no C library to link a `foreign import` against: a
     // call compiled to the constant 0 with only a log warning (#41). Only the
     // C math functions the backend implements itself are accepted, and only
@@ -11691,6 +11692,101 @@ fn peel_lambdas(expr: &Expr) -> (Vec<&Var>, &Expr) {
     }
 
     (params, current)
+}
+
+/// The plain builtin a generic reader stands for: `$read_generic` is `read`.
+fn plain_reader_name(expr: &Expr) -> Option<&'static str> {
+    let Expr::Var(var, _) = expr else {
+        return None;
+    };
+    match var.name.as_str() {
+        "$read_generic" => Some("read"),
+        "$readMaybe_generic" => Some("readMaybe"),
+        "$reads_generic" => Some("reads"),
+        _ => None,
+    }
+}
+
+/// The module with every generic reader turned back into the plain builtin.
+///
+/// hir-to-core lowers `read` at a described type to `\s -> $read_generic
+/// "<description>" s` for the native runtime's reader (its `read_desc`). This
+/// backend has no such reader and recognizes `read` by name, also to decide
+/// how the result is shown, so it gets the builtin back: the lambda, or the
+/// reader applied to its description once the simplifier has reduced it.
+fn restore_plain_read(core: &CoreModule) -> CoreModule {
+    fn described(expr: &Expr) -> Option<(&'static str, Span)> {
+        let Expr::App(reader, description, span) = expr else {
+            return None;
+        };
+        matches!(description.as_ref(), Expr::Lit(Literal::String(_), _, _))
+            .then(|| plain_reader_name(reader))
+            .flatten()
+            .map(|name| (name, *span))
+    }
+    fn plain(name: &str, span: Span) -> Expr {
+        Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            },
+            span,
+        )
+    }
+    fn expr(e: &mut Expr) {
+        if let Some((name, span)) = described(e) {
+            *e = plain(name, span);
+            return;
+        }
+        if let Expr::Lam(param, body, _) = e {
+            if let Expr::App(reader, arg, _) = body.as_ref() {
+                let applied_to_param = matches!(arg.as_ref(), Expr::Var(v, _) if v.id == param.id);
+                if let (Some((name, span)), true) = (described(reader), applied_to_param) {
+                    *e = plain(name, span);
+                    return;
+                }
+            }
+        }
+        match e {
+            Expr::App(f, a, _) => {
+                expr(f);
+                expr(a);
+            }
+            Expr::TyApp(inner, _, _)
+            | Expr::Lam(_, inner, _)
+            | Expr::TyLam(_, inner, _)
+            | Expr::Lazy(inner, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _) => expr(inner),
+            Expr::Let(b, body, _) => {
+                bind(b);
+                expr(body);
+            }
+            Expr::Case(scrutinee, alts, _, _) => {
+                expr(scrutinee);
+                for alt in alts {
+                    expr(&mut alt.rhs);
+                }
+            }
+            Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
+        }
+    }
+    fn bind(b: &mut Bind) {
+        match b {
+            Bind::NonRec(_, rhs) => expr(rhs),
+            Bind::Rec(pairs) => {
+                for (_, rhs) in pairs {
+                    expr(rhs);
+                }
+            }
+        }
+    }
+    let mut module = core.clone();
+    for b in &mut module.bindings {
+        bind(b);
+    }
+    module
 }
 
 /// Collect the application spine: `f a1 a2 ... an` -> `(f, [a1, a2, ..., an])`.

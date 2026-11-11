@@ -20,6 +20,7 @@ pub mod deriving;
 pub mod dictionary;
 mod expr;
 mod pattern;
+mod read_desc;
 
 use bhc_core::CoreModule;
 use bhc_hir::{DefId, Module as HirModule};

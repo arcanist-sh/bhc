@@ -2139,6 +2139,11 @@ fn test_tier3_map_keys_in_lambda_native() {
 }
 
 #[test]
+fn test_tier3_read_derived_and_compound_native() {
+    run_native_test("tier3_io/read_derived_and_compound", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

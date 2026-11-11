@@ -18,7 +18,7 @@ use crate::{global, init_default, Profile, RuntimeConfig};
 ///
 /// Used at FFI boundaries where unwinding into C is not an option and
 /// continuing with corrupted state would be undefined behavior.
-fn rts_abort(msg: &str) -> ! {
+pub(crate) fn rts_abort(msg: &str) -> ! {
     eprintln!("BHC Runtime Error: {msg}");
     // A fatal runtime error names a symptom; the caller chain is what names
     // the cause. `capture()` honours RUST_BACKTRACE, so this costs nothing
@@ -3242,7 +3242,7 @@ pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
 // ----------------------------------------------------------------------------
 
 /// Allocate a cons cell: `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
-unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
+pub(crate) unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
     unsafe {
         let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
         let cell = std::alloc::alloc(layout);
@@ -3254,7 +3254,7 @@ unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
 }
 
 /// Allocate a nil cell: `[i64 tag=0, ...]` (24 bytes, matching cons layout).
-unsafe fn alloc_nil() -> *mut u8 {
+pub(crate) unsafe fn alloc_nil() -> *mut u8 {
     unsafe {
         let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
         let cell = std::alloc::alloc(layout);

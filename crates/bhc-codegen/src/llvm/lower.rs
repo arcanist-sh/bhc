@@ -7957,6 +7957,53 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .try_as_basic_value()
                     .basic())
             }
+            // `read`/`readMaybe`/`reads` at a described type (hir-to-core's
+            // `read_desc`): the runtime parses against the description.
+            "$read_generic" | "$readMaybe_generic" | "$reads_generic" => {
+                let Expr::Lit(Literal::String(description), _, _) = args[0] else {
+                    return Err(CodegenError::Internal(
+                        "read: the type description is not a literal".to_string(),
+                    ));
+                };
+                let mode = match name {
+                    "$readMaybe_generic" => 1,
+                    "$reads_generic" => 2,
+                    _ => 0,
+                };
+                let text = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+                let text = self.value_to_ptr(text)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let reader = match self.module.get_function("bhc_read_generic") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_read_generic",
+                        ptr_type
+                            .fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false),
+                    ),
+                };
+                let description = self
+                    .builder()
+                    .build_global_string_ptr(description.as_str(), "read_description")
+                    .map_err(|e| CodegenError::Internal(format!("read description: {e:?}")))?
+                    .as_pointer_value();
+                Ok(self
+                    .builder()
+                    .build_call(
+                        reader,
+                        &[
+                            description.into(),
+                            text.into(),
+                            i64_type.const_int(mode, false).into(),
+                        ],
+                        "read_generic",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("read generic: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
             "$printf_pad" => {
                 let i64_type = self.type_mapper().i64_type();
                 let mut ints = Vec::new();
@@ -65477,6 +65524,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "union" => Some(2),
         "showFFloat" | "Numeric.showFFloat" => Some(3),
         "$printf_fixed" => Some(2),
+        "$read_generic" | "$readMaybe_generic" | "$reads_generic" => Some(2),
         "$printf_pad" => Some(4),
         "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => Some(2),
         "\\\\" => Some(2),

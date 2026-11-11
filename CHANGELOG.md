@@ -41,6 +41,12 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `read`, `readMaybe` and `reads` at a data type that derives `Read`
+  (enumerations, constructors with fields, records, recursive and
+  parameterized types, newtypes), at tuples, nested lists, `Maybe`, `Either`,
+  `Integer`, `Bool`, `Ordering` and `()` aborted with `no parse` or read the
+  wrong thing; they parse what a derived `Read` accepts (#105, native only,
+  for types declared in the module being compiled).
 - `Data.Map` and `Data.Set` operations whose key is a lambda parameter
   (`foldl' (\m w -> M.insertWith (+) w 1 m) M.empty ws`) compared `String`,
   `Text` and enumeration keys by address, so equal keys were never merged or

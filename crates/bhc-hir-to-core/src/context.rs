@@ -76,6 +76,11 @@ pub struct LowerContext {
     /// Counter for generating fresh variable names.
     fresh_counter: u32,
 
+    /// The data types and newtypes of this module that derive `Read`, by
+    /// name: what `read` at one of them is described from
+    /// ([`crate::read_desc`]).
+    pub(crate) read_shapes: FxHashMap<Symbol, crate::read_desc::ReadShape>,
+
     /// Mapping from HIR `DefIds` to Core variables.
     var_map: FxHashMap<DefId, Var>,
 
@@ -309,6 +314,7 @@ impl LowerContext {
             // above any realistic DefId count (~11k today) and deriving usage,
             // and below the builtin range.
             fresh_counter: 200_000,
+            read_shapes: FxHashMap::default(),
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),
@@ -5416,8 +5422,16 @@ impl LowerContext {
                 Item::Data(data_def) => {
                     self.register_data_constructors(data_def);
                     self.register_derived_traversable(data_def);
+                    if let Some(shape) = crate::read_desc::ReadShape::of_data(data_def) {
+                        self.read_shapes.insert(data_def.name, shape);
+                    }
                 }
-                Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
+                Item::Newtype(newtype_def) => {
+                    self.register_newtype_constructor(newtype_def);
+                    if let Some(shape) = crate::read_desc::ReadShape::of_newtype(newtype_def) {
+                        self.read_shapes.insert(newtype_def.name, shape);
+                    }
+                }
                 _ => {}
             }
         }

@@ -1321,6 +1321,12 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             Ty::Fun(_, r) => matches!(**r, Ty::Var(_)),
             _ => false,
         };
+        if generic {
+            let name = v.name;
+            if let Some(reader) = generic_read(ctx, name.as_str(), def_ref.span) {
+                return Ok(reader);
+            }
+        }
         if matches!(v.name.as_str(), "read" | "reads") && generic {
             if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 v.ty = resolved;
@@ -1390,6 +1396,76 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
     Ok(expr)
+}
+
+/// `read`, `readMaybe` or `reads` at a type the runtime's generic reader
+/// handles and codegen's own `read` does not (a data type deriving `Read`, a
+/// tuple, a nested list, `Maybe`, …): the reader applied to the type's
+/// description ([`crate::read_desc`]), as a function of the string.
+///
+/// `Int`, `Double` and `Float`, and `read` at a list of them, keep the
+/// builtin, which codegen lowers directly.
+fn generic_read(ctx: &mut LowerContext, name: &str, span: Span) -> Option<core::Expr> {
+    let bare = match name.rsplit_once('.') {
+        None => name,
+        Some(("Prelude" | "Text.Read" | "GHC.Read", op)) => op,
+        Some(_) => return None,
+    };
+    let reader = match bare {
+        "read" => "$read_generic",
+        "readMaybe" => "$readMaybe_generic",
+        "reads" => "$reads_generic",
+        _ => return None,
+    };
+    let Ty::Fun(_, result) = ctx.resolved_expr_ty_opt(span)? else {
+        return None;
+    };
+    let result = crate::context::canonical_list_spelling(&result);
+    let target = match (bare, result) {
+        ("read", target) => target,
+        ("readMaybe", Ty::App(f, target)) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe") => {
+            *target
+        }
+        ("reads", Ty::List(pair)) => match *pair {
+            Ty::Tuple(mut parts) if parts.len() == 2 => parts.swap_remove(0),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if has_type_variables(&target) {
+        return None;
+    }
+    let scalar =
+        |t: &Ty| matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Int" | "Double" | "Float"));
+    if scalar(&target) || (bare == "read" && matches!(&target, Ty::List(e) if scalar(e))) {
+        return None;
+    }
+    let description = crate::read_desc::read_description(&ctx.read_shapes, &target)?;
+    let literal = core::Expr::Lit(
+        Literal::String(Symbol::intern(&description)),
+        Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        )))),
+        span,
+    );
+    // Always a saturated call: `map read xs` passes the reader as a value,
+    // and codegen needs the description as the literal it is.
+    let text = ctx.fresh_var(
+        "$read_text",
+        Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        )))),
+        span,
+    );
+    let described = core::Expr::App(Box::new(nullary_var(reader, span)), Box::new(literal), span);
+    let call = core::Expr::App(
+        Box::new(described),
+        Box::new(core::Expr::Var(text.clone(), span)),
+        span,
+    );
+    Some(core::Expr::Lam(text, Box::new(call), span))
 }
 
 fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {

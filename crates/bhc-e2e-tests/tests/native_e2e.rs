@@ -2134,6 +2134,11 @@ fn test_tier3_derived_tree_eq_foldable_native() {
 }
 
 #[test]
+fn test_tier3_map_keys_in_lambda_native() {
+    run_native_test("tier3_io/map_keys_in_lambda", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

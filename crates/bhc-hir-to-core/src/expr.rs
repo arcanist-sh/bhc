@@ -1064,9 +1064,30 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     // comprehension's own type does not survive to codegen, so the occurrence
     // carries it (`M.fromListWith (+) [(w, 1) | w <- words s]` kept every
     // duplicate).
+    //
+    // The functions that take a key likewise: in `\m w -> M.insertWith (+) w
+    // 1 m` neither the key nor the map has a type of its own.
     if matches!(
         v.name.as_str(),
-        "Data.Map.fromList" | "Data.Map.fromListWith" | "Data.Set.fromList"
+        "Data.Map.fromList"
+            | "Data.Map.fromListWith"
+            | "Data.Set.fromList"
+            | "Data.Map.insert"
+            | "Data.Map.insertWith"
+            | "Data.Map.member"
+            | "Data.Map.notMember"
+            | "Data.Map.lookup"
+            | "Data.Map.findWithDefault"
+            | "Data.Map.delete"
+            | "Data.Map.adjust"
+            | "Data.Map.alter"
+            | "Data.Map.update"
+            | "Data.Map.singleton"
+            | "Data.Set.insert"
+            | "Data.Set.member"
+            | "Data.Set.notMember"
+            | "Data.Set.delete"
+            | "Data.Set.singleton"
     ) && matches!(v.ty, Ty::Error | Ty::Var(_) | Ty::Forall(..))
     {
         if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(span) {

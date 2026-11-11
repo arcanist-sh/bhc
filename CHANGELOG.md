@@ -41,6 +41,10 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `Data.Map` and `Data.Set` operations whose key is a lambda parameter
+  (`foldl' (\m w -> M.insertWith (+) w 1 m) M.empty ws`) compared `String`,
+  `Text` and enumeration keys by address, so equal keys were never merged or
+  found (#101).
 - Derived `Eq` and `Ord` on a recursive parameterized type (`data Tree a =
   Leaf | Node (Tree a) a (Tree a)`) compared the subtrees by address, so two
   equal trees built separately were unequal (#104).

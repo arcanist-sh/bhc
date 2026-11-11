@@ -18867,11 +18867,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
         if let Some(c) = container {
+            // A lambda parameter's type can still hold unsolved variables
+            // (`Map t1 t2`), which say nothing about the key.
             if let Some(kt) = self.container_key_ty(&c.ty()) {
-                return self.key_kind_of_ty(kt);
+                if !matches!(kt, Ty::Var(_) | Ty::Error) {
+                    return self.key_kind_of_ty(kt);
+                }
             }
         }
-        0
+        self.builtin_ty_key_kind()
+    }
+
+    /// The key kind named by the type of the container builtin being lowered
+    /// (`insertWith :: (v -> v -> v) -> String -> v -> Map String v -> …`),
+    /// for a key and a container that say nothing themselves: lambda
+    /// parameters, as in `foldl' (\m w -> M.insertWith (+) w 1 m) M.empty`,
+    /// where every word became a key of its own. 0 when the type names no
+    /// container, or containers whose keys differ in kind (`mapKeys`).
+    fn builtin_ty_key_kind(&self) -> u64 {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        let mut kind = None;
+        loop {
+            let (part, rest) = match t {
+                Ty::Fun(a, r) => (a.as_ref(), Some(r.as_ref())),
+                other => (other, None),
+            };
+            if let Some(kt) = self.container_key_ty(part) {
+                let k = self.key_kind_of_ty(kt);
+                if kind.is_some_and(|seen| seen != k) {
+                    return 0;
+                }
+                kind = Some(k);
+            }
+            match rest {
+                Some(r) => t = r,
+                None => break,
+            }
+        }
+        kind.unwrap_or(0)
     }
 
     /// The key kind for a list of key/value pairs (`Data.Map.fromList`) or of

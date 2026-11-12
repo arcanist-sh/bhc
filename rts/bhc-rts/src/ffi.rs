@@ -150,11 +150,8 @@ pub extern "C" fn bhc_alloc(size: usize) -> *mut u8 {
     if size == 0 {
         return 8 as *mut u8; // aligned dangling pointer; bhc_free ignores size 0
     }
-    let layout = std::alloc::Layout::from_size_align(size, 8).ok();
-    match layout {
-        Some(layout) => unsafe { std::alloc::alloc(layout) },
-        None => ptr::null_mut(),
-    }
+    // A pointer increment in the thread's chunk, not a `malloc` per object.
+    crate::bump::allocate(size)
 }
 
 /// Allocate zeroed memory from the RTS heap.
@@ -198,7 +195,9 @@ pub extern "C" fn bhc_alloc_zeroed(size: usize) -> *mut u8 {
 pub unsafe extern "C" fn bhc_free(ptr: *mut u8, size: usize) {
     // Size-0 "allocations" are dangling sentinels from bhc_alloc; there is
     // nothing to deallocate (and dealloc with a zero-size layout is UB)
-    if !ptr.is_null() && size > 0 {
+    // An object in a bump chunk is not the system allocator's to free; it
+    // stays until there is a collector.
+    if !ptr.is_null() && size > 0 && !crate::bump::owns(ptr) {
         if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
             unsafe { std::alloc::dealloc(ptr, layout) };
         }

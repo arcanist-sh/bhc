@@ -65,6 +65,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 // FFI entry points for C interop
+mod bump;
 pub mod concurrent;
 pub mod ffi;
 pub mod read_generic;

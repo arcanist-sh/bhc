@@ -5751,12 +5751,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let unboxed = match param_ty {
                 FfiType::Int64 | FfiType::Int32 | FfiType::Int8 => {
                     // Unbox: ptr_to_int
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox int failed: {e:?}"))
-                        })?;
+                    let int_val = self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}"))?;
                     match param_ty {
                         FfiType::Int32 => {
                             let truncated = self
@@ -5789,12 +5784,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 FfiType::Double => {
                     // Unbox: ptr -> i64 -> f64 (bitcast)
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox double failed: {e:?}"))
-                        })?;
+                    let int_val =
+                        self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}_bits"))?;
                     let f64_val = self
                         .builder()
                         .build_bit_cast(
@@ -5809,12 +5800,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 FfiType::Float => {
                     // Unbox: ptr -> i64 -> f64 -> f32 (truncate)
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox float failed: {e:?}"))
-                        })?;
+                    let int_val =
+                        self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}_bits"))?;
                     let f64_val = self
                         .builder()
                         .build_bit_cast(
@@ -5869,9 +5856,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     ret_val
                 };
-                self.builder()
-                    .build_int_to_ptr(i64_val, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box int failed: {e:?}")))?
+                self.word_from_scalar(i64_val, "box_ret")?
             }
             FfiType::Double => {
                 let ret_val = c_call
@@ -5891,9 +5876,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("FFI box double bitcast failed: {e:?}"))
                     })?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box double failed: {e:?}")))?
+                self.word_from_scalar(bits, "box_ret")?
             }
             FfiType::Float => {
                 let ret_val = c_call
@@ -5919,9 +5902,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("FFI box float bitcast failed: {e:?}"))
                     })?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box float failed: {e:?}")))?
+                self.word_from_scalar(bits, "box_ret")?
             }
             FfiType::Ptr => {
                 let ret_val = c_call
@@ -6112,9 +6093,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => Ok(p),
             BasicValueEnum::IntValue(i) => {
                 // Box the integer: cast to pointer
-                self.builder()
-                    .build_int_to_ptr(i, self.type_mapper().ptr_type(), "box_int")
-                    .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+                self.word_from_scalar(i, "box_int")
             }
             BasicValueEnum::FloatValue(f) => {
                 // Box the float: ensure f64, cast bits to i64, then to pointer
@@ -6132,9 +6111,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_bit_cast(f64_val, self.type_mapper().i64_type(), "float_bits")
                     .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, self.type_mapper().ptr_type(), "box_float")
-                    .map_err(|e| CodegenError::Internal(format!("failed to box float: {:?}", e)))
+                self.word_from_scalar(bits, "box_float")
             }
             _ => Err(CodegenError::Unsupported(
                 "cannot box this value type".to_string(),
@@ -6161,12 +6138,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match (value, target_type) {
             // Pointer to integer: unbox (ptr_to_int)
             (BasicValueEnum::PointerValue(p), inkwell::types::BasicTypeEnum::IntType(int_ty)) => {
-                let int_val = self
-                    .builder()
-                    .build_ptr_to_int(p, int_ty, "coerce_ptr_to_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce ptr to int: {:?}", e))
-                    })?;
+                let int_val = self.scalar_from_word_as(p, int_ty, "coerce_ptr_to_int")?;
                 Ok(int_val.into())
             }
             // Integer to pointer: box (int_to_ptr)
@@ -6187,12 +6159,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     i
                 };
-                let ptr_val = self
-                    .builder()
-                    .build_int_to_ptr(i64_val, tm.ptr_type(), "coerce_int_to_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce int to ptr: {:?}", e))
-                    })?;
+                let ptr_val = self.word_from_scalar(i64_val, "coerce_int_to_ptr")?;
                 Ok(ptr_val.into())
             }
             // Pointer to float: unbox (ptr_to_int then bit_cast)
@@ -6200,12 +6167,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 BasicValueEnum::PointerValue(p),
                 inkwell::types::BasicTypeEnum::FloatType(float_ty),
             ) => {
-                let bits = self
-                    .builder()
-                    .build_ptr_to_int(p, tm.i64_type(), "coerce_ptr_to_bits")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce ptr to bits: {:?}", e))
-                    })?;
+                let bits = self.scalar_from_word(p, "coerce_ptr_to_bits")?;
                 // For f32, truncate to i32 first, then bit_cast
                 let float_val = if float_ty == tm.f32_type() {
                     let bits32 = self
@@ -6247,12 +6209,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("failed to cast float to bits: {:?}", e))
                     })?
                     .into_int_value();
-                let ptr_val = self
-                    .builder()
-                    .build_int_to_ptr(bits, tm.ptr_type(), "coerce_float_to_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce float to ptr: {:?}", e))
-                    })?;
+                let ptr_val = self.word_from_scalar(bits, "coerce_float_to_ptr")?;
                 Ok(ptr_val.into())
             }
             // Integer width conversion
@@ -6584,12 +6541,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 CodegenError::Internal("extract_bool_tag: no current function".to_string())
             })?;
 
-        let raw_int = self
-            .builder()
-            .build_ptr_to_int(bool_ptr, i64_type, "bool_raw")
-            .map_err(|e| {
-                CodegenError::Internal(format!("extract_bool_tag: ptr_to_int: {:?}", e))
-            })?;
+        let raw_int = self.word_bits(bool_ptr, "bool_raw")?;
 
         // If raw value <= 1, it's a tagged-int-as-pointer (0=False, 1=True)
         // If raw value > 1, it's a heap pointer to a Bool ADT struct
@@ -6628,12 +6580,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // 0/1 immediate as a struct.
         self.builder().position_at_end(adt_block);
         let forced_ptr = self.build_force(bool_ptr.into())?.into_pointer_value();
-        let forced_raw = self
-            .builder()
-            .build_ptr_to_int(forced_ptr, i64_type, "forced_raw")
-            .map_err(|e| {
-                CodegenError::Internal(format!("extract_bool_tag: ptr_to_int: {:?}", e))
-            })?;
+        let forced_raw = self.word_bits(forced_ptr, "forced_raw")?;
         let forced_is_tagged = self
             .builder()
             .build_int_compare(
@@ -11421,10 +11368,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(fill_body);
         let head = self.extract_adt_field(fill_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head, tm.i64_type(), "l2c_char")
-            .map_err(|e| CodegenError::Internal(format!("l2c ptr2int: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head, "l2c_char")?;
         let char_i8 = self
             .builder()
             .build_int_truncate(char_val, tm.i8_type(), "l2c_i8")
@@ -11798,10 +11742,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let head_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let head_val = self.scalar_from_word(head_ptr, "head_val")?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
@@ -11826,14 +11767,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Exit: return accumulator (boxed as pointer)
         self.builder().position_at_end(loop_exit);
-        let result = self
-            .builder()
-            .build_int_to_ptr(
-                acc_phi.as_basic_value().into_int_value(),
-                tm.ptr_type(),
-                "result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        let result = self.word_from_scalar(acc_phi.as_basic_value().into_int_value(), "result")?;
         Ok(Some(result.into()))
     }
 
@@ -11911,10 +11845,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let head_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let head_val = self.scalar_from_word(head_ptr, "head_val")?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
@@ -11939,14 +11870,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Exit: return accumulator (boxed as pointer)
         self.builder().position_at_end(loop_exit);
-        let result = self
-            .builder()
-            .build_int_to_ptr(
-                acc_phi.as_basic_value().into_int_value(),
-                tm.ptr_type(),
-                "result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        let result = self.word_from_scalar(acc_phi.as_basic_value().into_int_value(), "result")?;
         Ok(Some(result.into()))
     }
 
@@ -14764,10 +14688,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("maybe: f returned void".to_string()))?;
         let call_as_ptr = match call_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "call_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "call_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "maybe: f returned unexpected type".to_string(),
@@ -15429,10 +15350,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("either: f returned void".to_string()))?;
         let left_as_ptr = match left_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "left_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "left_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "either: f returned unexpected type".to_string(),
@@ -15461,10 +15379,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("either: g returned void".to_string()))?;
         let right_as_ptr = match right_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "right_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "right_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "either: g returned unexpected type".to_string(),
@@ -17587,12 +17502,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let fd_int = match fd_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "fd_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("queryTerminal ptr_to_int: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "fd_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "queryTerminal expects an Fd".to_string(),
@@ -17845,10 +17755,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head (char) at field 0
         let head_ptr = self.extract_adt_field(node_ptr, 2, 0)?;
         // The char was stored via int_to_ptr, so convert back to int
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "char_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to get char: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head_ptr, "char_val")?;
         // Truncate to i32 for bhc_print_char
         let char_i32 = self
             .builder()
@@ -17884,9 +17791,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => i,
             BasicValueEnum::PointerValue(p) => {
                 // Might be a boxed char - unbox it
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_char")
-                    .map_err(|e| CodegenError::Internal(format!("failed to unbox char: {:?}", e)))?
+                self.scalar_from_word(p, "unbox_char")?
             }
             _ => {
                 return Err(CodegenError::TypeError(
@@ -18268,12 +18173,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // For type variables from closures, we assume int since that's the most common case.
                     // This is safe because boxed ints use int_to_ptr which stores the value in the
                     // pointer bits, not as an actual memory reference.
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_int")?;
 
                     let print_fn = self.functions.get(&VarId::new(1000000)).ok_or_else(|| {
                         CodegenError::Internal("bhc_print_int_ln not declared".to_string())
@@ -18288,12 +18188,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Boxed float/double - unbox and print as double. The
                     // structural `expr_returns_double` check catches results
                     // whose type is erased to `Error` (e.g. `sqrt x`, `abs d`).
-                    let bits = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                        })?;
+                    let bits = self.scalar_from_word(p, "unbox_float_bits")?;
                     let float_val = self
                         .builder()
                         .build_bit_cast(bits, self.type_mapper().f64_type(), "to_double")
@@ -33433,12 +33328,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Coerce count to i64
         let count_i64 = match count_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "count_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("replicateM: ptr_to_int failed: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "count_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "replicateM: count must be Int".to_string(),
@@ -33541,12 +33431,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("replicateM_: no count".to_string()))?;
         let count_i64 = match count_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "count_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("replicateM_: ptr_to_int failed: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "count_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "replicateM_: count must be Int".to_string(),
@@ -35322,10 +35207,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero value)
         // Comparison operators return tagged-int-as-pointer, so use ptr_to_int
-        let pred_bool = self
-            .builder()
-            .build_ptr_to_int(pred_result.into_pointer_value(), tm.i64_type(), "pred_bool")
-            .map_err(|e| CodegenError::Internal(format!("until: ptr_to_int: {:?}", e)))?;
+        let pred_bool = self.scalar_from_word(pred_result.into_pointer_value(), "pred_bool")?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -35539,10 +35421,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // verification.)
         let head =
             self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head, tm.i64_type(), "char_val")
-            .map_err(|e| CodegenError::Internal(format!("iprint: char ptr_to_int: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head, "char_val")?;
         let char_i32 = self
             .builder()
             .build_int_truncate(char_val, tm.i32_type(), "char_i32")
@@ -36653,18 +36532,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(cur_head, i64_type, "head_int")
-            .map_err(|e| CodegenError::Internal(format!("{}: p2i: {:?}", label, e)))?;
-        let best_int = self
-            .builder()
-            .build_ptr_to_int(
-                best_phi.as_basic_value().into_pointer_value(),
-                i64_type,
-                "best_int",
-            )
-            .map_err(|e| CodegenError::Internal(format!("{}: p2i: {:?}", label, e)))?;
+        let head_int = self.scalar_from_word(cur_head, "head_int")?;
+        let best_int =
+            self.scalar_from_word(best_phi.as_basic_value().into_pointer_value(), "best_int")?;
         let is_better = self
             .builder()
             .build_int_compare(cmp_pred, head_int, best_int, "is_better")
@@ -36737,10 +36607,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let not_found_block = self.llvm_ctx.append_basic_block(current_fn, "ei_not_found");
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "ei_merge");
 
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, i64_type, "val_int")
-            .map_err(|e| CodegenError::Internal(format!("elemIndex: p2i: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -36775,10 +36642,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head, i64_type, "head_int")
-            .map_err(|e| CodegenError::Internal(format!("elemIndex: p2i: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head, "head_int")?;
         let is_equal = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_eq")
@@ -37086,14 +36950,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let p_int = self
-            .builder()
-            .build_ptr_to_int(p_head, i64_type, "p_int")
-            .map_err(|e| CodegenError::Internal(format!("isPrefixOf: p2i: {:?}", e)))?;
-        let l_int = self
-            .builder()
-            .build_ptr_to_int(l_head, i64_type, "l_int")
-            .map_err(|e| CodegenError::Internal(format!("isPrefixOf: p2i: {:?}", e)))?;
+        let p_int = self.scalar_from_word(p_head, "p_int")?;
+        let l_int = self.scalar_from_word(l_head, "l_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, p_int, l_int, "heads_eq")
@@ -37247,14 +37105,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let p_int = self
-            .builder()
-            .build_ptr_to_int(p_head, i64_type, "p_int")
-            .map_err(|e| CodegenError::Internal(format!("isSuffixOf: p2i: {:?}", e)))?;
-        let l_int = self
-            .builder()
-            .build_ptr_to_int(l_head, i64_type, "l_int")
-            .map_err(|e| CodegenError::Internal(format!("isSuffixOf: p2i: {:?}", e)))?;
+        let p_int = self.scalar_from_word(p_head, "p_int")?;
+        let l_int = self.scalar_from_word(l_head, "l_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, p_int, l_int, "heads_eq")
@@ -37448,14 +37300,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let h_head = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let h_tail = self.extract_list_tail(h_phi.as_basic_value().into_pointer_value())?;
 
-        let n_int = self
-            .builder()
-            .build_ptr_to_int(n_head, i64_type, "n_int")
-            .map_err(|e| CodegenError::Internal(format!("isInfixOf: p2i: {:?}", e)))?;
-        let h_int = self
-            .builder()
-            .build_ptr_to_int(h_head, i64_type, "h_int")
-            .map_err(|e| CodegenError::Internal(format!("isInfixOf: p2i: {:?}", e)))?;
+        let n_int = self.scalar_from_word(n_head, "n_int")?;
+        let h_int = self.scalar_from_word(h_head, "h_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, n_int, h_int, "heads_eq")
@@ -37921,10 +37767,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "elem_merge");
 
         // Convert search value to i64 for comparison
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, i64_ty, "val_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -37978,10 +37821,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 )
                 .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
         } else {
-            let head_int = self
-                .builder()
-                .build_ptr_to_int(head_ptr, i64_ty, "head_int")
-                .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+            let head_int = self.scalar_from_word(head_ptr, "head_int")?;
             self.builder()
                 .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
                 .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
@@ -38200,10 +38040,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .append_basic_block(current_fn, "notelem_merge");
 
         // Convert search value to i64 for comparison
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, tm.i64_type(), "val_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -38237,10 +38074,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head_ptr, "head_int")?;
         let is_equal = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
@@ -39538,10 +39372,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "lookup_merge");
 
         // Convert search key to i64 for comparison
-        let key_int = self
-            .builder()
-            .build_ptr_to_int(key_ptr, tm.i64_type(), "key_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let key_int = self.scalar_from_word(key_ptr, "key_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -39580,10 +39411,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let pair_val = self.extract_adt_field(head_ptr, 2, 1)?;
 
         // Compare pair key with search key
-        let pair_key_int = self
-            .builder()
-            .build_ptr_to_int(pair_key, tm.i64_type(), "pair_key_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let pair_key_int = self.scalar_from_word(pair_key, "pair_key_int")?;
         let is_match = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, pair_key_int, key_int, "is_match")
@@ -40672,10 +40500,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head_ptr, "head_int")?;
         let is_match = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_match")
@@ -40951,10 +40776,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let x_tail = self.extract_list_tail(xs_phi.as_basic_value().into_pointer_value())?;
 
         // Convert x_head to int for comparison (works for Int values)
-        let x_int = self
-            .builder()
-            .build_ptr_to_int(x_head, tm.i64_type(), "x_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let x_int = self.scalar_from_word(x_head, "x_int")?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -40985,10 +40807,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(inner_body);
         let y_head = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let y_tail = self.extract_list_tail(ys_phi.as_basic_value().into_pointer_value())?;
-        let y_int = self
-            .builder()
-            .build_ptr_to_int(y_head, tm.i64_type(), "y_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let y_int = self.scalar_from_word(y_head, "y_int")?;
 
         let eq = self
             .builder()
@@ -42058,10 +41877,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("read: returned void".to_string()))?;
         // Convert i64 to int-as-pointer
         let i64_val = result.into_int_value();
-        let ptr_val = self
-            .builder()
-            .build_int_to_ptr(i64_val, self.type_mapper().ptr_type(), "read_as_ptr")
-            .map_err(|e| CodegenError::Internal(format!("read int_to_ptr: {:?}", e)))?;
+        let ptr_val = self.word_from_scalar(i64_val, "read_as_ptr")?;
         Ok(Some(ptr_val.into()))
     }
 
@@ -42154,10 +41970,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // char_check: extract head char and compare
                 self.builder().position_at_end(char_check);
                 let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-                let char_val = self
-                    .builder()
-                    .build_ptr_to_int(head_ptr, i64_type, "char_val")
-                    .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+                let char_val = self.scalar_from_word(head_ptr, "char_val")?;
                 let expected = i64_type.const_int(*ch as u64, false);
                 let chars_eq = self
                     .builder()
@@ -51620,14 +51433,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // this way (a `Text` in `parserBind`'s continuation slot); routing it to
         // `bhc_bad_action` names the object and the call site instead.
         let tm = self.type_mapper();
-        let fn_as_int = self
-            .builder()
-            .build_ptr_to_int(fn_ptr, tm.i64_type(), "fn_as_int")
-            .map_err(|e| CodegenError::Internal(format!("action fn ptr_to_int: {:?}", e)))?;
-        let obj_as_int = self
-            .builder()
-            .build_ptr_to_int(closure_ptr, tm.i64_type(), "obj_as_int")
-            .map_err(|e| CodegenError::Internal(format!("action obj ptr_to_int: {:?}", e)))?;
+        let fn_as_int = self.address_of(fn_ptr, "fn_as_int")?;
+        let obj_as_int = self.address_of(closure_ptr, "obj_as_int")?;
         let obj_plus_hdr = self
             .builder()
             .build_int_add(
@@ -58791,11 +58598,79 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    // ========================================================================
+    // The value representation boundary (#94)
+    // ========================================================================
+    //
+    // A value in a lifted position is one machine word, typed `ptr` in LLVM.
+    // Today that word is either a heap pointer or a scalar's own bits: an
+    // `Int` or `Char` is the integer, a `Double` its 64 bits. Nothing in the
+    // word says which, and that is what #94 changes.
+    //
+    // Every conversion between a scalar and such a word goes through the
+    // functions in this section, and each says which of four things it is:
+    //
+    // * `word_from_scalar`: a scalar becomes a value word (boxing);
+    // * `scalar_from_word`: a value word is read as a scalar (unboxing);
+    // * `word_bits`: the word is inspected to find out HOW it is represented
+    //   (an immediate tag, or a pointer to an object);
+    // * `address_of`: a genuine pointer's address, for comparison.
+    //
+    // `inttoptr` and `ptrtoint` appear nowhere else in this file (a test
+    // holds that), so the representation can be changed here.
+
+    /// A scalar as a value word. Today: the scalar's own bits.
+    fn word_from_scalar(
+        &self,
+        scalar: IntValue<'ctx>,
+        label: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        self.builder()
+            .build_int_to_ptr(scalar, self.type_mapper().ptr_type(), label)
+            .map_err(|e| CodegenError::Internal(format!("failed to box a scalar: {e:?}")))
+    }
+
+    /// The scalar a value word holds, as an `i64`. Today: the word's bits.
+    fn scalar_from_word(
+        &self,
+        word: PointerValue<'ctx>,
+        label: &str,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        self.scalar_from_word_as(word, self.type_mapper().i64_type(), label)
+    }
+
+    /// [`Self::scalar_from_word`] at another integer width.
+    fn scalar_from_word_as(
+        &self,
+        word: PointerValue<'ctx>,
+        int_ty: inkwell::types::IntType<'ctx>,
+        label: &str,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(word, int_ty, label)
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox a scalar: {e:?}")))
+    }
+
+    /// The raw bits of a value word, to tell how the value is represented
+    /// (a `Bool` arrives as the tag itself or as a pointer to its object).
+    /// These are the call sites that know both representations.
+    fn word_bits(&self, word: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(word, self.type_mapper().i64_type(), label)
+            .map_err(|e| CodegenError::Internal(format!("failed to read a word: {e:?}")))
+    }
+
+    /// The address of a pointer that is known to be one (a function, a
+    /// closure object), for comparison. Not an unboxing.
+    fn address_of(&self, ptr: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(ptr, self.type_mapper().i64_type(), label)
+            .map_err(|e| CodegenError::Internal(format!("failed to take an address: {e:?}")))
+    }
+
     /// Convert an integer to a pointer (boxing).
     fn int_to_ptr(&self, int_val: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
-        self.builder()
-            .build_int_to_ptr(int_val, self.type_mapper().ptr_type(), "box_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+        self.word_from_scalar(int_val, "box_int")
     }
 
     /// Convert a float to a pointer (boxing via bit cast).
@@ -58805,16 +58680,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_bit_cast(float_val, self.type_mapper().i64_type(), "float_bits")
             .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
             .into_int_value();
-        self.builder()
-            .build_int_to_ptr(bits, self.type_mapper().ptr_type(), "box_float")
-            .map_err(|e| CodegenError::Internal(format!("failed to box float: {:?}", e)))
+        self.word_from_scalar(bits, "box_float")
     }
 
     /// Convert a pointer to an integer (unbox).
     fn ptr_to_int(&self, ptr: PointerValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
-        self.builder()
-            .build_ptr_to_int(ptr, self.type_mapper().i64_type(), "unbox")
-            .map_err(|e| CodegenError::Internal(format!("failed to unbox: {:?}", e)))
+        self.scalar_from_word(ptr, "unbox")
     }
 
     /// Check if an expression is a saturated primitive operation.
@@ -59377,9 +59248,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => Ok(i),
             BasicValueEnum::PointerValue(p) => {
                 // Unbox: pointer stores int value directly using ptr_to_int
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
-                    .map_err(|e| CodegenError::Internal(format!("failed to unbox int: {:?}", e)))
+                self.scalar_from_word(p, "unbox_int")
             }
             other => Err(CodegenError::TypeError(format!(
                 "expected int or boxed int, got {other} (from {})",
@@ -59393,9 +59262,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &self,
         val: inkwell::values::IntValue<'ctx>,
     ) -> CodegenResult<inkwell::values::PointerValue<'ctx>> {
-        self.builder()
-            .build_int_to_ptr(val, self.type_mapper().ptr_type(), "box_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+        self.word_from_scalar(val, "box_int")
     }
 
     /// The head variable name of an application spine, peeling type applications
@@ -59799,14 +59666,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
         } else {
             // Compare heads as integers (works for primitive types like Int)
-            let head1_int = self
-                .builder()
-                .build_ptr_to_int(head1, i64_type, "head1_int")
-                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-            let head2_int = self
-                .builder()
-                .build_ptr_to_int(head2, i64_type, "head2_int")
-                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+            let head1_int = self.scalar_from_word(head1, "head1_int")?;
+            let head2_int = self.scalar_from_word(head2, "head2_int")?;
             self.builder()
                 .build_int_compare(inkwell::IntPredicate::EQ, head1_int, head2_int, "heads_eq")
                 .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
@@ -60014,10 +59875,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         ptr: inkwell::values::PointerValue<'ctx>,
     ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
         let tm = self.type_mapper();
-        let bits = self
-            .builder()
-            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-            .map_err(|e| CodegenError::Internal(format!("failed to unbox double: {:?}", e)))?;
+        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
         let double_val = self
             .builder()
             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -60123,12 +59981,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // The pointer might be:
                 // 1. A valid Bool ADT pointer (from constructor allocation)
                 // 2. A small integer (0 or 1) cast to pointer (from primop result)
-                let ptr_as_int = self
-                    .builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_as_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                    })?;
+                let ptr_as_int = self.word_bits(p, "ptr_as_int")?;
 
                 // Check if it's a small integer (0 or 1)
                 let is_raw_bool = self
@@ -60405,11 +60258,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => Ok(i),
             BasicValueEnum::PointerValue(p) => {
                 // Pointer might be a boxed int - convert
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_to_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                    })
+                self.scalar_from_word(p, "ptr_to_int")
             }
             _ => Err(CodegenError::TypeError(
                 "expected integer value".to_string(),
@@ -62207,12 +62056,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     //
                     // We need to distinguish these cases. Check if pointer value <= 1,
                     // in which case it's a raw boolean, otherwise load from the ADT.
-                    let ptr_as_int = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_as_int")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                        })?;
+                    let ptr_as_int = self.word_bits(p, "ptr_as_int")?;
 
                     // Check if it's a small integer (0 or 1)
                     let is_raw_bool = self
@@ -62502,21 +62346,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Check if the alternatives have integer/char literals - if so, unbox the pointer
                 if has_int_lit || has_char_lit {
                     // Pointer contains a boxed integer - unbox it
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_for_case")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox for case: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_for_case")?;
                     self.lower_case_literal_int(int_val, alts)
                 } else if has_float_lit {
                     // Pointer contains a boxed float - unbox it
-                    let bits = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                        })?;
+                    let bits = self.scalar_from_word(p, "unbox_float_bits")?;
                     let float_val = self
                         .builder()
                         .build_bit_cast(bits, self.type_mapper().f64_type(), "to_double")
@@ -62535,12 +62369,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.lower_case_literal_string(p, alts, scrut_is_text)
                 } else {
                     // Default case or only Default alternatives - assume integer
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_for_case")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox for case: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_for_case")?;
                     self.lower_case_literal_int(int_val, alts)
                 }
             }
@@ -63239,11 +63068,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             BasicValueEnum::IntValue(i) => {
                 // If it's an int, it might be a boxed value - try to interpret as ptr
-                self.builder()
-                    .build_int_to_ptr(i, self.type_mapper().ptr_type(), "scrut_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to cast scrutinee: {:?}", e))
-                    })?
+                self.word_from_scalar(i, "scrut_ptr")?
             }
             _ => {
                 return Err(CodegenError::Unsupported(
@@ -63970,21 +63795,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 match name {
                     "Int" | "Int#" | "Int64" => {
                         // Unbox: ptr -> int
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         Ok(int_val.into())
                     }
                     "Int32" => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         let truncated = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "trunc_i32")
@@ -64001,12 +63816,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(ptr.into())
                     }
                     "Char" | "Char#" => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_char")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox char: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_char")?;
                         let char_val = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "to_char")
@@ -64017,21 +63827,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                     "Float" | "Float#" => {
                         // Unbox: ptr -> bits -> float
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_float_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_float_bits")?;
                         Ok(self.float_from_word_bits(bits)?.into())
                     }
                     "Double" | "Double#" => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox double: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
                         let double_val = self
                             .builder()
                             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -64050,21 +63850,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 use bhc_types::PrimTy;
                 match prim {
                     PrimTy::I64 | PrimTy::U64 => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_i64")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox i64: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_i64")?;
                         Ok(int_val.into())
                     }
                     PrimTy::I32 | PrimTy::U32 => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         let truncated = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "trunc_i32")
@@ -64074,21 +63864,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(truncated.into())
                     }
                     PrimTy::F32 => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_float_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_float_bits")?;
                         Ok(self.float_from_word_bits(bits)?.into())
                     }
                     PrimTy::F64 => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox double: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
                         let double_val = self
                             .builder()
                             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -64098,12 +63878,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(double_val)
                     }
                     PrimTy::Char => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_char")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox char: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_char")?;
                         let char_val = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "to_char")
@@ -66619,6 +66394,40 @@ pub fn shadows_codegen_builtin(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `inttoptr` and `ptrtoint` are emitted only by the functions of the
+    /// value representation boundary (#94). A new direct use elsewhere is a
+    /// place the representation could not be changed from.
+    #[test]
+    fn scalar_and_pointer_conversions_stay_at_the_boundary() {
+        let source = include_str!("lower.rs");
+        let section_start = source
+            .find("// The value representation boundary (#94)")
+            .expect("the boundary section exists");
+        let section_end = source[section_start..]
+            .find("fn int_to_ptr(")
+            .map(|offset| section_start + offset)
+            .expect("the boundary section ends at int_to_ptr");
+        // Spelled in two parts so this test is not itself a match.
+        let int_to_ptr = concat!(".build_int", "_to_ptr(");
+        let ptr_to_int = concat!(".build_ptr", "_to_int(");
+        for (index, line) in source.lines().enumerate() {
+            if !(line.contains(int_to_ptr) || line.contains(ptr_to_int)) {
+                continue;
+            }
+            let offset = source
+                .lines()
+                .take(index)
+                .map(|l| l.len() + 1)
+                .sum::<usize>();
+            assert!(
+                (section_start..section_end).contains(&offset),
+                "lower.rs:{}: a scalar/pointer conversion outside the value \
+                 representation boundary; use word_from_scalar, scalar_from_word, \
+                 word_bits or address_of",
+                index + 1
+            );
+        }
+    }
 
     // Tests would go here
 }

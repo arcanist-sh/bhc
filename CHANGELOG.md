@@ -8,6 +8,9 @@ All notable changes to BHC are recorded here. The format follows
 
 ### Added
 
+- `(**)`, `(^^)` and `realToFrac`, which aborted as stubs, and the Prelude's
+  `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`,
+  `atanh`, `logBase`, `isNaN` and `isInfinite`, which were not in scope.
 - `putStr` and `putStrLn` for `Data.ByteString` and `Data.ByteString.Char8`
   (the bytes as they are, to stdout), and `map` for both.
 - `Numeric.showFFloat`, `showHex` and `showOct`, which aborted as stubs.
@@ -43,6 +46,9 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `floor`, `ceiling`, `round` and `truncate` at `Integer` crashed (the
+  machine word was taken for a bignum), and would have saturated at 64 bits;
+  they build the `Integer` from the double.
 - In a module that defines its own `show` (or any other Prelude name), the
   qualified `Prelude.show` resolved to the module's definition, so one
   written in terms of the Prelude's called itself (#158).

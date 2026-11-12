@@ -2269,6 +2269,25 @@ pub extern "C" fn bhc_ceiling_double(a: f64) -> i64 {
     a.ceil() as i64
 }
 
+/// A double rounded to an `Integer`: `mode` 0 = floor, 1 = ceiling,
+/// 2 = round (half to even), 3 = truncate.
+///
+/// The machine-word rounding functions saturate at 64 bits, so `floor 1.0e20
+/// :: Integer` was `9223372036854775807`. A NaN or an infinity has no integer
+/// value; they answer 0 here (GHC answers an arbitrary huge number).
+#[no_mangle]
+pub extern "C" fn bhc_double_to_integer(a: f64, mode: i64) -> *mut u8 {
+    use num_traits::FromPrimitive;
+    let rounded = match mode {
+        0 => a.floor(),
+        1 => a.ceil(),
+        2 => a.round_ties_even(),
+        _ => a.trunc(),
+    };
+    let big = BigInt::from_f64(rounded).unwrap_or_default();
+    Box::into_raw(Box::new(big)) as *mut u8
+}
+
 /// Floor of Double
 #[no_mangle]
 pub extern "C" fn bhc_floor_double(a: f64) -> i64 {

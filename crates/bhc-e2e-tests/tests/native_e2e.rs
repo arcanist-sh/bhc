@@ -2227,6 +2227,14 @@ fn test_tier2_shadowed_prelude_names() {
 }
 
 #[test]
+fn test_tier2_prelude_numeric_functions() {
+    run_native_test(
+        "tier2_functions/prelude_numeric_functions",
+        Profile::Default,
+    );
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

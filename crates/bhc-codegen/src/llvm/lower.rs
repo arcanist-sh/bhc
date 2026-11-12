@@ -7493,6 +7493,118 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "acos" => self.lower_builtin_math_unary(args[0], 1000020, "acos"),
             "atan" => self.lower_builtin_math_unary(args[0], 1000021, "atan"),
             "atan2" => self.lower_builtin_math_binary(args[0], args[1], 1000022, "atan2"),
+            "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let r = self.call_double_rts(&format!("bhc_{name}_double"), &[x])?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            // `x ** y`, and `x ^^ n` as the same power with the exponent
+            // converted: both were stubs that aborted.
+            "**" | "^^" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let y = if name == "^^" {
+                    let n = self
+                        .lower_expr(args[1])?
+                        .ok_or_else(|| CodegenError::Internal("^^: no exponent".to_string()))?;
+                    let n = self.coerce_to_int(n)?;
+                    self.builder()
+                        .build_signed_int_to_float(n, self.type_mapper().f64_type(), "exponent")
+                        .map_err(|e| CodegenError::Internal(format!("^^: {e:?}")))?
+                } else {
+                    self.lower_f64_operand(args[1], name)?
+                };
+                let r = self.call_double_rts("bhc_pow_double", &[x, y])?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            // logBase b x = log x / log b
+            "logBase" => {
+                let b = self.lower_f64_operand(args[0], name)?;
+                let x = self.lower_f64_operand(args[1], name)?;
+                let log_x = self.call_double_rts("bhc_log_double", &[x])?;
+                let log_b = self.call_double_rts("bhc_log_double", &[b])?;
+                let r = self
+                    .builder()
+                    .build_float_div(log_x, log_b, "log_base")
+                    .map_err(|e| CodegenError::Internal(format!("logBase: {e:?}")))?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            "isNaN" | "isInfinite" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("{name}: {e:?}"))
+                };
+                let flag = if name == "isNaN" {
+                    self.builder()
+                        .build_float_compare(inkwell::FloatPredicate::UNO, x, x, "is_nan")
+                        .map_err(err)?
+                } else {
+                    let pos = self
+                        .builder()
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OEQ,
+                            x,
+                            f64_ty.const_float(f64::INFINITY),
+                            "is_pos_inf",
+                        )
+                        .map_err(err)?;
+                    let neg = self
+                        .builder()
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OEQ,
+                            x,
+                            f64_ty.const_float(f64::NEG_INFINITY),
+                            "is_neg_inf",
+                        )
+                        .map_err(err)?;
+                    self.builder().build_or(pos, neg, "is_inf").map_err(err)?
+                };
+                let tag = self
+                    .builder()
+                    .build_int_z_extend(flag, self.type_mapper().i64_type(), "flag")
+                    .map_err(err)?;
+                self.allocate_bool_adt(tag, name)
+            }
+            // `realToFrac`, by the types it was resolved at: a machine integer
+            // is converted, a `Double` or `Float` (both carried as a double)
+            // passes through, narrowed to single precision when the result is
+            // a `Float`. It was a stub that aborted.
+            "realToFrac" => {
+                let (from_integral, to_float) = match &self.current_builtin_ty {
+                    Ty::Fun(a, r) => (
+                        self.is_int_type(a),
+                        self.is_float_type(r) && !self.is_double_type(r),
+                    ),
+                    _ => (false, false),
+                };
+                let v = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("realToFrac: no value".to_string()))?;
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("realToFrac: {e:?}"))
+                };
+                let mut d = if from_integral {
+                    let i = self.coerce_to_int(v)?;
+                    self.builder()
+                        .build_signed_int_to_float(i, f64_ty, "real_to_frac")
+                        .map_err(err)?
+                } else {
+                    let v = self.coerce_float_operand(args[0], v)?;
+                    self.coerce_to_f64(v.into())?
+                };
+                if to_float {
+                    let narrow = self
+                        .builder()
+                        .build_float_trunc(d, self.type_mapper().f32_type(), "to_single")
+                        .map_err(err)?;
+                    d = self
+                        .builder()
+                        .build_float_ext(narrow, f64_ty, "single_as_double")
+                        .map_err(err)?;
+                }
+                Ok(Some(d.into()))
+            }
             "ceiling" => self.lower_builtin_float_to_int(args[0], 1000023, "ceiling"),
             "floor" => self.lower_builtin_float_to_int(args[0], 1000024, "floor"),
             "round" => self.lower_builtin_float_to_int(args[0], 1000025, "round"),
@@ -27575,6 +27687,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.int_to_ptr(result)?.into()))
     }
 
+    /// A numeric operand as an `f64`.
+    fn lower_f64_operand(
+        &mut self,
+        expr: &Expr,
+        name: &str,
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{name}: no value")))?;
+        let val = self.coerce_float_operand(expr, val)?;
+        self.coerce_to_f64(val.into())
+    }
+
+    /// Call a runtime function of doubles to a double (`bhc_sinh_double`,
+    /// `bhc_pow_double`), declaring it on first use.
+    fn call_double_rts(
+        &mut self,
+        symbol: &str,
+        args: &[inkwell::values::FloatValue<'ctx>],
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let f64_ty = self.type_mapper().f64_type();
+        let function = match self.module.get_function(symbol) {
+            Some(f) => f,
+            None => {
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    args.iter().map(|_| f64_ty.into()).collect();
+                self.module
+                    .add_function(symbol, f64_ty.fn_type(&params, false))
+            }
+        };
+        let call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            args.iter().map(|a| (*a).into()).collect();
+        self.builder()
+            .build_call(function, &call_args, "math")
+            .map_err(|e| CodegenError::Internal(format!("{symbol} call failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .map(BasicValueEnum::into_float_value)
+            .ok_or_else(|| CodegenError::Internal(format!("{symbol}: returned void")))
+    }
+
     /// Lower a unary math function (sqrt, exp, log, sin, cos, etc.)
     fn lower_builtin_math_unary(
         &mut self,
@@ -27641,6 +27794,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no value", name)))?;
         let f64_val = self.coerce_to_f64(val)?;
+        // At `Integer` the result is a bignum, not the machine word: handed
+        // on raw it was dereferenced (`floor 2.7 :: Integer` crashed), and
+        // the machine rounding saturates at 64 bits.
+        let to_integer =
+            matches!(&self.current_builtin_ty, Ty::Fun(_, r) if self.is_integer_type(r));
+        if to_integer {
+            let mode = match name {
+                "floor" => 0,
+                "ceiling" => 1,
+                "round" => 2,
+                _ => 3,
+            };
+            let ptr_type = self.type_mapper().ptr_type();
+            let i64_type = self.type_mapper().i64_type();
+            let f64_type = self.type_mapper().f64_type();
+            let to_integer_fn = match self.module.get_function("bhc_double_to_integer") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_double_to_integer",
+                    ptr_type.fn_type(&[f64_type.into(), i64_type.into()], false),
+                ),
+            };
+            return Ok(self
+                .builder()
+                .build_call(
+                    to_integer_fn,
+                    &[f64_val.into(), i64_type.const_int(mode, false).into()],
+                    name,
+                )
+                .map_err(|e| CodegenError::Internal(format!("{name} call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic());
+        }
         let rts_fn = self
             .functions
             .get(&VarId::new(rts_id))
@@ -30732,6 +30918,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // them by the argument too — otherwise a `Double` argument would
                 // be misrendered as `Int`.
                 if let Expr::Var(fv, _) = f.as_ref() {
+                    // A conversion resolved at `-> Float` shows as a Float
+                    // (`realToFrac (0.1 :: Double) :: Float` is `0.1`).
+                    if matches!(fv.name.as_str(), "realToFrac" | "fromIntegral")
+                        && matches!(&fv.ty, Ty::Fun(_, r)
+                            if self.is_float_type(r) && !self.is_double_type(r))
+                    {
+                        return Some((ShowCoerce::Float, 1000090, "show_float"));
+                    }
                     if matches!(
                         fv.name.as_str(),
                         "force" | "id" | "to" | "abs" | "negate" | "signum" | "recip"
@@ -53598,6 +53792,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     } else if let Some(lam) = Self::typed_show_lambda(name, var)
                         .or_else(|| Self::typed_arith_lambda(name, var))
                         .or_else(|| Self::typed_conversion_lambda(name, var))
+                        .or_else(|| Self::saturating_eta(name, var, arity))
                     {
                         // `map show xs`: a generic wrapper closure has no
                         // argument type and showed every element as an Int.
@@ -54315,6 +54510,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             span,
         );
         Some(Expr::Lam(x, Box::new(body), span))
+    }
+
+    /// `\\x.. -> f x..` for a builtin that is only lowered from a saturated
+    /// call: the numeric functions below have no generic wrapper (which
+    /// would see untyped values anyway), so as a value (`map sinh xs`,
+    /// `zipWith (**) xs ys`, `map floor xs :: [Integer]`) they aborted as
+    /// stubs or answered a raw machine word.
+    fn saturating_eta(name: &str, var: &Var, arity: u32) -> Option<Expr> {
+        let applies = matches!(
+            name,
+            "sinh"
+                | "cosh"
+                | "tanh"
+                | "asinh"
+                | "acosh"
+                | "atanh"
+                | "**"
+                | "^^"
+                | "logBase"
+                | "isNaN"
+                | "isInfinite"
+                | "realToFrac"
+        ) || (matches!(name, "floor" | "ceiling" | "round" | "truncate")
+            && matches!(var.ty, Ty::Fun(..)));
+        if !applies {
+            return None;
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 4_000_000);
+        let span = bhc_span::Span::default();
+        let mut param_ty = Some(&var.ty);
+        let params: Vec<Var> = (0..arity)
+            .map(|_| {
+                let ty = match param_ty {
+                    Some(Ty::Fun(a, r)) => {
+                        param_ty = Some(r.as_ref());
+                        a.as_ref().clone()
+                    }
+                    _ => {
+                        param_ty = None;
+                        Ty::Error
+                    }
+                };
+                Var {
+                    name: Symbol::intern("$sat_arg"),
+                    id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                    ty,
+                }
+            })
+            .collect();
+        let call = params.iter().fold(Expr::Var(var.clone(), span), |f, p| {
+            Expr::App(Box::new(f), Box::new(Expr::Var(p.clone(), span)), span)
+        });
+        Some(
+            params
+                .into_iter()
+                .rev()
+                .fold(call, |body, p| Expr::Lam(p, Box::new(body), span)),
+        )
     }
 
     fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
@@ -65547,6 +65801,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "acos" => Some(1),
         "atan" => Some(1),
         "atan2" => Some(2),
+        "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => Some(1),
+        "**" | "^^" | "logBase" => Some(2),
+        "isNaN" | "isInfinite" | "realToFrac" => Some(1),
         "ceiling" => Some(1),
         "floor" => Some(1),
         "round" => Some(1),

@@ -1309,6 +1309,22 @@ impl LowerContext {
             // as `$splice (embedFile "f")` — the placeholder scheme gives the
             // splice a fresh result type per use.
             "$splice",
+            // `Floating`/`RealFloat` functions the Prelude exports that were
+            // not bound at all. Typed by name in typeck's
+            // `register_lowered_builtins`, so their position here is free.
+            "asin",
+            "acos",
+            "atan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "asinh",
+            "acosh",
+            "atanh",
+            "atan2",
+            "logBase",
+            "isNaN",
+            "isInfinite",
         ];
 
         for name in builtin_funcs {

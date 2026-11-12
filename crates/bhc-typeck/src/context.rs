@@ -3018,6 +3018,23 @@ impl TyCtxt {
                 )),
                 // otherwise :: Bool
                 "otherwise" => Scheme::mono(self.builtins.bool_ty.clone()),
+                // The `Floating`/`RealFloat` functions at `Double`.
+                "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+                | "atanh" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.double_ty.clone(),
+                )),
+                "atan2" | "logBase" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    Ty::fun(
+                        self.builtins.double_ty.clone(),
+                        self.builtins.double_ty.clone(),
+                    ),
+                )),
+                "isNaN" | "isInfinite" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.bool_ty.clone(),
+                )),
                 // show :: a -> String
                 "show" => Scheme::poly(
                     vec![a.clone()],

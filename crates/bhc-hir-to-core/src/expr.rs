@@ -1195,9 +1195,21 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         }
         return;
     }
+    if matches!(v.name.as_str(), "floor" | "ceiling" | "round" | "truncate") {
+        // At `Integer` the result is a bignum; codegen's rounding answers a
+        // machine word unless the occurrence says so.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(_, r)
+                if matches!(r.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
+            {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
     if !matches!(
         v.name.as_str(),
-        "fromIntegral" | "fromInteger" | "toInteger"
+        "fromIntegral" | "fromInteger" | "toInteger" | "realToFrac"
     ) {
         return;
     }

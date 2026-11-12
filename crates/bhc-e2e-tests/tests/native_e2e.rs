@@ -2217,6 +2217,11 @@ fn test_tier3_assoc_type_and_string_instances_native() {
 }
 
 #[test]
+fn test_tier2_float_values() {
+    run_native_test("tier2_functions/float_values", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

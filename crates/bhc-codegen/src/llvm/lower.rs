@@ -27851,6 +27851,60 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Whether this builtin occurrence works at `Integer` (boxed BigInts):
     /// its stamped argument type says so, or its first argument's type does.
+    /// The `Float` in a value word, as an `f32`.
+    ///
+    /// A `Float` is computed in double precision and stored as those 64
+    /// bits, like a `Double`. Read as the low 32 bits of the word it was
+    /// `0.0`: a `Float` returned from a function, or taken from a constructor
+    /// field through one, lost its value (#156). A word whose upper half is
+    /// clear cannot be such a double unless it is zero, so that one is raw
+    /// `f32` bits (a `Float` that came from C).
+    fn float_from_word_bits(
+        &self,
+        bits: inkwell::values::IntValue<'ctx>,
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let tm = self.type_mapper();
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("failed to read a Float from a word: {e:?}"))
+        };
+        let low = self
+            .builder()
+            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
+            .map_err(err)?;
+        let from_f32 = self
+            .builder()
+            .build_bit_cast(low, tm.f32_type(), "float_from_f32_bits")
+            .map_err(err)?
+            .into_float_value();
+        let as_f64 = self
+            .builder()
+            .build_bit_cast(bits, tm.f64_type(), "float_as_f64")
+            .map_err(err)?
+            .into_float_value();
+        let from_f64 = self
+            .builder()
+            .build_float_trunc(as_f64, tm.f32_type(), "float_from_f64")
+            .map_err(err)?;
+        let high = self
+            .builder()
+            .build_right_shift(bits, tm.i64_type().const_int(32, false), false, "float_hi")
+            .map_err(err)?;
+        let is_f32_bits = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                high,
+                tm.i64_type().const_zero(),
+                "float_is_f32_bits",
+            )
+            .map_err(err)?;
+        Ok(self
+            .builder()
+            .build_select(is_f32_bits, from_f32, from_f64, "float_value")
+            .map_err(err)?
+            .into_float_value())
+    }
+
     /// Whether the unary numeric builtin being lowered acts on a `Double` or
     /// `Float`: by its resolved occurrence type, or by the argument's shape.
     /// A double travels as its bits in a word, so integer arithmetic on it
@@ -30625,6 +30679,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Integer literal (arbitrary precision)
             Expr::Lit(Literal::Integer(_), _, _) => {
                 Some((ShowCoerce::Integer, 1000618, "show_integer"))
+            }
+            // A fractional literal typed `Float` shows as one: as a Double,
+            // `(1.0e-3 :: Float)` in a tuple printed `1.0000000474974513e-3`.
+            Expr::Lit(Literal::Float(_) | Literal::Double(_), ty, _)
+                if self.is_float_type(ty) && !self.is_double_type(ty) =>
+            {
+                Some((ShowCoerce::Float, 1000090, "show_float"))
             }
             // Float/Double literal
             Expr::Lit(Literal::Float(_), _, _) | Expr::Lit(Literal::Double(_), _, _) => {
@@ -63698,22 +63759,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             .map_err(|e| {
                                 CodegenError::Internal(format!("failed to unbox float: {:?}", e))
                             })?;
-                        let truncated = self
-                            .builder()
-                            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!(
-                                    "failed to truncate float bits: {:?}",
-                                    e
-                                ))
-                            })?;
-                        let float_val = self
-                            .builder()
-                            .build_bit_cast(truncated, tm.f32_type(), "to_float")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to cast to float: {:?}", e))
-                            })?;
-                        Ok(float_val)
+                        Ok(self.float_from_word_bits(bits)?.into())
                     }
                     "Double" | "Double#" => {
                         let bits = self
@@ -63770,22 +63816,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             .map_err(|e| {
                                 CodegenError::Internal(format!("failed to unbox float: {:?}", e))
                             })?;
-                        let truncated = self
-                            .builder()
-                            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!(
-                                    "failed to truncate float bits: {:?}",
-                                    e
-                                ))
-                            })?;
-                        let float_val = self
-                            .builder()
-                            .build_bit_cast(truncated, tm.f32_type(), "to_float")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to cast to float: {:?}", e))
-                            })?;
-                        Ok(float_val)
+                        Ok(self.float_from_word_bits(bits)?.into())
                     }
                     PrimTy::F64 => {
                         let bits = self

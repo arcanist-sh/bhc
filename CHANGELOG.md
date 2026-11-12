@@ -43,6 +43,13 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- A `Float` returned from a function, or taken from a constructor field
+  through one, was `0.0`: the value is stored as 64 bits and only the low 32
+  were read. A `Float` inside a list, tuple, `Maybe` or a derived `Show` was
+  shown as `0.0` for the same reason (#156).
+- A `Float` below 0.1 or from 1.0e7 up was shown through its double
+  (`1.0e-3 :: Float` as `1.0000000474974513e-3`), and an integer literal at
+  `Float` inside a container as the float with the integer's bits.
 - An instance declared at `String` (`instance Convert Int String`) was not
   found for `[Char]`, and the other way round (#108).
 - An associated type of an instance at `[a]` (`type Elem [a] = a`) did not

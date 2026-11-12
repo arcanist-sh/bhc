@@ -303,9 +303,20 @@ pub extern "C" fn bhc_print_double(d: f64) {
 /// Format an `f32` like Haskell's `show` for a `Float`: the shortest digits
 /// that read back as the same `f32`, with `format_double`'s layout rules.
 fn format_float(n: f32) -> String {
-    let as_double = format_double(f64::from(n));
-    if !n.is_finite() || n == 0.0 || !(n.abs() >= 0.1 && n.abs() < 1e7) {
-        return as_double;
+    if !n.is_finite() || n == 0.0 {
+        return format_double(f64::from(n));
+    }
+    if !(n.abs() >= 0.1 && n.abs() < 1e7) {
+        // Scientific notation, from the f32's own shortest digits. Through
+        // `format_double` the widened value showed its binary expansion:
+        // `1.0e-3 :: Float` was `1.0000000474974513e-3`.
+        let s = format!("{n:e}");
+        let (mantissa, exponent) = s.split_once('e').unwrap_or((&s, "0"));
+        return if mantissa.contains('.') {
+            format!("{mantissa}e{exponent}")
+        } else {
+            format!("{mantissa}.0e{exponent}")
+        };
     }
     // Widening to f64 would print the f32's exact binary value
     // (`1.100000023841858`); the f32's own shortest form is what GHC shows.
@@ -2439,12 +2450,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 let val = f64::from_bits(bits as u64);
                 format_double(val)
             }
-            2 => {
-                // Float: interpret as f32 bits (lower 32 bits)
-                let bits = ptr as i32;
-                let val = f32::from_bits(bits as u32);
-                format_float(val)
-            }
+            2 => format_float(float_from_word(ptr as u64)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers
@@ -2719,6 +2725,22 @@ pub struct ShowTypeDesc {
     pub child2: *const ShowTypeDesc,
 }
 
+/// A `Float` held in a value word.
+///
+/// Compiled code computes a `Float` in double precision and stores those 64
+/// bits, as it does a `Double`. Read as the low 32 bits of the word, every
+/// `Float` in a list, tuple or `Maybe` was shown as `0.0` (#156). A word
+/// whose upper half is clear cannot be such a double unless it is zero (the
+/// double of any non-zero `f32` has exponent bits there), so that one is
+/// taken as raw `f32` bits.
+fn float_from_word(bits: u64) -> f32 {
+    if bits >> 32 == 0 {
+        f32::from_bits(bits as u32)
+    } else {
+        f64::from_bits(bits) as f32
+    }
+}
+
 /// Recursively show a value given its type descriptor.
 unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
     unsafe {
@@ -2732,11 +2754,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 let val = f64::from_bits(ptr as u64);
                 format_double(val)
             }
-            2 => {
-                // Float: interpret as f32 bits (lower 32 bits)
-                let val = f32::from_bits(ptr as u32);
-                format_float(val)
-            }
+            2 => format_float(float_from_word(ptr as u64)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers

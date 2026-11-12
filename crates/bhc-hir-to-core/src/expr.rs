@@ -452,6 +452,12 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
                 let ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
                 return Ok(core::Expr::Lit(Literal::Double(*n as f64), ty, span));
             }
+            // Likewise at `Float`: `(16777216 :: Float)` in a tuple was shown
+            // as the float with the integer's bits.
+            Some("Float") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Float"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Float(*n as f64), ty, span));
+            }
             _ => {}
         }
         // At a type variable (a literal in a class-polymorphic body), keep the

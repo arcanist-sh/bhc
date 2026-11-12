@@ -59,6 +59,7 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg_lit = core::Expr::Lit(Literal::String(Symbol::intern(msg)), Ty::Error, span);
     core::Expr::App(
@@ -183,6 +184,22 @@ fn is_monad_method_name(name: &str) -> bool {
 }
 
 fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> core::Expr {
+    // Every variable occurrence records the type the checker resolved it at.
+    // Unlike `ty` below, nothing infers a width from `checked_ty`, so it can
+    // be filled without the restrictions that follow. One caveat for readers:
+    // a desugared operator (`-x` as `negate x`) shares its span with the
+    // whole expression, and the type recorded there is the result's.
+    let core = match core {
+        core::Expr::Var(mut v, s) => {
+            if matches!(v.checked_ty, Ty::Error) {
+                if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+                    v.checked_ty = resolved;
+                }
+            }
+            core::Expr::Var(v, s)
+        }
+        other => other,
+    };
     // A monad method takes the RESOLVED occurrence type. Its raw one is
     // whatever a single pass left behind — `foldl' (>>=) …` records
     // `(t606 t604) -> ((t604 -> t606 t608) -> t606 t608)`, a bare type
@@ -401,6 +418,7 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
                 name: error_name,
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let msg = core::Expr::Lit(
                 Literal::String(Symbol::intern("pattern match error")),
@@ -492,6 +510,7 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
             name: Symbol::intern("Data.Text.pack"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         return Ok(core::Expr::App(
             Box::new(core::Expr::Var(pack, span)),
@@ -970,6 +989,7 @@ fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core:
         name: Symbol::intern("foldr"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let body = app(
         app(app(core::Expr::Var(foldr_var, span), step), mempty),
@@ -1261,6 +1281,7 @@ fn lower_function_arrow_combinator(
         name: Symbol::intern("(,)"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let pair = |a: core::Expr, b: core::Expr| app(app(var(&pair_con), a), b);
     let f = ctx.fresh_var("$arr_f", Ty::Error, span);
@@ -1484,6 +1505,7 @@ fn bytestring_class_op(ctx: &mut LowerContext, name: &str, span: Span) -> Option
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty: Ty::Fun(Box::new(string_ty), result.clone()),
+                checked_ty: Ty::Error,
             },
             span,
         );
@@ -1832,6 +1854,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                                     name: Symbol::intern("()"),
                                     id: VarId::new(0),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 },
                                 def_ref.span,
                             );
@@ -2235,6 +2258,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                                         name: Symbol::intern("foldr"),
                                         id: VarId::new(0),
                                         ty: Ty::Error,
+                                        checked_ty: Ty::Error,
                                     };
                                     return Ok(core::Expr::App(
                                         Box::new(core::Expr::App(
@@ -2284,6 +2308,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
             name: Symbol::intern("unknown"),
             id: VarId::new(def_ref.def_id.index()),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(placeholder, def_ref.span)
     };
@@ -3800,11 +3825,13 @@ fn lower_value_arg(
                 name: Symbol::intern("[]"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let cons_var = Var {
                 name: Symbol::intern(":"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let mut result = core::Expr::Var(nil_var, *list_span);
             for elem in elems.iter().rev() {
@@ -5033,6 +5060,7 @@ fn traversal_ops(
                         name: Symbol::intern(name),
                         id: VarId::new(0),
                         ty,
+                        checked_ty: Ty::Error,
                     },
                     span,
                 )
@@ -5609,6 +5637,7 @@ fn nullary_var(name: &str, span: Span) -> core::Expr {
             name: Symbol::intern(name),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         },
         span,
     )
@@ -5836,6 +5865,7 @@ fn lower_lift_a2_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Op
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty,
+                checked_ty: Ty::Error,
             },
             span,
         )
@@ -6143,6 +6173,7 @@ fn try_lower_monadic_traversal(
                 name: Symbol::intern("sequence"),
                 id: VarId::new(0),
                 ty: Ty::fun(lists.clone(), lists),
+                checked_ty: Ty::Error,
             },
             span,
         );
@@ -6697,6 +6728,7 @@ fn lower_monadic_traversal_spine_inner(
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty: Ty::Fun(Box::new(Ty::Error), Box::new(monad_ty.clone())),
+                checked_ty: Ty::Error,
             },
             span,
         )
@@ -6957,6 +6989,7 @@ fn lower_monadic_traversal_spine_inner(
             name: Symbol::intern("foldr"),
             id: VarId::new(0),
             ty: foldr_ty,
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -7418,6 +7451,7 @@ fn try_lower_printf(
                                 name: Symbol::intern("show"),
                                 id: VarId::new(0),
                                 ty: Ty::fun(ty, string_ty.clone()),
+                                checked_ty: Ty::Error,
                             },
                             span,
                         );
@@ -7497,6 +7531,7 @@ fn try_lower_list_difference(
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -7603,6 +7638,7 @@ fn try_lower_structural_elem(
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -7693,6 +7729,7 @@ fn try_lower_structural_lookup(
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(key_ty.clone(), Ty::fun(key_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -9275,6 +9312,7 @@ fn lower_app(
                                             name: Symbol::intern("foldr"),
                                             id: VarId::new(0),
                                             ty: Ty::Error,
+                                            checked_ty: Ty::Error,
                                         };
                                         resolved = Some(core::Expr::App(
                                             Box::new(core::Expr::App(
@@ -9723,6 +9761,7 @@ fn lower_con(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             name: Symbol::intern("Con"),
             id: VarId::new(def_ref.def_id.index()),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         Ok(core::Expr::Var(placeholder, def_ref.span))
     }
@@ -9800,6 +9839,7 @@ fn lower_lambda(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 });
                 binders.push(var);
             }
@@ -9847,6 +9887,7 @@ fn register_pattern_vars(
                 name: *name,
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var.clone());
             vars.push((*def_id, var));
@@ -9856,6 +9897,7 @@ fn register_pattern_vars(
                 name: *name,
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var.clone());
             vars.push((*def_id, var));
@@ -10145,6 +10187,7 @@ fn lower_let_bindings(
                 name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             if matches!(var.ty, Ty::Error) {
                 if let Some(t) = local_binding_ty(ctx, b, def_id) {
@@ -10378,6 +10421,7 @@ fn lower_single_let_binding(
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             if matches!(var.ty, Ty::Error) {
                 if let Some(t) = local_binding_ty(ctx, binding, *def_id) {
@@ -10872,6 +10916,7 @@ fn lower_tuple(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> Lower
             name: Symbol::intern("()"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         return Ok(core::Expr::Var(unit_var, span));
     }
@@ -10882,6 +10927,7 @@ fn lower_tuple(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> Lower
         name: tuple_name,
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     let mut result = core::Expr::Var(tuple_var, span);
@@ -10901,11 +10947,13 @@ fn lower_list(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> LowerR
         name: Symbol::intern("[]"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let cons_var = Var {
         name: Symbol::intern(":"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     let mut result = core::Expr::Var(nil_var, span);
@@ -11039,6 +11087,7 @@ fn lower_field_access(
             name: field,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
 
         Ok(core::Expr::App(
@@ -11131,6 +11180,7 @@ fn lower_record_update(
             name: con_name,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let mut result = core::Expr::Var(con_var, span);
 
@@ -11187,6 +11237,7 @@ fn make_pattern_error(span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
         Literal::String(Symbol::intern(&format!(

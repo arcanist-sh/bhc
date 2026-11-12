@@ -11730,6 +11730,7 @@ fn restore_plain_read(core: &CoreModule) -> CoreModule {
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
             span,
         )

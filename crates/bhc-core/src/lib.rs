@@ -65,6 +65,7 @@ pub mod eval;
 pub mod monomorphize;
 pub mod numeric_specialize;
 pub mod pretty;
+pub mod rep_coverage;
 pub mod simplify;
 pub mod specialize;
 pub mod uarray;
@@ -95,21 +96,120 @@ impl Idx for ExprId {
 ///
 /// In Core IR, every variable carries its type explicitly.
 /// This enables type-safe transformations and optimizations.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Var {
     /// The variable name (may be compiler-generated).
     pub name: Symbol,
     /// The unique identifier for this variable.
     pub id: VarId,
-    /// The type of this variable.
+    /// The type of this variable, as far as code generation is told it.
+    ///
+    /// Mostly [`Ty::Error`]: the backends infer scalar widths and dispatch
+    /// from this field and from the shape of expressions, and were written
+    /// against it being empty (spec/BHC-BRIEF-0002). It is filled only where
+    /// a consumer is known to read it correctly.
     pub ty: Ty,
+    /// The type the checker gave this variable; [`Ty::Error`] when it is not
+    /// known.
+    ///
+    /// The bridge to a typed Core (#95): this can be filled everywhere
+    /// without disturbing what reads [`Var::ty`], and a consumer moves over
+    /// to it when it is ready. It is what tells a scalar from a pointer in a
+    /// value word (#94, [`Var::rep`]).
+    ///
+    /// Not part of a variable's identity (equality and hashing ignore it) and
+    /// not written to interface files, whose format it would change.
+    #[serde(skip, default = "unknown_ty")]
+    pub checked_ty: Ty,
+}
+
+fn unknown_ty() -> Ty {
+    Ty::Error
+}
+
+impl PartialEq for Var {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.id == other.id && self.ty == other.ty
+    }
+}
+
+impl Eq for Var {}
+
+impl std::hash::Hash for Var {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.id.hash(state);
+        self.ty.hash(state);
+    }
+}
+
+/// How a value is held in a machine word, as far as its type says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rep {
+    /// The type is not known.
+    Unknown,
+    /// A value that is, or may be, a heap object: a data type, a function,
+    /// a list, or anything at a type variable.
+    Lifted,
+    /// A machine integer (`Int`, `Word` and the sized ones).
+    Int,
+    /// A `Char`.
+    Char,
+    /// A `Double`.
+    Double,
+    /// A `Float`.
+    Float,
+}
+
+impl Rep {
+    /// The representation of a value of type `ty`.
+    #[must_use]
+    pub fn of_ty(ty: &Ty) -> Self {
+        match ty {
+            Ty::Error => Self::Unknown,
+            Ty::Forall(_, body) => Self::of_ty(body),
+            Ty::Con(con) => match con.name.as_str() {
+                "Int" | "Int8" | "Int16" | "Int32" | "Int64" | "Word" | "Word8" | "Word16"
+                | "Word32" | "Word64" => Self::Int,
+                "Char" => Self::Char,
+                "Double" => Self::Double,
+                "Float" => Self::Float,
+                _ => Self::Lifted,
+            },
+            _ => Self::Lifted,
+        }
+    }
+
+    /// Whether a value of this representation is a scalar, not a heap object.
+    #[must_use]
+    pub fn is_scalar(self) -> bool {
+        matches!(self, Self::Int | Self::Char | Self::Double | Self::Float)
+    }
 }
 
 impl Var {
     /// Creates a new variable with the given name, ID, and type.
     #[must_use]
     pub fn new(name: Symbol, id: VarId, ty: Ty) -> Self {
-        Self { name, id, ty }
+        Self {
+            name,
+            id,
+            ty,
+            checked_ty: Ty::Error,
+        }
+    }
+
+    /// This variable with the type the checker gave it.
+    #[must_use]
+    pub fn with_checked_ty(mut self, ty: Ty) -> Self {
+        self.checked_ty = ty;
+        self
+    }
+
+    /// How this variable's value is represented, from the checker's type.
+    #[must_use]
+    pub fn rep(&self) -> Rep {
+        Rep::of_ty(&self.checked_ty)
     }
 }
 

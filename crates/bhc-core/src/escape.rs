@@ -442,6 +442,7 @@ mod tests {
             name: Symbol::intern(name),
             id: VarId(id),
             ty: Ty::int_prim(),
+            checked_ty: Ty::Error,
         }
     }
 

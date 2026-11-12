@@ -9675,6 +9675,19 @@ impl TyCtxt {
             })
             .collect();
 
+        let binder_types: FxHashMap<DefId, Ty> = self
+            .env
+            .pattern_var_types()
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (id, resolved)
+                } else {
+                    (id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
+            .collect();
+
         // Apply final substitution to all definition schemes
         // Also clean up quantified variables that have been resolved
         let explicit_sig_defs = &self.explicit_sig_defs;
@@ -9761,6 +9774,7 @@ impl TyCtxt {
             expr_types,
             resolved_expr_types,
             def_schemes,
+            binder_types,
             type_aliases: self.type_aliases.clone(),
         }
     }

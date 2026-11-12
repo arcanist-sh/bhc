@@ -6830,6 +6830,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$lazy_resume_arg"),
                 id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.env.insert(var.id, val);
             args.push(Expr::Var(var, span));
@@ -7255,6 +7256,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         name: Symbol::intern(n),
                         id,
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     }
                 };
                 let bind = synth(">>=");
@@ -17135,11 +17137,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("fmap"),
             id: VarId::new(usize::MAX - 41),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let ignored = Var {
             name: Symbol::intern("_replaced"),
             id: VarId::new(usize::MAX - 42),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let constant = Expr::Lam(ignored, Box::new(value.clone()), span);
         let applied = Expr::App(
@@ -17833,6 +17837,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("displayException"),
                 id: VarId::new(usize::MAX - 43),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let text = Expr::App(
                 Box::new(Expr::Var(display, bhc_span::Span::default())),
@@ -17928,6 +17933,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("show"),
                     id: VarId::new(usize::MAX - 31),
                     ty: Ty::fun(string_ty.clone(), string_ty),
+                    checked_ty: Ty::Error,
                 };
                 let shown = Expr::App(
                     Box::new(Expr::Var(show_var, span)),
@@ -17947,6 +17953,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("show"),
                 id: VarId::new(usize::MAX - 31),
                 ty: Ty::fun(expr_ty.clone(), string_ty),
+                checked_ty: Ty::Error,
             };
             let shown = Expr::App(
                 Box::new(Expr::Var(show_var, span)),
@@ -18573,6 +18580,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(name),
                     id: VarId::new(id),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -18581,11 +18589,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$either_left"),
             id: VarId::new(usize::MAX - 40),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let right_payload = Var {
             name: Symbol::intern("$either_right"),
             id: VarId::new(usize::MAX - 41),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         // The function as a closure VALUE, applied inside the case: applying
         // the expression itself there would make `(+)` a one-argument
@@ -18597,6 +18607,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$either_fn"),
             id: VarId::new(usize::MAX - 44),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let saved_fn = self.env.insert(func_var.id, func_val);
         let func_expr = &Expr::Var(func_var.clone(), span);
@@ -18667,6 +18678,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(name),
             id: VarId::new(id),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let con_expr = |name: &str, id: usize| Expr::Var(var(name, id), span);
         // The failing alternative rebuilds `Nothing` / `Left e`.
@@ -20091,11 +20103,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$readln_line"),
             id: VarId::new(usize::MAX - 33),
             ty: string_ty.clone(),
+            checked_ty: Ty::Error,
         };
         let read_var = Var {
             name: Symbol::intern("read"),
             id: VarId::new(usize::MAX - 34),
             ty: Ty::fun(string_ty, result_ty),
+            checked_ty: Ty::Error,
         };
         let call = Expr::App(
             Box::new(Expr::Var(read_var, span)),
@@ -31393,6 +31407,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$elem"),
                 id: VarId::new(0),
                 ty,
+                checked_ty: Ty::Error,
             },
             bhc_span::Span::default(),
         )
@@ -32772,6 +32787,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(name),
                     id: VarId::new(id),
                     ty: Ty::fun(Ty::Error, Ty::fun(Ty::Error, applicative_ty.clone())),
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -32783,6 +32799,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern(name),
                 id: VarId::new(next_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             }
         };
         let ty_con = bhc_types::TyCon::new(Symbol::intern(type_name), bhc_types::Kind::Star);
@@ -32817,6 +32834,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(con_name),
                     id: fresh("$tcon").id,
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             );
@@ -32829,6 +32847,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         name: Symbol::intern(if either { "Right" } else { "Just" }),
                         id: fresh("$twrap").id,
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     },
                     span,
                 );
@@ -38142,6 +38161,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(base),
             id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let var = |v: &Var| Expr::Var(v.clone(), span);
         let app = |f: Expr, a: Expr| Expr::App(Box::new(f), Box::new(a), span);
@@ -38151,6 +38171,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern(":"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             app(
                 app(Expr::Var(cons_var, span), h),
@@ -38215,6 +38236,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("error"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 let empty = app(
                     Expr::Var(error_var, span),
@@ -40627,6 +40649,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: bhc_intern::Symbol::intern(name),
             id: VarId::new(id),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         // Ids from the top of the range: bound only while this body is
         // lowered, and never produced by the front end.
@@ -54223,11 +54246,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$arith_x"),
             id: VarId::new(usize::MAX - 35),
             ty: elem.clone(),
+            checked_ty: Ty::Error,
         };
         let y = Var {
             name: Symbol::intern("$arith_y"),
             id: VarId::new(usize::MAX - 36),
             ty: elem,
+            checked_ty: Ty::Error,
         };
         let body = Expr::App(
             Box::new(Expr::App(
@@ -54268,12 +54293,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(op),
             id: VarId::new(usize::MAX - 37),
             ty: Ty::fun(elem.clone(), Ty::fun(elem.clone(), elem.clone())),
+            checked_ty: Ty::Error,
         };
         let lam = Self::typed_arith_lambda(op, &op_var)?;
         let foldl = Var {
             name: Symbol::intern("foldl"),
             id: VarId::new(usize::MAX - 38),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let call = Expr::App(
             Box::new(Expr::App(
@@ -54310,6 +54337,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$conv_arg"),
             id: VarId::new(usize::MAX - 39),
             ty: arg_ty.as_ref().clone(),
+            checked_ty: Ty::Error,
         };
         let body = Expr::App(
             Box::new(Expr::Var(var.clone(), span)),
@@ -54364,6 +54392,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("$sat_arg"),
                     id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
                     ty,
+                    checked_ty: Ty::Error,
                 }
             })
             .collect();
@@ -54394,6 +54423,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$show_arg"),
             id: VarId::new(usize::MAX - 30),
             ty: arg_ty.as_ref().clone(),
+            checked_ty: Ty::Error,
         };
         let body = Expr::App(
             Box::new(Expr::Var(var.clone(), span)),
@@ -54690,6 +54720,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$eta_arg"),
                 id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
                 ty: param_ty,
+                checked_ty: Ty::Error,
             });
             ty = rest;
         }
@@ -54879,6 +54910,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("$builtin_arg"),
                     id,
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 bhc_span::Span::default(),
             ));
@@ -62513,11 +62545,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$integer_scrut"),
             id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
             ty: integer.clone(),
+            checked_ty: Ty::Error,
         };
         let eq = Var {
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(integer.clone(), Ty::fun(integer.clone(), bool_ty)),
+            checked_ty: Ty::Error,
         };
         let bool_con = |name: &str, tag: u32| DataCon {
             name: Symbol::intern(name),
@@ -62539,6 +62573,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("error"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 Expr::App(
                     Box::new(Expr::Var(error_var, span)),

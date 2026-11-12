@@ -151,6 +151,7 @@ impl DerivingContext {
             name,
             id: VarId::new(n as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -169,6 +170,7 @@ impl DerivingContext {
             name: Symbol::intern(name),
             id: VarId::new(n as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -1067,6 +1069,7 @@ impl DerivingContext {
                 name: Symbol::intern("=="),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
         };
         let eq_expr = core::Expr::Var(eq_var, span);
@@ -1084,6 +1087,7 @@ impl DerivingContext {
             name: Symbol::intern("&&"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let and_expr = core::Expr::Var(and_var, span);
         let app1 = core::Expr::App(Box::new(and_expr), Box::new(left), span);
@@ -1444,6 +1448,7 @@ impl DerivingContext {
                 name: Symbol::intern("compare"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
         };
         let compare_expr = core::Expr::Var(compare_var, span);
@@ -1591,6 +1596,7 @@ impl DerivingContext {
                     name: Symbol::intern("$null_targs"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             );
@@ -1757,6 +1763,7 @@ impl DerivingContext {
                     name: Symbol::intern(name),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -1801,6 +1808,7 @@ impl DerivingContext {
                     name: Symbol::intern("$show_field"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 return core::Expr::App(
                     Box::new(core::Expr::App(
@@ -1817,6 +1825,7 @@ impl DerivingContext {
             name: Symbol::intern("show"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::Var(show_var, span)),
@@ -1831,6 +1840,7 @@ impl DerivingContext {
             name: Symbol::intern("++"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let append_expr = core::Expr::Var(append_var, span);
         let app1 = core::Expr::App(Box::new(append_expr), Box::new(left), span);
@@ -2045,6 +2055,7 @@ impl DerivingContext {
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let eq_expr = core::Expr::Var(eq_var, span);
         let app1 = core::Expr::App(
@@ -2101,6 +2112,7 @@ impl DerivingContext {
             name: Symbol::intern("read"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::Var(read_var, span)),
@@ -3110,6 +3122,7 @@ impl DerivingContext {
             name: Symbol::intern("foldr"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let call = app2(core::Expr::Var(foldr_var, span), step, acc);
         core::Expr::App(Box::new(call), Box::new(x), span)
@@ -3521,6 +3534,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(0),
             ty: Ty::Con(bool_con),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3544,6 +3558,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(0),
             ty: Ty::Con(ordering_con),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3566,6 +3581,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(data_con.tag as usize),
             ty: Ty::Con(data_con.ty_con.clone()),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3590,6 +3606,7 @@ impl DerivingContext {
             name: Symbol::intern("error"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let msg_expr = self.make_string(msg, span);
         core::Expr::App(
@@ -3650,6 +3667,7 @@ impl DerivingContext {
             name: Symbol::intern("pure"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(Box::new(core::Expr::Var(pure_var, span)), Box::new(x), span)
     }
@@ -3662,6 +3680,7 @@ impl DerivingContext {
             name: Symbol::intern("<*>"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(
@@ -3680,6 +3699,7 @@ impl DerivingContext {
             name: Symbol::intern(">>="),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(
@@ -3698,6 +3718,7 @@ impl DerivingContext {
             name: Symbol::intern("<$>"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(

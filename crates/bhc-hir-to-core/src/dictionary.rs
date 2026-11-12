@@ -834,6 +834,7 @@ impl<'a> DictContext<'a> {
                         name: Symbol::intern(&format!("$sel_{idx}")),
                         id: VarId::new(0),
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     },
                     span,
                 )),
@@ -873,6 +874,7 @@ impl<'a> DictContext<'a> {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -1103,6 +1105,7 @@ impl<'a> DictContext<'a> {
                                     name: Symbol::intern(&format!("$sel_{idx}")),
                                     id: VarId::new(0),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 };
                                 cur = core::Expr::App(
                                     Box::new(core::Expr::Var(sel, span)),
@@ -1411,6 +1414,7 @@ impl<'a> DictContext<'a> {
                     name,
                     id: VarId::new(def_id.index()),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             );
@@ -1432,6 +1436,7 @@ impl<'a> DictContext<'a> {
             name,
             id: VarId::new(def_id.index()),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -1598,6 +1603,7 @@ fn make_tuple(fields: Vec<core::Expr>, span: Span) -> core::Expr {
             name: Symbol::intern("()"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         return core::Expr::Var(unit_var, span);
     }
@@ -1613,6 +1619,7 @@ fn make_tuple(fields: Vec<core::Expr>, span: Span) -> core::Expr {
         name: tuple_name,
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     let mut result = core::Expr::Var(tuple_var, span);
@@ -1694,6 +1701,7 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg_lit = core::Expr::Lit(core::Literal::String(Symbol::intern(msg)), Ty::Error, span);
     core::Expr::App(
@@ -1734,6 +1742,7 @@ fn missing_method_field(
                 name: Symbol::intern("$sel_0"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             Some(core::Expr::App(
                 Box::new(core::Expr::Var(sel, span)),
@@ -1764,6 +1773,7 @@ fn missing_method_field(
                         name: Symbol::intern("foldr"),
                         id: VarId::new(0),
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     };
                     let xs = ctx.fresh_var("$mconcat_xs", Ty::Error, span);
                     let body = core::Expr::App(
@@ -1843,6 +1853,7 @@ fn missing_method_field(
                     name: Symbol::intern("$sel_0"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 app(core::Expr::Var(sel0, span), functor.clone())
             });
@@ -1885,6 +1896,7 @@ fn make_field_selector(dict_var: &Var, field_index: usize, span: Span) -> core::
         name: selector_name,
         id: VarId::new(field_index),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     core::Expr::App(

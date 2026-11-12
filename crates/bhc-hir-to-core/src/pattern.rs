@@ -74,6 +74,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             // Default pattern with a binder
             Ok(Alt {
@@ -131,6 +132,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                 name: *name,
                                 id: ctx.fresh_id(),
                                 ty: Ty::Error,
+                                checked_ty: Ty::Error,
                             }
                         };
                         binders.push(var);
@@ -297,6 +299,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                     name: *name,
                                     id: ctx.fresh_id(),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 }
                             };
                             binders.push(var);
@@ -363,6 +366,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, v.clone());
                 v
@@ -623,6 +627,7 @@ pub fn compile_match_to_expr(
                     name: tuple_con_name,
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 value_def.span,
             );
@@ -1797,6 +1802,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *_name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1830,6 +1836,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1926,6 +1933,7 @@ fn compile_tuple_pattern(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 binders.push(var);
             }
@@ -1980,6 +1988,7 @@ fn args_tuple(args: &[Var], span: Span) -> core::Expr {
             name: tuple_con_name,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -2301,6 +2310,7 @@ pub fn make_pattern_error(span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
         Literal::String(Symbol::intern(&format!(

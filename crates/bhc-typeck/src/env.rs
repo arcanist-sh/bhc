@@ -229,6 +229,14 @@ impl TypeEnv {
         self.pattern_defs.insert(def_id);
     }
 
+    /// The variables patterns bind (lambda parameters, case and let
+    /// patterns, function arguments), with the type each was given.
+    pub fn pattern_var_types(&self) -> impl Iterator<Item = (DefId, &Ty)> + '_ {
+        self.pattern_defs
+            .iter()
+            .filter_map(|id| self.globals.get(id).map(|scheme| (*id, &scheme.ty)))
+    }
+
     /// Insert a local binding in the current scope.
     pub fn insert_local(&mut self, name: Symbol, scheme: Scheme) {
         if let Some(scope) = self.locals.last_mut() {

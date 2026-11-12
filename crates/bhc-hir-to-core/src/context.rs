@@ -99,6 +99,11 @@ pub struct LowerContext {
     /// unless threaded from `TypedModule::resolved_expr_types`.
     resolved_expr_types: crate::ExprTypeMap,
 
+    /// The type of each pattern-bound variable, from the checker
+    /// (`TypedModule::binder_types`). Read only to give a binder its
+    /// [`Var::checked_ty`].
+    binder_types: crate::BinderTypeMap,
+
     /// The type a CALLER expects a sub-expression to have, keyed by `Span`.
     ///
     /// Typeck records an occurrence's type as it inferred it, and for a parser
@@ -319,6 +324,7 @@ impl LowerContext {
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             resolved_expr_types: FxHashMap::default(),
+            binder_types: FxHashMap::default(),
             expected_arg_tys: FxHashMap::default(),
             method_level_active: FxHashSet::default(),
             app_head_spans: FxHashSet::default(),
@@ -368,6 +374,11 @@ impl LowerContext {
     /// (spec/BHC-BRIEF-0002).
     pub fn set_expr_types(&mut self, expr_types: crate::ExprTypeMap) {
         self.expr_types = expr_types;
+    }
+
+    /// Set the checker's types for pattern-bound variables.
+    pub fn set_binder_types(&mut self, binders: crate::BinderTypeMap) {
+        self.binder_types = binders;
     }
 
     /// Set the fixpoint-resolved per-node types (dispatch-only side channel).
@@ -687,7 +698,8 @@ impl LowerContext {
             let var = Var {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -707,6 +719,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -818,7 +831,8 @@ impl LowerContext {
             let var = Var {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -838,6 +852,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -858,6 +873,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -871,6 +887,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -896,6 +913,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -924,6 +942,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -1746,7 +1765,8 @@ impl LowerContext {
             let var = Var {
                 name: def_info.name,
                 id: VarId::new(def_info.id.index()),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_info.id, var);
         }
@@ -1834,6 +1854,7 @@ impl LowerContext {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -1847,6 +1868,7 @@ impl LowerContext {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -1940,7 +1962,20 @@ impl LowerContext {
     }
 
     /// Register a HIR definition with a Core variable.
-    pub fn register_var(&mut self, def_id: DefId, var: Var) {
+    ///
+    /// The variable takes the type the checker gave the definition, where it
+    /// gave one that is not a scheme over type variables of its own: that is
+    /// the type of every occurrence, and what says how the value is held.
+    pub fn register_var(&mut self, def_id: DefId, mut var: Var) {
+        if matches!(var.checked_ty, Ty::Error) {
+            if let Some(ty) = self.binder_types.get(&def_id) {
+                var.checked_ty = ty.clone();
+            } else if let Some(scheme) = self.type_schemes.get(&def_id) {
+                if scheme.vars.is_empty() {
+                    var.checked_ty = scheme.ty.clone();
+                }
+            }
+        }
         self.var_map.insert(def_id, var);
     }
 
@@ -2438,6 +2473,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(idx),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             expr = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(expr), span);
         }
@@ -2533,6 +2569,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             cur = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
         }
@@ -3219,6 +3256,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(idx),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let super_expr =
                 core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
@@ -3243,6 +3281,7 @@ impl LowerContext {
             name: Symbol::intern(&format!("$sel_{field_index}")),
             id: VarId::new(field_index),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let mut result = core::Expr::App(
             Box::new(core::Expr::Var(sel_var, span)),
@@ -4008,6 +4047,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{slot}")),
                 id: VarId::new(slot),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let selected = core::Expr::App(
                 Box::new(core::Expr::Var(selector, span)),
@@ -4378,6 +4418,7 @@ impl LowerContext {
                 )),
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             })
         })?;
         let lifted = core::Expr::Var(var, span);
@@ -5871,14 +5912,30 @@ impl LowerContext {
         lazify_self_recursive_monadic_args(&mut bindings);
         expand_transformer_synonyms(&mut bindings, &self.type_aliases);
 
-        Ok(CoreModule {
+        let core_module = CoreModule {
             name: module.name,
             bindings,
             exports: vec![],
             foreign_imports,
             overloaded_strings: module.overloaded_strings,
             constructors,
-        })
+        };
+        // BHC_REP_COVERAGE: how many binders have a known representation
+        // (#94, #95). A number to watch while the checker's types are
+        // threaded through, not a diagnostic for users.
+        if std::env::var_os("BHC_REP_COVERAGE").is_some() {
+            let coverage = bhc_core::rep_coverage::binder_rep_coverage(&core_module);
+            eprintln!(
+                "rep-coverage {}: {} binders, {:.1}% known ({} scalar, {} lifted, {} unknown)",
+                core_module.name.as_str(),
+                coverage.total(),
+                coverage.known_percent(),
+                coverage.scalar,
+                coverage.lifted,
+                coverage.unknown
+            );
+        }
+        Ok(core_module)
     }
 
     /// Standalone-derive `Semigroup`/`Monoid` for a synonym of a local newtype

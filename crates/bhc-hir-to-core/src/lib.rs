@@ -56,6 +56,10 @@ pub type TypeSchemeMap = FxHashMap<DefId, Scheme>;
 /// (see spec/BHC-BRIEF-0002). Span is the stable id both phases can compute.
 pub type ExprTypeMap = FxHashMap<Span, Ty>;
 
+/// The type of each variable a pattern binds, by its `DefId`
+/// (`TypedModule::binder_types`).
+pub type BinderTypeMap = FxHashMap<DefId, Ty>;
+
 /// Map from `DefId` to constructor info (for imported constructors).
 pub type ConstructorInfoMap = FxHashMap<DefId, ConstructorInfo>;
 
@@ -162,6 +166,7 @@ pub fn lower_module_with_defs_and_constructors(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -198,8 +203,12 @@ pub fn lower_module_with_imports(
     type_aliases: Option<
         &rustc_hash::FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
     >,
+    binder_types: Option<&BinderTypeMap>,
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
+    if let Some(binders) = binder_types {
+        ctx.set_binder_types(binders.clone());
+    }
     ctx.class_registry_mut()
         .fundeps
         .extend(IMPORTED_CLASS_FUNDEPS.with(|f| f.borrow().clone()));

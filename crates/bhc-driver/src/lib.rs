@@ -1634,6 +1634,7 @@ impl Compiler {
             Some(&typed.resolved_expr_types),
             imports,
             Some(&typed.type_aliases),
+            Some(&typed.binder_types),
         )
         .map_err(CompileError::from)?;
 

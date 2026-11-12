@@ -105,6 +105,14 @@ pub struct TypedModule {
     pub resolved_expr_types: FxHashMap<Span, Ty>,
     /// Type schemes for each definition (indexed by `DefId`).
     pub def_schemes: FxHashMap<DefId, Scheme>,
+    /// The type of every variable a pattern binds (lambda parameters, case
+    /// and let patterns, function arguments), with the final substitution
+    /// applied to a fixpoint and type families reduced.
+    ///
+    /// Kept apart from [`def_schemes`](Self::def_schemes), which lowering
+    /// consults to decide how a definition is called: these say only what a
+    /// binder holds (#94, #95).
+    pub binder_types: FxHashMap<DefId, Ty>,
     /// Type synonyms in scope at this module's compilation (local + imported),
     /// mapping the synonym name to its `(parameters, right-hand side)`. Exposed
     /// so interface generation can expand synonyms in exported signatures,

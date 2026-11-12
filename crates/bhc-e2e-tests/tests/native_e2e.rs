@@ -2222,6 +2222,11 @@ fn test_tier2_float_values() {
 }
 
 #[test]
+fn test_tier2_shadowed_prelude_names() {
+    run_native_test("tier2_functions/shadowed_prelude_names", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

@@ -43,6 +43,14 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- In a module that defines its own `show` (or any other Prelude name), the
+  qualified `Prelude.show` resolved to the module's definition, so one
+  written in terms of the Prelude's called itself (#158).
+- A module's own `==`, `<`, `+` and other operators the backend implements
+  as primitives were ignored in favour of the primitive (#158).
+- Importing a module the compiler provides twice (`import Prelude hiding
+  (..)` with `import qualified Prelude`, or `Data.Set` both ways) logged
+  "circular import detected".
 - A `Float` returned from a function, or taken from a constructor field
   through one, was `0.0`: the value is stored as 64 bits and only the low 32
   were read. A `Float` inside a list, tuple, `Maybe` or a derived `Show` was

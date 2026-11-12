@@ -765,20 +765,30 @@ pub fn load_module(
         return Ok(exports.clone());
     }
 
+    // Find the module file. Before the cycle check: a module with no file
+    // (one the compiler provides, like `Prelude` or `Data.Set`) left its
+    // "loading" mark behind on the way out, so importing it a second time
+    // (`import Prelude hiding (..)` and `import qualified Prelude`) was
+    // reported as a circular import.
+    let path = find_module_file(name, search_paths)
+        .ok_or_else(|| LoadError::ModuleNotFound(name.to_string()))?;
+
     // Cycle detection
     if !cache.begin_loading(sym) {
         return Err(LoadError::CircularImport(name.to_string()));
     }
 
-    // Find the module file
-    let path = find_module_file(name, search_paths)
-        .ok_or_else(|| LoadError::ModuleNotFound(name.to_string()))?;
-
     // Read the file
-    let source = std::fs::read_to_string(&path).map_err(|e| LoadError::IoError {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(e) => {
+            cache.end_loading(sym);
+            return Err(LoadError::IoError {
+                path: path.clone(),
+                message: e.to_string(),
+            });
+        }
+    };
 
     // Apply CPP preprocessing if needed
     let source = if needs_cpp(&source) {

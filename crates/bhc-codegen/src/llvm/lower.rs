@@ -58586,6 +58586,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if the head is a primitive operation
         if let Expr::Var(var, _) = current {
+            // A definition of the same name shadows the primitive, as it
+            // does a builtin (`is_saturated_builtin`): a module that hides
+            // the Prelude's `==` and defines its own must get its own. It
+            // got the machine-word comparison instead.
+            if self.functions.contains_key(&var.id)
+                || self.external_functions.contains_key(&var.name)
+                || self.env.contains_key(&var.id)
+            {
+                return None;
+            }
             if let Some((op, arity)) = self.primitive_op_info(var.name.as_str()) {
                 args.reverse();
                 if args.len() == arity as usize {

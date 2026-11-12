@@ -260,6 +260,10 @@ pub struct LowerContext {
     current_scope: ScopeId,
     /// Definition information.
     pub defs: DefMap,
+    /// The Prelude's own value bindings, as defined before any module is
+    /// lowered. A module may define a `show` or an `==` of its own, which
+    /// shadows the unqualified name; `Prelude.show` still means this one.
+    prelude_values: FxHashMap<Symbol, DefId>,
     /// Type synonyms loaded from `.bhi` interfaces (name, params, body).
     /// The interface loader fills this; the driver hands it to the type
     /// checker so synonyms like `type RowHead = [Cell]` expand across
@@ -372,6 +376,7 @@ impl LowerContext {
             errors: Vec::new(),
             warnings: Vec::new(),
             unimplemented_defs: FxHashSet::default(),
+            prelude_values: FxHashMap::default(),
             import_aliases: FxHashMap::default(),
             qualified_names: FxHashMap::default(),
             type_signatures: FxHashMap::default(),
@@ -386,6 +391,7 @@ impl LowerContext {
         let mut ctx = Self::new();
         ctx.define_builtins();
         ctx.define_stubs();
+        ctx.prelude_values = ctx.scopes[ctx.current_scope.index()].values.clone();
         ctx
     }
 
@@ -2823,6 +2829,20 @@ impl LowerContext {
         }
 
         let module = self.import_aliases.get(&qualifier).copied();
+        // `Prelude.show` (or `P.show` under `import qualified Prelude as P`)
+        // is the Prelude's, whatever the module defines under that name.
+        // Resolved through the unqualified name, as below, it found the
+        // module's own `show`: a definition written in terms of the
+        // Prelude's called itself.
+        let names_prelude =
+            qualifier.as_str() == "Prelude" || module.is_some_and(|m| m.as_str() == "Prelude");
+        if names_prelude {
+            for m in &variants {
+                if let Some(def_id) = self.prelude_values.get(&Symbol::intern(m)) {
+                    return Some(*def_id);
+                }
+            }
+        }
         for m in &variants {
             // Direct lookup of "Qualifier.member".
             let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), m));

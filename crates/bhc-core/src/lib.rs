@@ -170,9 +170,9 @@ impl Rep {
     ///
     /// One thing this cannot see: a newtype is erased at run time, so a
     /// value of `newtype Age = Age Int` is the `Int` itself, while its type
-    /// is a constructor this answers [`Rep::Lifted`] for. A consumer must
-    /// expand newtypes in `ty` first; until one does, `Lifted` means "a heap
-    /// object, or a newtype of anything".
+    /// is a constructor this answers [`Rep::Lifted`] for. Here `Lifted`
+    /// means "a heap object, or a newtype of anything"; [`Rep::of_ty_in`]
+    /// sees through newtypes and is the one to act on.
     #[must_use]
     pub fn of_ty(ty: &Ty) -> Self {
         match ty {
@@ -192,11 +192,64 @@ impl Rep {
         }
     }
 
+    /// The representation of a value of type `ty`, seeing through newtypes
+    /// and type synonyms.
+    ///
+    /// `expansions` maps a newtype's or synonym's name to its parameters and
+    /// the type it stands for. A newtype is erased at run time, so its
+    /// representation is its field's: `newtype Age = Age Int` is an `Int`,
+    /// and `newtype Wrap a = Wrap a` at `Wrap Double` a `Double`.
+    #[must_use]
+    pub fn of_ty_in(ty: &Ty, expansions: &TypeExpansions) -> Self {
+        // A recursive newtype (`newtype Fix f = Fix (f (Fix f))`) stops by
+        // itself once the head is not in the table; the bound is for one
+        // that never does.
+        let mut current = ty.clone();
+        for _ in 0..64 {
+            match expand_head(&current, expansions) {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        Self::of_ty(&current)
+    }
+
     /// Whether a value of this representation is a scalar, not a heap object.
     #[must_use]
     pub fn is_scalar(self) -> bool {
         matches!(self, Self::Int | Self::Char | Self::Double | Self::Float)
     }
+}
+
+/// What newtypes and type synonyms stand for: a name to its parameters and
+/// the type it expands to.
+pub type TypeExpansions = rustc_hash::FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>;
+
+/// `ty` with its head expanded once, if the head is a newtype or synonym in
+/// `expansions` applied to as many arguments as it has parameters.
+fn expand_head(ty: &Ty, expansions: &TypeExpansions) -> Option<Ty> {
+    let mut head = ty;
+    while let Ty::Forall(_, body) = head {
+        head = body;
+    }
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, a) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    let Ty::Con(con) = head else {
+        return None;
+    };
+    let (params, body) = expansions.get(&con.name)?;
+    if params.len() != args.len() {
+        return None;
+    }
+    let mut subst = bhc_types::Subst::new();
+    for (param, arg) in params.iter().zip(args) {
+        subst.insert(param, arg.clone());
+    }
+    Some(subst.apply(body))
 }
 
 /// The type recorded for a class dictionary: a compiler-built record of
@@ -253,9 +306,17 @@ impl Var {
     }
 
     /// How this variable's value is represented, from the checker's type.
+    /// Does not see through newtypes; see [`Var::rep_in`].
     #[must_use]
     pub fn rep(&self) -> Rep {
         Rep::of_ty(&self.checked_ty)
+    }
+
+    /// How this variable's value is represented, seeing through the
+    /// newtypes and synonyms in `expansions`. This is the one to act on.
+    #[must_use]
+    pub fn rep_in(&self, expansions: &TypeExpansions) -> Rep {
+        Rep::of_ty_in(&self.checked_ty, expansions)
     }
 }
 

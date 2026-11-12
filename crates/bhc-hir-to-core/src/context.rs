@@ -5926,7 +5926,22 @@ impl LowerContext {
         // (#94, #95). A number to watch while the checker's types are
         // threaded through, not a diagnostic for users.
         if std::env::var_os("BHC_REP_COVERAGE").is_some() {
-            let coverage = bhc_core::rep_coverage::binder_rep_coverage(&core_module);
+            // What this module's newtypes and synonyms stand for: a newtype
+            // is erased, so its binder is whatever its field is.
+            let mut expansions: bhc_core::TypeExpansions = self.type_aliases.clone();
+            for item in &module.items {
+                let Item::Newtype(newtype_def) = item else {
+                    continue;
+                };
+                let field = match &newtype_def.con.fields {
+                    bhc_hir::ConFields::Positional(tys) => tys.first().cloned(),
+                    bhc_hir::ConFields::Named(fields) => fields.first().map(|f| f.ty.clone()),
+                };
+                if let Some(field) = field {
+                    expansions.insert(newtype_def.name, (newtype_def.params.clone(), field));
+                }
+            }
+            let coverage = bhc_core::rep_coverage::binder_rep_coverage(&core_module, &expansions);
             eprintln!(
                 "rep-coverage {}: {} binders, {:.1}% known ({} scalar, {} lifted, {} polymorphic, {} unknown)",
                 core_module.name.as_str(),

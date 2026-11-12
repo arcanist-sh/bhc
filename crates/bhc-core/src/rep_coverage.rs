@@ -5,7 +5,7 @@
 //! the checker's type is recorded; this counts how far that has got, so the
 //! number can be watched instead of guessed.
 
-use crate::{Bind, CoreModule, Expr, Rep, Var};
+use crate::{Bind, CoreModule, Expr, Rep, TypeExpansions, Var};
 
 /// Counts of a module's binders by what is known of their representation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,8 +38,8 @@ impl RepCoverage {
         }
     }
 
-    fn count(&mut self, var: &Var) {
-        match var.rep() {
+    fn count(&mut self, var: &Var, expansions: &TypeExpansions) {
+        match var.rep_in(expansions) {
             Rep::Unknown => self.unknown += 1,
             Rep::Polymorphic => self.polymorphic += 1,
             Rep::Lifted => self.lifted += 1,
@@ -47,48 +47,48 @@ impl RepCoverage {
         }
     }
 
-    fn bind(&mut self, bind: &Bind) {
+    fn bind(&mut self, bind: &Bind, expansions: &TypeExpansions) {
         match bind {
             Bind::NonRec(var, rhs) => {
-                self.count(var);
-                self.expr(rhs);
+                self.count(var, expansions);
+                self.expr(rhs, expansions);
             }
             Bind::Rec(pairs) => {
                 for (var, rhs) in pairs {
-                    self.count(var);
-                    self.expr(rhs);
+                    self.count(var, expansions);
+                    self.expr(rhs, expansions);
                 }
             }
         }
     }
 
-    fn expr(&mut self, expr: &Expr) {
+    fn expr(&mut self, expr: &Expr, expansions: &TypeExpansions) {
         match expr {
             Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
             Expr::App(f, a, _) => {
-                self.expr(f);
-                self.expr(a);
+                self.expr(f, expansions);
+                self.expr(a, expansions);
             }
             Expr::Lam(param, body, _) => {
-                self.count(param);
-                self.expr(body);
+                self.count(param, expansions);
+                self.expr(body, expansions);
             }
             Expr::TyApp(inner, _, _)
             | Expr::TyLam(_, inner, _)
             | Expr::Lazy(inner, _)
             | Expr::Cast(inner, _, _)
-            | Expr::Tick(_, inner, _) => self.expr(inner),
+            | Expr::Tick(_, inner, _) => self.expr(inner, expansions),
             Expr::Let(bind, body, _) => {
-                self.bind(bind);
-                self.expr(body);
+                self.bind(bind, expansions);
+                self.expr(body, expansions);
             }
             Expr::Case(scrutinee, alts, _, _) => {
-                self.expr(scrutinee);
+                self.expr(scrutinee, expansions);
                 for alt in alts {
                     for binder in &alt.binders {
-                        self.count(binder);
+                        self.count(binder, expansions);
                     }
-                    self.expr(&alt.rhs);
+                    self.expr(&alt.rhs, expansions);
                 }
             }
         }
@@ -174,12 +174,14 @@ pub fn unknown_binder_names(module: &CoreModule) -> Vec<(String, usize)> {
 }
 
 /// Count the binders of `module`: top-level and local bindings, lambda
-/// parameters and the variables case alternatives bind.
+/// parameters and the variables case alternatives bind. `expansions` says
+/// what the module's newtypes and synonyms stand for, so a binder of a
+/// newtype over a scalar counts as the scalar it is.
 #[must_use]
-pub fn binder_rep_coverage(module: &CoreModule) -> RepCoverage {
+pub fn binder_rep_coverage(module: &CoreModule, expansions: &TypeExpansions) -> RepCoverage {
     let mut coverage = RepCoverage::default();
     for bind in &module.bindings {
-        coverage.bind(bind);
+        coverage.bind(bind, expansions);
     }
     coverage
 }
@@ -215,7 +217,10 @@ mod tests {
             Span::default(),
         );
         let lam = Expr::Lam(var("x", con("Int")), Box::new(inner), Span::default());
-        coverage.bind(&Bind::NonRec(var("f", Ty::Error), Box::new(lam)));
+        coverage.bind(
+            &Bind::NonRec(var("f", Ty::Error), Box::new(lam)),
+            &TypeExpansions::default(),
+        );
         assert_eq!(
             coverage,
             RepCoverage {
@@ -289,6 +294,59 @@ mod tests {
         assert!(!is_dictionary_name("$derived_eq_T"));
         assert!(!is_dictionary_name("$d"));
         assert_eq!(Rep::of_ty(&dictionary_ty()), Rep::Lifted);
+    }
+
+    #[test]
+    fn representation_sees_through_newtypes() {
+        use crate::TypeExpansions;
+        use bhc_types::TyVar;
+        let a = TyVar::new(9, Kind::Star);
+        let mut table = TypeExpansions::default();
+        // newtype Age = Age Int
+        table.insert(Symbol::intern("Age"), (vec![], con("Int")));
+        // newtype Wrap a = Wrap a
+        table.insert(
+            Symbol::intern("Wrap"),
+            (vec![a.clone()], Ty::Var(a.clone())),
+        );
+        // newtype Name = Name String, through a synonym
+        table.insert(
+            Symbol::intern("Str"),
+            (vec![], Ty::List(Box::new(con("Char")))),
+        );
+        table.insert(Symbol::intern("Name"), (vec![], con("Str")));
+        // newtype Fix f = Fix (f (Fix f))
+        let f = TyVar::new(10, Kind::Star);
+        let fix_f = Ty::App(Box::new(con("Fix")), Box::new(Ty::Var(f.clone())));
+        table.insert(
+            Symbol::intern("Fix"),
+            (
+                vec![f.clone()],
+                Ty::App(Box::new(Ty::Var(f)), Box::new(fix_f)),
+            ),
+        );
+        // newtype Loop = Loop Loop
+        table.insert(Symbol::intern("Loop"), (vec![], con("Loop")));
+
+        let wrap = |t: Ty| Ty::App(Box::new(con("Wrap")), Box::new(t));
+        assert_eq!(Rep::of_ty(&con("Age")), Rep::Lifted);
+        assert_eq!(Rep::of_ty_in(&con("Age"), &table), Rep::Int);
+        assert_eq!(Rep::of_ty_in(&wrap(con("Double")), &table), Rep::Double);
+        assert_eq!(Rep::of_ty_in(&wrap(wrap(con("Char"))), &table), Rep::Char);
+        assert_eq!(Rep::of_ty_in(&wrap(Ty::Var(a)), &table), Rep::Polymorphic);
+        assert_eq!(Rep::of_ty_in(&con("Name"), &table), Rep::Lifted);
+        assert_eq!(
+            Rep::of_ty_in(
+                &Ty::App(Box::new(con("Fix")), Box::new(con("Maybe"))),
+                &table
+            ),
+            Rep::Lifted
+        );
+        // Partly applied, or unknown: unchanged.
+        assert_eq!(Rep::of_ty_in(&con("Wrap"), &table), Rep::Lifted);
+        assert_eq!(Rep::of_ty_in(&con("Bool"), &table), Rep::Lifted);
+        // Terminates.
+        assert_eq!(Rep::of_ty_in(&con("Loop"), &table), Rep::Lifted);
     }
 
     #[test]

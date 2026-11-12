@@ -870,11 +870,12 @@ impl<'a> DictContext<'a> {
     fn fresh_var(&mut self, prefix: &str, ty: Ty, _span: Span) -> Var {
         let name = Symbol::intern(&format!("{}_{}", prefix, self.fresh_counter));
         self.fresh_counter += 1;
+        let checked_ty = bhc_core::fresh_checked_ty(prefix, &ty);
         Var {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
-            checked_ty: Ty::Error,
+            checked_ty,
         }
     }
 

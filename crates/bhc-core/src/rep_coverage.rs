@@ -277,6 +277,21 @@ mod tests {
     }
 
     #[test]
+    fn fresh_variables_take_a_given_type_or_a_dictionary_type() {
+        use crate::{dictionary_ty, fresh_checked_ty, is_dictionary_name};
+        assert_eq!(fresh_checked_ty("x", &con("Int")), con("Int"));
+        assert_eq!(fresh_checked_ty("x", &Ty::Error), Ty::Error);
+        assert_eq!(
+            fresh_checked_ty("$dictFunctor_IO", &Ty::Error),
+            dictionary_ty()
+        );
+        assert_eq!(fresh_checked_ty("$dMonad", &Ty::Error), dictionary_ty());
+        assert!(!is_dictionary_name("$derived_eq_T"));
+        assert!(!is_dictionary_name("$d"));
+        assert_eq!(Rep::of_ty(&dictionary_ty()), Rep::Lifted);
+    }
+
+    #[test]
     fn checked_type_is_not_part_of_identity() {
         assert_eq!(var("a", con("Int")), var("a", Ty::Error));
     }

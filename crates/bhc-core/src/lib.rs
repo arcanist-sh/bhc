@@ -193,6 +193,40 @@ impl Rep {
     }
 }
 
+/// The type recorded for a class dictionary: a compiler-built record of
+/// methods, which has no source type. It only says the value is a heap
+/// object ([`Rep::Lifted`]).
+#[must_use]
+pub fn dictionary_ty() -> Ty {
+    Ty::Con(bhc_types::TyCon::new(
+        Symbol::intern("$Dictionary"),
+        bhc_types::Kind::Star,
+    ))
+}
+
+/// Whether a compiler-generated variable name is a class dictionary's
+/// (`$dictFunctor_IO`, `$dMonad`).
+#[must_use]
+pub fn is_dictionary_name(name: &str) -> bool {
+    name.starts_with("$dict")
+        || name
+            .strip_prefix("$d")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_uppercase()))
+}
+
+/// The checked type of a freshly made variable: the type it was given, or a
+/// dictionary's for a dictionary name, else unknown.
+#[must_use]
+pub fn fresh_checked_ty(name: &str, ty: &Ty) -> Ty {
+    if !matches!(ty, Ty::Error) {
+        ty.clone()
+    } else if is_dictionary_name(name) {
+        dictionary_ty()
+    } else {
+        Ty::Error
+    }
+}
+
 impl Var {
     /// Creates a new variable with the given name, ID, and type.
     #[must_use]

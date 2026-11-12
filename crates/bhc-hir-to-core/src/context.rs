@@ -1850,11 +1850,12 @@ impl LowerContext {
     pub fn fresh_var(&mut self, base: &str, ty: Ty, _span: Span) -> Var {
         let name = Symbol::intern(&format!("{}_{}", base, self.fresh_counter));
         self.fresh_counter += 1;
+        let checked_ty = bhc_core::fresh_checked_ty(base, &ty);
         Var {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
-            checked_ty: Ty::Error,
+            checked_ty,
         }
     }
 
@@ -1864,11 +1865,12 @@ impl LowerContext {
     /// for external visibility (e.g., `main`).
     pub fn named_var(&mut self, name: Symbol, ty: Ty) -> Var {
         self.fresh_counter += 1;
+        let checked_ty = bhc_core::fresh_checked_ty(name.as_str(), &ty);
         Var {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
-            checked_ty: Ty::Error,
+            checked_ty,
         }
     }
 

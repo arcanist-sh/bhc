@@ -564,17 +564,36 @@ impl TypeEnv {
                         continue;
                     }
                     let pattern_vars: Vec<TyVar> = impl_.rhs.free_vars();
-                    if self.match_types(&impl_.rhs, rhs, &pattern_vars).is_none() {
+                    let Some(subst) = self.match_types(&impl_.rhs, rhs, &pattern_vars) else {
                         continue;
-                    }
+                    };
                     if found.is_some() {
                         return None;
                     }
-                    found = Some(impl_.args.clone());
+                    // The arguments at THIS right-hand side: `Elem [a] = a`
+                    // met with `Int` is `[Int]`. Handing back the equation's
+                    // own `[a]` let the caller unify with the instance's
+                    // variable, which pinned `a` for every later use: after
+                    // one use at `[Int]`, a use at `[Char]` was a mismatch.
+                    found = Some(impl_.args.iter().map(|a| subst.apply(a)).collect());
                 }
             }
         }
         found
+    }
+
+    /// The names of every type family this environment can reduce: the
+    /// standalone families and the associated types instances define.
+    #[must_use]
+    pub fn reducible_family_names(&self) -> rustc_hash::FxHashSet<Symbol> {
+        let mut names: rustc_hash::FxHashSet<Symbol> = self.type_families.keys().copied().collect();
+        names.extend(self.type_family_instances.keys().copied());
+        for instances in self.instances.values() {
+            for instance in instances {
+                names.extend(instance.assoc_type_impls.iter().map(|a| a.name));
+            }
+        }
+        names
     }
 
     /// Whether any class declares, or any instance defines, an associated type
@@ -806,6 +825,37 @@ impl TypeEnv {
                     subst = subst.compose(&s);
                 }
                 Some(subst)
+            }
+            // Lists: match the element. Without this an instance at `[a]`
+            // only matched a list by exact equality, which a pattern variable
+            // never has: `Elem [Int]` did not reduce through `type Elem [a] =
+            // a`, and `Num (Elem [Int])` was reported as having no instance.
+            (Ty::List(e1), Ty::List(e2)) => self.match_types(e1, e2, bound_vars),
+            // `[e]` is also spelled `[] e`.
+            (Ty::List(e1), Ty::App(f2, e2)) | (Ty::App(f2, e2), Ty::List(e1)) if matches!(f2.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") =>
+            {
+                let (pattern_elem, concrete_elem) = if matches!(pattern, Ty::List(_)) {
+                    (e1, e2)
+                } else {
+                    (e2, e1)
+                };
+                self.match_types(pattern_elem, concrete_elem, bound_vars)
+            }
+            // `String` is `[Char]`: an occurrence carries whichever spelling
+            // the source used, so `instance Convert Int String` must answer
+            // for `Convert Int [Char]`, and the other way round.
+            (Ty::Con(c), other) | (other, Ty::Con(c))
+                if c.name.as_str() == "String" && !matches!(other, Ty::Con(_) | Ty::Var(_)) =>
+            {
+                let chars = Ty::List(Box::new(Ty::Con(TyCon::new(
+                    Symbol::intern("Char"),
+                    bhc_types::Kind::Star,
+                ))));
+                if matches!(pattern, Ty::Con(_)) {
+                    self.match_types(&chars, concrete, bound_vars)
+                } else {
+                    self.match_types(pattern, &chars, bound_vars)
+                }
             }
             // Exact match for other cases
             (t1, t2) if t1 == t2 => Some(Subst::new()),

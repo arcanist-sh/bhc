@@ -9589,6 +9589,45 @@ impl TyCtxt {
 
     /// Convert the context into a `TypedModule`.
     #[must_use]
+    /// `ty` with every reducible type family application inside it reduced.
+    /// `families` names the families worth trying (see
+    /// [`TypeEnv::reducible_family_names`]), so a type that mentions none
+    /// costs one walk.
+    fn reduce_families_deep(&self, ty: &Ty, families: &rustc_hash::FxHashSet<Symbol>) -> Ty {
+        match ty {
+            Ty::App(f, a) => {
+                let applied = Ty::App(
+                    Box::new(self.reduce_families_deep(f, families)),
+                    Box::new(self.reduce_families_deep(a, families)),
+                );
+                let mut head = &applied;
+                while let Ty::App(inner, _) = head {
+                    head = inner;
+                }
+                if !matches!(head, Ty::Con(c) if families.contains(&c.name)) {
+                    return applied;
+                }
+                let reduced = crate::unify::try_reduce_type_family(self, &applied);
+                if reduced == applied {
+                    applied
+                } else {
+                    self.reduce_families_deep(&reduced, families)
+                }
+            }
+            Ty::Fun(a, r) => Ty::Fun(
+                Box::new(self.reduce_families_deep(a, families)),
+                Box::new(self.reduce_families_deep(r, families)),
+            ),
+            Ty::List(e) => Ty::List(Box::new(self.reduce_families_deep(e, families))),
+            Ty::Tuple(es) => Ty::Tuple(
+                es.iter()
+                    .map(|e| self.reduce_families_deep(e, families))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     pub fn into_typed_module(self, hir: Module) -> TypedModule {
         // Apply final substitution to all expression types. Single-pass apply:
         // these values are baked into Core by lowering, and codegen's width
@@ -9602,10 +9641,21 @@ impl TyCtxt {
         // A fixpoint-resolved copy for lowering's dispatch decisions only (never
         // baked into Core). Resolves triangular chains that a single apply leaves
         // partial, e.g. `return 42 :: M a` recorded as `App(Var m, Int)`.
+        // Type family applications are reduced in this copy too: lowering
+        // and codegen dispatch on the type (`print` at `[Elem String]` has to
+        // know it is showing a `String`), and neither can reduce a family.
+        let families = self.env.reducible_family_names();
         let resolved_expr_types: rustc_hash::FxHashMap<Span, Ty> = self
             .expr_types
             .iter()
-            .map(|(id, ty)| (*id, self.subst.apply_resolved(ty)))
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (*id, resolved)
+                } else {
+                    (*id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
             .collect();
 
         // Apply final substitution to all definition schemes

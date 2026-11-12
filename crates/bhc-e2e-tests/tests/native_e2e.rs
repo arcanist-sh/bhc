@@ -2212,6 +2212,11 @@ fn test_tier3_user_functor_parser_native() {
 }
 
 #[test]
+fn test_tier3_assoc_type_and_string_instances_native() {
+    run_native_test("tier3_io/assoc_type_and_string_instances", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

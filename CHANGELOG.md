@@ -43,6 +43,13 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- An instance declared at `String` (`instance Convert Int String`) was not
+  found for `[Char]`, and the other way round (#108).
+- An associated type of an instance at `[a]` (`type Elem [a] = a`) did not
+  reduce at a concrete list, so a literal gave `No instance for Num (Elem
+  [Int])`; after one use at `[Int]` every use at another element type was a
+  type mismatch; and `print` of a value typed through the family showed
+  numbers or addresses (#108).
 - A module with a hand-written `Functor` (or `Show`, `Eq`, `Foldable`, …)
   instance whose method matches on another type's constructors (`Just`,
   `Nothing`) had those constructors taken for the instance's own type: every

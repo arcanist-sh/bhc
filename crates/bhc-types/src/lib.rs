@@ -972,6 +972,14 @@ pub fn types_match(pattern: &Ty, target: &Ty) -> Option<Subst> {
     }
 }
 
+/// `[Char]`, which is what `String` stands for.
+fn string_as_list() -> Ty {
+    Ty::List(Box::new(Ty::Con(TyCon::new(
+        Symbol::intern("Char"),
+        Kind::Star,
+    ))))
+}
+
 /// Helper function that accumulates substitutions during type matching.
 ///
 /// Returns `true` if the pattern matches the target, accumulating bindings
@@ -991,6 +999,16 @@ pub fn types_match_with_subst(pattern: &Ty, target: &Ty, subst: &mut Subst) -> b
 
         // Type constructors must match by name
         (Ty::Con(c1), Ty::Con(c2)) => c1.name == c2.name,
+
+        // `String` is `[Char]`. A type is written with either spelling, so
+        // `instance Convert Int String` must answer for `Convert Int [Char]`,
+        // and the other way round.
+        (Ty::Con(c), other @ (Ty::List(_) | Ty::App(..))) if c.name.as_str() == "String" => {
+            types_match_with_subst(&string_as_list(), other, subst)
+        }
+        (other @ (Ty::List(_) | Ty::App(..)), Ty::Con(c)) if c.name.as_str() == "String" => {
+            types_match_with_subst(other, &string_as_list(), subst)
+        }
 
         // Primitive types must match exactly
         (Ty::Prim(p1), Ty::Prim(p2)) => p1 == p2,

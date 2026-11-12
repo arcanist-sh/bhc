@@ -464,8 +464,19 @@ fn try_invert_type_family(ctx: &mut TyCtxt, family_side: &Ty, concrete: &Ty, spa
     if eq_args.len() != args.len() {
         return false;
     }
+    // Equation variables the right-hand side did not determine are fresh at
+    // each use, like any instantiated scheme's.
+    let mut fresh = bhc_types::Subst::new();
+    for eq_arg in &eq_args {
+        for v in eq_arg.free_vars() {
+            if fresh.get(&v).is_none() {
+                let new = Ty::Var(ctx.fresh_ty_var_with_kind(v.kind.clone()));
+                fresh.insert(&v, new);
+            }
+        }
+    }
     for (arg, eq_arg) in args.iter().zip(eq_args.iter()) {
-        unify(ctx, arg, eq_arg, span);
+        unify(ctx, arg, &fresh.apply(eq_arg), span);
     }
     true
 }

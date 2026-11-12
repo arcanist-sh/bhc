@@ -148,8 +148,12 @@ impl std::hash::Hash for Var {
 pub enum Rep {
     /// The type is not known.
     Unknown,
-    /// A value that is, or may be, a heap object: a data type, a function,
-    /// a list, or anything at a type variable.
+    /// A value at a type variable. Today its word is whatever the value's
+    /// own type makes it, a pointer or a scalar's bits, and nothing says
+    /// which; under the uniform representation (#94) it is always a heap
+    /// object. These are the positions where boxing happens.
+    Polymorphic,
+    /// A heap object: a data type, a function, a list, a tuple.
     Lifted,
     /// A machine integer (`Int`, `Word` and the sized ones).
     Int,
@@ -167,7 +171,9 @@ impl Rep {
     pub fn of_ty(ty: &Ty) -> Self {
         match ty {
             Ty::Error => Self::Unknown,
+            Ty::Var(_) => Self::Polymorphic,
             Ty::Forall(_, body) => Self::of_ty(body),
+            // `m a` at a variable `m` is some applied type: an object.
             Ty::Con(con) => match con.name.as_str() {
                 "Int" | "Int8" | "Int16" | "Int32" | "Int64" | "Word" | "Word8" | "Word16"
                 | "Word32" | "Word64" => Self::Int,

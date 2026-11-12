@@ -5926,14 +5926,25 @@ impl LowerContext {
         if std::env::var_os("BHC_REP_COVERAGE").is_some() {
             let coverage = bhc_core::rep_coverage::binder_rep_coverage(&core_module);
             eprintln!(
-                "rep-coverage {}: {} binders, {:.1}% known ({} scalar, {} lifted, {} unknown)",
+                "rep-coverage {}: {} binders, {:.1}% known ({} scalar, {} lifted, {} polymorphic, {} unknown)",
                 core_module.name.as_str(),
                 coverage.total(),
                 coverage.known_percent(),
                 coverage.scalar,
                 coverage.lifted,
+                coverage.polymorphic,
                 coverage.unknown
             );
+            // `BHC_REP_COVERAGE=names`: where the unknown ones come from.
+            if std::env::var("BHC_REP_COVERAGE").as_deref() == Ok("names") {
+                let names = bhc_core::rep_coverage::unknown_binder_names(&core_module);
+                let shown: Vec<String> = names
+                    .iter()
+                    .take(25)
+                    .map(|(name, count)| format!("{name}:{count}"))
+                    .collect();
+                eprintln!("rep-coverage unknown by name: {}", shown.join(" "));
+            }
         }
         Ok(core_module)
     }

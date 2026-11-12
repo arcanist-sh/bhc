@@ -12,7 +12,9 @@ use crate::{Bind, CoreModule, Expr, Rep, Var};
 pub struct RepCoverage {
     /// Binders whose type is not known.
     pub unknown: usize,
-    /// Binders known to hold, or possibly hold, a heap object.
+    /// Binders at a type variable, whose word may be a pointer or a scalar.
+    pub polymorphic: usize,
+    /// Binders known to hold a heap object.
     pub lifted: usize,
     /// Binders known to hold a scalar.
     pub scalar: usize,
@@ -22,24 +24,26 @@ impl RepCoverage {
     /// Every binder counted.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.unknown + self.lifted + self.scalar
+        self.unknown + self.polymorphic + self.lifted + self.scalar
     }
 
-    /// The share of binders whose representation is known, in percent.
+    /// The share of binders whose type is known, in percent. A binder at a
+    /// type variable counts: its type is known, and is what says it needs
+    /// the uniform representation.
     #[must_use]
     pub fn known_percent(&self) -> f64 {
         match self.total() {
             0 => 100.0,
-            total => 100.0 * (self.lifted + self.scalar) as f64 / total as f64,
+            total => 100.0 * (total - self.unknown) as f64 / total as f64,
         }
     }
 
     fn count(&mut self, var: &Var) {
         match var.rep() {
             Rep::Unknown => self.unknown += 1,
+            Rep::Polymorphic => self.polymorphic += 1,
             Rep::Lifted => self.lifted += 1,
-            rep if rep.is_scalar() => self.scalar += 1,
-            _ => self.unknown += 1,
+            Rep::Int | Rep::Char | Rep::Double | Rep::Float => self.scalar += 1,
         }
     }
 
@@ -91,6 +95,84 @@ impl RepCoverage {
     }
 }
 
+/// The binders of `module` whose representation is unknown, grouped by name
+/// with any trailing counter removed (`arg0_200043` counts under `arg0`),
+/// most frequent first. Says where the untyped binders come from.
+#[must_use]
+pub fn unknown_binder_names(module: &CoreModule) -> Vec<(String, usize)> {
+    fn stem(name: &str) -> String {
+        let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());
+        match trimmed.strip_suffix('_') {
+            Some(stem) if trimmed.len() < name.len() && !stem.is_empty() => stem.to_string(),
+            _ => name.to_string(),
+        }
+    }
+    fn bind(b: &Bind, out: &mut Vec<String>) {
+        match b {
+            Bind::NonRec(var, rhs) => {
+                note(var, out);
+                expr(rhs, out);
+            }
+            Bind::Rec(pairs) => {
+                for (var, rhs) in pairs {
+                    note(var, out);
+                    expr(rhs, out);
+                }
+            }
+        }
+    }
+    fn note(var: &Var, out: &mut Vec<String>) {
+        if var.rep() == Rep::Unknown {
+            out.push(stem(var.name.as_str()));
+        }
+    }
+    fn expr(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
+            Expr::App(f, a, _) => {
+                expr(f, out);
+                expr(a, out);
+            }
+            Expr::Lam(param, body, _) => {
+                note(param, out);
+                expr(body, out);
+            }
+            Expr::TyApp(inner, _, _)
+            | Expr::TyLam(_, inner, _)
+            | Expr::Lazy(inner, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _) => expr(inner, out),
+            Expr::Let(b, body, _) => {
+                bind(b, out);
+                expr(body, out);
+            }
+            Expr::Case(scrutinee, alts, _, _) => {
+                expr(scrutinee, out);
+                for alt in alts {
+                    for binder in &alt.binders {
+                        note(binder, out);
+                    }
+                    expr(&alt.rhs, out);
+                }
+            }
+        }
+    }
+    let mut names = Vec::new();
+    for b in &module.bindings {
+        bind(b, &mut names);
+    }
+    names.sort();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for name in names {
+        match counts.last_mut() {
+            Some((last, n)) if *last == name => *n += 1,
+            _ => counts.push((name, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+}
+
 /// Count the binders of `module`: top-level and local bindings, lambda
 /// parameters and the variables case alternatives bind.
 #[must_use]
@@ -138,6 +220,7 @@ mod tests {
             coverage,
             RepCoverage {
                 unknown: 1,
+                polymorphic: 0,
                 lifted: 1,
                 scalar: 1
             }
@@ -160,7 +243,37 @@ mod tests {
             var("a", Ty::Fun(Box::new(con("Int")), Box::new(con("Int")))).rep(),
             Rep::Lifted
         );
+        assert_eq!(
+            var("a", Ty::Var(bhc_types::TyVar::new(3, Kind::Star))).rep(),
+            Rep::Polymorphic
+        );
         assert!(Rep::Double.is_scalar() && !Rep::Lifted.is_scalar() && !Rep::Unknown.is_scalar());
+        assert!(!Rep::Polymorphic.is_scalar());
+    }
+
+    #[test]
+    fn unknown_binders_are_grouped_by_name_stem() {
+        let body = Expr::Var(var("x", Ty::Error), Span::default());
+        let lam = |name: &str, checked: Ty, body: Expr| {
+            Expr::Lam(var(name, checked), Box::new(body), Span::default())
+        };
+        let rhs = lam(
+            "arg0_12",
+            Ty::Error,
+            lam("arg0_13", Ty::Error, lam("n", con("Int"), body)),
+        );
+        let module = CoreModule {
+            name: Symbol::intern("M"),
+            bindings: vec![Bind::NonRec(var("f", Ty::Error), Box::new(rhs))],
+            exports: vec![],
+            foreign_imports: vec![],
+            overloaded_strings: false,
+            constructors: vec![],
+        };
+        assert_eq!(
+            unknown_binder_names(&module),
+            vec![("arg0".to_string(), 2), ("f".to_string(), 1)]
+        );
     }
 
     #[test]

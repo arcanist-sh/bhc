@@ -10534,7 +10534,10 @@ fn lower_case(
 
     // Complex case: some alternatives have nested sub-patterns.
     // Bind the scrutinee to a variable so fallthrough can re-case on it.
-    let scrut_var = ctx.fresh_var("scrut", Ty::Error, span);
+    let scrut_var = ctx.fresh_var("scrut", Ty::Error, span).with_checked_ty(
+        ctx.resolved_expr_ty_opt(scrutinee.span())
+            .unwrap_or(Ty::Error),
+    );
 
     // A local multi-clause function cases on the tuple of its parameters;
     // their types let a nested literal sub-pattern compare as `Text`.

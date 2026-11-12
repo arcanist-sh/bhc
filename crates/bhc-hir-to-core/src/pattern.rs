@@ -119,7 +119,15 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     .filter(|t| !crate::context::has_type_variables(t))
                     .cloned()
                     .unwrap_or(Ty::Error);
+                // The declared field type is the binder's checked type even
+                // where it mentions the data type's parameters.
+                let declared_ty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
                 let binder = ctx.fresh_var(&binder_name, binder_ty, span);
+                let binder = if matches!(binder.checked_ty, Ty::Error) {
+                    binder.with_checked_ty(declared_ty)
+                } else {
+                    binder
+                };
 
                 match sub_pat {
                     Pat::Var(name, def_id, _) => {
@@ -989,12 +997,25 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                             .collect()
                     })
                 });
+                // The declared field types, type parameters included, for
+                // the binders' checked types.
+                let declared_tys: Vec<Ty> = ctx
+                    .constructor_field_types(*con_name)
+                    .filter(|declared| declared.len() == *arity as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 let field_vars: Vec<Var> = (0..*arity)
                     .map(|i| {
                         let ty = field_tys
                             .as_ref()
                             .map_or(Ty::Error, |tys| tys[i as usize].clone());
-                        ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span)
+                        let var = ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span);
+                        match declared_tys.get(i as usize) {
+                            Some(declared) if matches!(var.checked_ty, Ty::Error) => {
+                                var.with_checked_ty(declared.clone())
+                            }
+                            _ => var,
+                        }
                     })
                     .collect();
 

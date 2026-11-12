@@ -167,6 +167,12 @@ pub enum Rep {
 
 impl Rep {
     /// The representation of a value of type `ty`.
+    ///
+    /// One thing this cannot see: a newtype is erased at run time, so a
+    /// value of `newtype Age = Age Int` is the `Int` itself, while its type
+    /// is a constructor this answers [`Rep::Lifted`] for. A consumer must
+    /// expand newtypes in `ty` first; until one does, `Lifted` means "a heap
+    /// object, or a newtype of anything".
     #[must_use]
     pub fn of_ty(ty: &Ty) -> Self {
         match ty {

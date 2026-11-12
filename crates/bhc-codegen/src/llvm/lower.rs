@@ -52554,9 +52554,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Case(_, alts, _, _) => {
                 for alt in alts {
                     if let AltCon::DataCon(con) = &alt.con {
+                        // Only the type's own constructors. A method body
+                        // also matches on other types' (`Just`/`Nothing` in a
+                        // parser's `fmap`); tagged as this type's, every
+                        // later `fmap g (Just x)` in the module was sent to
+                        // this instance (#110).
+                        let own = con.ty_con.name.as_str();
+                        let own = own.rsplit('.').next().unwrap_or(own);
+                        let wanted = type_name.rsplit('.').next().unwrap_or(type_name);
                         let con_name = con.name.as_str().to_string();
-                        if let Some(meta) = self.constructor_metadata.get_mut(&con_name) {
-                            meta.type_name = Some(type_name.to_string());
+                        if own == wanted {
+                            if let Some(meta) = self.constructor_metadata.get_mut(&con_name) {
+                                meta.type_name = Some(type_name.to_string());
+                            }
                         }
                     }
                     self.tag_constructors_with_type(&alt.rhs, type_name);

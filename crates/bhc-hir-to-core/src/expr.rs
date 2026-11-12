@@ -1549,6 +1549,45 @@ fn bytestring_map(ctx: &mut LowerContext, span: Span) -> core::Expr {
     )
 }
 
+/// Whether a class method's occurrence is known to be at a type other than
+/// the instance being defined: its class parameter, read off the type the
+/// checker recorded for the occurrence, has a concrete head that is not the
+/// instance type's.
+fn occurrence_is_at_another_type(
+    ctx: &LowerContext,
+    class_name: Symbol,
+    method_def_id: DefId,
+    span: Span,
+    inst_ty: &Ty,
+) -> bool {
+    let Some(inst_head) = applied_head_name(inst_ty) else {
+        return false;
+    };
+    let differs = |ty: &Ty| has_concrete_head(ty) && applied_head_name(ty) != Some(inst_head);
+    if let Some(params) = ctx.class_params_from_occurrence_any(class_name, method_def_id, span) {
+        return params.first().is_some_and(differs);
+    }
+    // A builtin class's method has no scheme to match against. For the
+    // constructor classes the container is where the result is built.
+    if !matches!(
+        class_name.as_str(),
+        "Functor" | "Applicative" | "Monad" | "Foldable" | "Traversable"
+    ) {
+        return false;
+    }
+    let Some(mut ty) = ctx.resolved_expr_ty_opt(span) else {
+        return false;
+    };
+    while let Ty::Fun(_, result) = ty {
+        ty = *result;
+    }
+    match crate::context::canonical_list_spelling(&ty) {
+        Ty::App(container, _) => differs(&container),
+        Ty::List(_) => true,
+        _ => false,
+    }
+}
+
 /// `read`, `readMaybe` or `reads` at a type the runtime's generic reader
 /// handles and codegen's own `read` does not (a data type deriving `Read`, a
 /// tuple, a nested list, `Maybe`, …): the reader applied to the type's
@@ -2009,7 +2048,19 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                 // occurrence type may keep the class param generic there, so
                 // resolve at the enclosing instance type directly.
                 if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                    if ctx.current_instance_class() == Some(class_name) {
+                    // But not when this use is at ANOTHER type: `fmap g (p s)`
+                    // inside `instance Functor Parser`, where `p s` is a
+                    // `Maybe`, is Maybe's `fmap`. Taken for the enclosing
+                    // instance's, it ran the parser's `fmap` on a `Maybe`.
+                    if ctx.current_instance_class() == Some(class_name)
+                        && !occurrence_is_at_another_type(
+                            ctx,
+                            class_name,
+                            def_ref.def_id,
+                            def_ref.span,
+                            &inst_ty,
+                        )
+                    {
                         if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                             name,
                             class_name,
@@ -2058,7 +2109,18 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                     || !in_scope_dict_matches(ctx, class_name, def_ref.span))
             {
                 if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                    if !LowerContext::is_builtin_monad_type(&inst_ty) {
+                    // Not when this occurrence is at another type: the
+                    // `fmap` of `fmap g (p s)` inside `instance Functor
+                    // Parser`, with `p s :: Maybe …`, is Maybe's (#110).
+                    if !LowerContext::is_builtin_monad_type(&inst_ty)
+                        && !occurrence_is_at_another_type(
+                            ctx,
+                            class_name,
+                            def_ref.def_id,
+                            def_ref.span,
+                            &inst_ty,
+                        )
+                    {
                         if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                             name,
                             class_name,

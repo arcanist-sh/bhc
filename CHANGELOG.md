@@ -43,6 +43,14 @@ All notable changes to BHC are recorded here. The format follows
   function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
   `map negate xs`) did not convert or used integer arithmetic (#100, native
   only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- A module with a hand-written `Functor` (or `Show`, `Eq`, `Foldable`, …)
+  instance whose method matches on another type's constructors (`Just`,
+  `Nothing`) had those constructors taken for the instance's own type: every
+  later `fmap g (Just x)` in the module ran the user's instance and gave a
+  wrong result or crashed (#110).
+- Inside an instance method, a method of the same class used at another type
+  (`fmap g (p s)` at `Maybe` within `instance Functor Parser`) was resolved
+  to the enclosing instance.
 - `show`, `print`, `==`, `/=`, `<`, `<=`, `>`, `>=`, `max` and `min` used at
   a function type are a type error (`No instance for Show (Int -> Int)`).
   `print id` compiled and printed an empty line (#106).

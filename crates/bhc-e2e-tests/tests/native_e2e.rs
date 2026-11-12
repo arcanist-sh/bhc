@@ -2207,6 +2207,11 @@ fn test_tier3_bytestring_char8_native() {
 }
 
 #[test]
+fn test_tier3_user_functor_parser_native() {
+    run_native_test("tier3_io/user_functor_parser", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_kind_signature_native() {
     run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
 }

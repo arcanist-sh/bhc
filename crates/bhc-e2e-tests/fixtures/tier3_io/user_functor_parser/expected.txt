@@ -1,0 +1,11 @@
+Just (356,"rest")
+Just ("ab","")
+Just (12,"x")
+Nothing
+a|b
+a|b
+a|b
+'a'|b
+(Just 2,[2,3])
+(Just 3,Nothing)
+Just (('x','y'),"z")

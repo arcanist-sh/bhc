@@ -879,6 +879,31 @@ impl<'a> DictContext<'a> {
         }
     }
 
+    /// A type variable for a compiler-generated binder's checked type. Only
+    /// its being a variable matters ([`bhc_core::Rep::Polymorphic`]), so one
+    /// id serves, far above any the type checker hands out. It must not draw
+    /// on `fresh_counter`: that numbers the variables themselves.
+    fn synthetic_ty_var(slot: u32) -> Ty {
+        Ty::Var(TyVar::new(0xFFE0_0000 + slot, Kind::Star))
+    }
+
+    /// A fresh variable for a value at a type variable: an argument of a
+    /// class default (`x` in `x <$ p`).
+    fn fresh_poly_var(&mut self, prefix: &str, span: Span) -> Var {
+        self.fresh_var(prefix, Ty::Error, span)
+            .with_checked_ty(Self::synthetic_ty_var(0))
+    }
+
+    /// A fresh variable for a value of an applied type `f a` with both
+    /// unknown: an operand of `>>`, `*>`, `<$`.
+    fn fresh_applied_var(&mut self, prefix: &str, span: Span) -> Var {
+        let ty = Ty::App(
+            Box::new(Self::synthetic_ty_var(1)),
+            Box::new(Self::synthetic_ty_var(0)),
+        );
+        self.fresh_var(prefix, Ty::Error, span).with_checked_ty(ty)
+    }
+
     /// Get or create a dictionary for a constraint with concrete type(s).
     ///
     /// For single-parameter classes like `Num Int`, this returns a variable
@@ -1800,9 +1825,11 @@ fn missing_method_field(
         if let Some(&fmap_id) = class_methods.get(&Symbol::intern("fmap")) {
             let fmap_ref = ctx.method_reference(fmap_id, span);
             let fmap_applied = apply_constraint_dicts(fmap_ref, constraint_dicts, span);
-            let xv = ctx.fresh_var("x", Ty::Error, span);
-            let pv = ctx.fresh_var("p", Ty::Error, span);
-            let iv = ctx.fresh_var("_i", Ty::Error, span);
+            // `x <$ p`: `x` and the element `const` ignores are at type
+            // variables, `p` is a functor value.
+            let xv = ctx.fresh_poly_var("x", span);
+            let pv = ctx.fresh_applied_var("p", span);
+            let iv = ctx.fresh_poly_var("_i", span);
             let const_l = core::Expr::Lam(iv, Box::new(core::Expr::Var(xv.clone(), span)), span);
             let body = core::Expr::App(
                 Box::new(core::Expr::App(
@@ -1827,8 +1854,9 @@ fn missing_method_field(
     // and `a <* b = fmap const a <*> b`, with `fmap` from the Functor
     // superclass slot.
     let lam2 = |ctx: &mut DictContext, body: &dyn Fn(&Var, &Var) -> core::Expr| {
-        let a = ctx.fresh_var("a", Ty::Error, span);
-        let b = ctx.fresh_var("b", Ty::Error, span);
+        // Both operands of `>>`, `*>` and `<*` are values in the monad.
+        let a = ctx.fresh_applied_var("a", span);
+        let b = ctx.fresh_applied_var("b", span);
         let inner = body(&a, &b);
         core::Expr::Lam(a, Box::new(core::Expr::Lam(b, Box::new(inner), span)), span)
     };
@@ -1838,7 +1866,7 @@ fn missing_method_field(
         if let Some(&bind_id) = class_methods.get(&Symbol::intern(">>=")) {
             let bind_ref = ctx.method_reference(bind_id, span);
             let bind = apply_constraint_dicts(bind_ref, constraint_dicts, span);
-            let ignored = ctx.fresh_var("_", Ty::Error, span);
+            let ignored = ctx.fresh_poly_var("_", span);
             return lam2(ctx, &|m, k| {
                 let cont = core::Expr::Lam(ignored.clone(), Box::new(var(k)), span);
                 app(app(bind.clone(), var(m)), cont)
@@ -1863,8 +1891,8 @@ fn missing_method_field(
         {
             let ap_ref = ctx.method_reference(ap_id, span);
             let ap = apply_constraint_dicts(ap_ref, constraint_dicts, span);
-            let x = ctx.fresh_var("x", Ty::Error, span);
-            let y = ctx.fresh_var("y", Ty::Error, span);
+            let x = ctx.fresh_poly_var("x", span);
+            let y = ctx.fresh_poly_var("y", span);
             // `*>` keeps the second result, `<*` the first.
             let keep = if method_name.as_str() == "*>" { &y } else { &x };
             let pick = core::Expr::Lam(

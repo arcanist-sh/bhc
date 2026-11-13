@@ -519,6 +519,11 @@ pub struct Lowering<'ctx, 'm> {
     /// block in `IO`. The operator's own type can: `>>=` is a `Ty::Fun`, and
     /// those reach Core.
     current_builtin_ty: Ty,
+    /// The arity a builtin expects of a function argument it is about to
+    /// lower, keyed by the address of the argument's expression. `lower_expr`
+    /// adapts the closure it produces for such an expression; see
+    /// [`Self::closure_of_arity`].
+    expected_fn_arity: FxHashMap<usize, u32>,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     overloaded_strings: bool,
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
@@ -638,6 +643,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
@@ -704,6 +710,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
@@ -6958,8 +6965,221 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         None
     }
 
+    /// The function arguments of a builtin, as `(argument index, the number
+    /// of arguments the builtin's code applies it to at once)`.
+    ///
+    /// These builtins, or the runtime functions they call, jump to the
+    /// function's code with that many arguments. A function of another
+    /// arity (`\a -> add a` where two are expected) has to be adapted first.
+    fn builtin_function_args(name: &str) -> &'static [(usize, u32)] {
+        match name {
+            "foldr" | "foldl" | "foldl'" | "foldr1" | "foldl1" | "zipWith" | "scanl" | "scanr"
+            | "scanl1" | "scanr1" | "sortBy" | "groupBy" | "nubBy" | "maximumBy" | "minimumBy"
+            | "deleteBy" | "unionBy" | "intersectBy" | "flip" | "uncurry" | "foldM" | "foldM_"
+            | "zipWithM" | "zipWithM_" | "mapAccumL" | "mapAccumR" | "on" => &[(0, 2)],
+            "zipWith3" => &[(0, 3)],
+            "Data.Map.insertWith"
+            | "Data.Map.unionWith"
+            | "Data.Map.fromListWith"
+            | "Data.Map.intersectionWith"
+            | "Data.Map.differenceWith"
+            | "Data.Map.foldr"
+            | "Data.Map.foldl"
+            | "Data.Map.mapWithKey"
+            | "Data.Map.filterWithKey"
+            | "Data.Map.mapMaybeWithKey"
+            | "Data.IntMap.insertWith"
+            | "Data.IntMap.unionWith"
+            | "Data.IntMap.foldr"
+            | "Data.IntMap.mapWithKey"
+            | "Data.Set.foldr"
+            | "Data.Set.foldl"
+            | "Data.IntSet.foldr" => &[(0, 2)],
+            "Data.Map.foldrWithKey"
+            | "Data.Map.foldlWithKey"
+            | "Data.Map.foldlWithKey'"
+            | "Data.Map.unionWithKey"
+            | "Data.IntMap.foldlWithKey"
+            | "Data.IntMap.foldlWithKey'" => &[(0, 3)],
+            _ => &[],
+        }
+    }
+
     /// Lower a builtin function application.
     fn lower_builtin(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Say what arity the builtin expects of its function arguments, for
+        // `lower_expr` to adapt them as it lowers them.
+        let mut expected: Vec<usize> = Vec::new();
+        for &(index, arity) in Self::builtin_function_args(name) {
+            if let Some(arg) = args.get(index) {
+                let key = *arg as *const Expr as usize;
+                if self.expected_fn_arity.insert(key, arity).is_none() {
+                    expected.push(key);
+                }
+            }
+        }
+        let result = self.lower_builtin_dispatch(name, args);
+        for key in expected {
+            self.expected_fn_arity.remove(&key);
+        }
+        result
+    }
+
+    /// A closure that takes exactly `arity` arguments at once and behaves as
+    /// `function` does.
+    ///
+    /// A builtin that jumps to its function's code with `arity` arguments is
+    /// only right when the function takes that many. `\a -> add a` takes one
+    /// and returns a function; called with two, the second is dropped and the
+    /// partial application comes back as the result. When the closure's
+    /// recorded arity is something else, this wraps it in a closure of the
+    /// expected arity whose code applies it through `apply_closure_values`.
+    ///
+    /// A recorded arity of 0 means unknown, and an object that is not a
+    /// closure (a thunk for one) is not looked into: both pass through.
+    fn closure_of_arity(
+        &mut self,
+        function: PointerValue<'ctx>,
+        arity: u32,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("arity adapter: {step}: {e:?}"))
+        };
+        let Some(start_bb) = self.builder().get_insert_block() else {
+            return Ok(function);
+        };
+        let Some(current_fn) = start_bb.get_parent() else {
+            return Ok(function);
+        };
+
+        // The adapter's code: `\env a1 .. an -> env[0] a1 .. an`, applied by
+        // the wrapped function's own arity.
+        let name = format!("__bhc_arity_adapter_{arity}");
+        let adapter = match self.module.llvm_module().get_function(&name) {
+            Some(existing) => existing,
+            None => {
+                let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    vec![ptr_type.into()];
+                for _ in 0..arity {
+                    params.push(ptr_type.into());
+                }
+                let adapter = self.module.llvm_module().add_function(
+                    &name,
+                    ptr_type.fn_type(&params, false),
+                    Some(inkwell::module::Linkage::Internal),
+                );
+                let entry = self.llvm_ctx.append_basic_block(adapter, "entry");
+                self.builder().position_at_end(entry);
+                let env = adapter
+                    .get_nth_param(0)
+                    .ok_or_else(|| CodegenError::Internal("arity adapter: no env".to_string()))?
+                    .into_pointer_value();
+                let wrapped = self.extract_closure_env_elem(env, 1, 0)?;
+                let mut call_args = Vec::with_capacity(arity as usize);
+                for index in 1..=arity {
+                    let param = adapter.get_nth_param(index).ok_or_else(|| {
+                        CodegenError::Internal("arity adapter: missing parameter".to_string())
+                    })?;
+                    call_args.push(param.into_pointer_value());
+                }
+                let result = self
+                    .apply_closure_values(wrapped, &call_args, false)?
+                    .ok_or_else(|| CodegenError::Internal("arity adapter: void".to_string()))?;
+                let result = self.value_to_ptr(result)?;
+                self.builder()
+                    .build_return(Some(&result))
+                    .map_err(|e| internal("return", &e))?;
+                self.builder().position_at_end(start_bb);
+                adapter
+            }
+        };
+
+        let check_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_check");
+        let adapt_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_adapt");
+        let done_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_done");
+
+        // Only a closure has an arity word.
+        let kind_slot = self
+            .builder()
+            .build_struct_gep(self.closure_type(0), function, 0, "kind_slot")
+            .map_err(|e| internal("kind gep", &e))?;
+        let kind = self
+            .builder()
+            .build_load(i64_type, kind_slot, "fn_kind")
+            .map_err(|e| internal("kind load", &e))?
+            .into_int_value();
+        let is_closure = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                kind,
+                i64_type.const_int(bhc_rts_alloc::object::CLOSURE as u64, true),
+                "fn_is_closure",
+            )
+            .map_err(|e| internal("kind compare", &e))?;
+        self.builder()
+            .build_conditional_branch(is_closure, check_bb, done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(check_bb);
+        let recorded = self.load_closure_arity(function)?;
+        let matches = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                recorded,
+                i64_type.const_int(u64::from(arity), false),
+                "fn_arity_matches",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let unknown = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                recorded,
+                i64_type.const_zero(),
+                "fn_arity_unknown",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let as_is = self
+            .builder()
+            .build_or(matches, unknown, "fn_arity_ok")
+            .map_err(|e| internal("arity or", &e))?;
+        self.builder()
+            .build_conditional_branch(as_is, done_bb, adapt_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(adapt_bb);
+        let adapted = self.alloc_closure_with_arity(
+            adapter.as_global_value().as_pointer_value(),
+            &[(VarId::new(900_001), function.into())],
+            arity,
+        )?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(done_bb);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "fn_of_arity")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[
+            (&function, start_bb),
+            (&function, check_bb),
+            (&adapted, adapt_bb),
+        ]);
+        Ok(result.as_basic_value().into_pointer_value())
+    }
+
+    /// The builtins, by name.
+    fn lower_builtin_dispatch(
         &mut self,
         name: &str,
         args: &[&Expr],
@@ -53496,6 +53716,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a Core expression to LLVM IR.
     fn lower_expr(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = self.lower_expr_unadapted(expr)?;
+        // A function argument of a builtin that applies it to a fixed number
+        // of arguments at once: make it a closure of that arity.
+        if !self.expected_fn_arity.is_empty() {
+            let key = expr as *const Expr as usize;
+            if let (Some(&arity), Some(BasicValueEnum::PointerValue(function))) =
+                (self.expected_fn_arity.get(&key), result)
+            {
+                return Ok(Some(self.closure_of_arity(function, arity)?.into()));
+            }
+        }
+        Ok(result)
+    }
+
+    /// [`Self::lower_expr`] without the arity adaptation.
+    fn lower_expr_unadapted(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         match expr {
             Expr::Lit(lit, ty, _span) => self.lower_literal(lit, ty).map(Some),
 

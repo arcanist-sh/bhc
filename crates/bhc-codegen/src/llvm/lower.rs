@@ -12314,6 +12314,108 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// foldl f z (x:xs) = foldl f (f z x) xs
     ///
     /// Iterative implementation: accumulates from left to right
+    /// Apply a fold's function to its two arguments.
+    ///
+    /// The function need not take both at once: `\k -> M.insert k k` takes
+    /// one and returns a function of the other, and calling its code with
+    /// two arguments dropped the second. A closure whose recorded arity is 2
+    /// (or 0, unknown) is called directly, as before; any other goes through
+    /// `apply_closure_values`, which splits the application by arity.
+    fn call_fold_function(
+        &mut self,
+        func_ptr: PointerValue<'ctx>,
+        first: PointerValue<'ctx>,
+        second: PointerValue<'ctx>,
+        what: &str,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("{what}: {step}: {e:?}"))
+        };
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: no current function")))?;
+        let direct_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_direct");
+        let split_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_split");
+        let done_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_done");
+
+        let arity = self.load_closure_arity(func_ptr)?;
+        let takes_two = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                arity,
+                i64_type.const_int(2, false),
+                "fold_fn_takes_two",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let unknown = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                arity,
+                i64_type.const_zero(),
+                "fold_fn_arity_unknown",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let direct = self
+            .builder()
+            .build_or(takes_two, unknown, "fold_call_is_direct")
+            .map_err(|e| internal("arity or", &e))?;
+        self.builder()
+            .build_conditional_branch(direct, direct_bb, split_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(direct_bb);
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let direct_result = self
+            .builder()
+            .build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &[func_ptr.into(), first.into(), second.into()],
+                "fold_result",
+            )
+            .map_err(|e| internal("call", &e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: function returned void")))?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(split_bb);
+        let split_result = self
+            .apply_closure_values(func_ptr, &[first, second], false)?
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: function returned void")))?;
+        let split_result = self.value_to_ptr(split_result)?;
+        let split_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: no insert block")))?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(done_bb);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "fold_call_result")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[(&direct_result, direct_bb), (&split_result, split_end)]);
+        Ok(result.as_basic_value())
+    }
+
     fn lower_builtin_foldl(
         &mut self,
         func_expr: &Expr,
@@ -12403,34 +12505,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        // Call f acc head - function takes (closure_ptr, acc, head) and returns new acc
-        // The closure stores the function pointer which expects all args at once
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-        let new_acc = self
+        // Apply f to the accumulator and the element.
+        let new_acc = self.call_fold_function(
+            func_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            head_ptr,
+            "foldl",
+        )?;
+        // The application ends in a block of its own.
+        let loop_body_end = self
             .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[
-                    func_ptr.into(),
-                    acc_phi.as_basic_value().into(),
-                    head_ptr.into(),
-                ],
-                "foldl_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("foldl: function returned void".to_string()))?;
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldl: no insert block".to_string()))?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body_end)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body_end)]);
 
         // Exit: return accumulator
         self.builder().position_at_end(loop_exit);
@@ -12612,36 +12706,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        // Call f head acc - function takes (closure_ptr, elem, acc) and returns new acc
-        // Note: for foldr, the function signature is (a -> b -> b), so elem comes first, then acc
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-        let new_acc = self
+        // Apply f to the element and the accumulator.
+        let new_acc = self.call_fold_function(
+            func_ptr,
+            head_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            "foldr",
+        )?;
+        // The application ends in a block of its own.
+        let fold_body_end = self
             .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[
-                    func_ptr.into(),
-                    head_ptr.into(),
-                    acc_phi.as_basic_value().into(),
-                ],
-                "foldr_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("foldr: function returned void".to_string()))?;
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldr: no insert block".to_string()))?;
 
         self.builder()
             .build_unconditional_branch(fold_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        acc_phi.add_incoming(&[(&init_ptr, rev_exit), (&new_acc, fold_body)]);
+        acc_phi.add_incoming(&[(&init_ptr, rev_exit), (&new_acc, fold_body_end)]);
         list_phi.add_incoming(&[
             (&rev_acc.as_basic_value(), rev_exit),
-            (&tail_ptr, fold_body),
+            (&tail_ptr, fold_body_end),
         ]);
 
         // Exit: return accumulator
@@ -60976,7 +61062,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // The callee may be a lazy thunk (a recursive-CAF reference — see
         // `recursive_caf_ids`): force it before reading the fn ptr.
         // `bhc_force` is a cheap passthrough for real closures (their first
-        // word is a function ADDRESS, which reads as a non-negative tag).
+        // word is the closure kind, which it returns as it is).
         let closure_ptr = self.build_force(closure_ptr.into())?.into_pointer_value();
 
         let fn_ptr = self.checked_closure_fn_ptr(closure_ptr, "closure call")?;

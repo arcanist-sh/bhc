@@ -2686,6 +2686,11 @@ fn test_tier2_sort_derived_ord_native() {
 }
 
 #[test]
+fn test_tier2_fold_curried_function_native() {
+    run_native_test("tier2_functions/fold_curried_function", Profile::Default);
+}
+
+#[test]
 fn test_tier2_map_runtime_string_keys_native() {
     run_native_test("tier2_functions/map_runtime_string_keys", Profile::Default);
 }

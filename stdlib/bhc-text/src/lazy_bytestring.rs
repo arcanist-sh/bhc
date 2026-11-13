@@ -117,23 +117,20 @@ fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
     unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
-// Handle sentinel constants (matching bhc-rts)
-const HANDLE_STDIN: usize = 1;
-const HANDLE_STDOUT: usize = 2;
-const HANDLE_STDERR: usize = 3;
+use bhc_rts_alloc::handle::{
+    Handle as BhcHandle, STDERR as HANDLE_STDERR, STDIN as HANDLE_STDIN, STDOUT as HANDLE_STDOUT,
+};
 
-/// Mirror of BhcHandle from bhc-rts.
-#[repr(C)]
-struct BhcHandle {
-    file: Option<std::fs::File>,
-    readable: bool,
-    writable: bool,
-    closed: bool,
+/// Which stream a handle is: 0 for an opened file (or null), otherwise one
+/// of the `HANDLE_STD*` numbers.
+fn handle_stream(handle: *mut u8) -> usize {
+    // SAFETY: every handle compiled code holds came from the runtime.
+    unsafe { bhc_rts_alloc::handle::stream(handle) }
 }
 
+/// Whether `handle` is one of the standard streams.
 fn is_sentinel(handle: *mut u8) -> bool {
-    let h = handle as usize;
-    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+    handle_stream(handle) != 0
 }
 
 // ============================================================
@@ -518,7 +515,7 @@ pub extern "C" fn bhc_lazy_bs_h_put_str(handle: *mut u8, lazy: *const u8) {
     unsafe {
         let bytes = flatten_to_bytes(lazy);
         if is_sentinel(handle) {
-            let h = handle as usize;
+            let h = handle_stream(handle);
             if h == HANDLE_STDOUT {
                 let stdout = std::io::stdout();
                 let mut lock = stdout.lock();
@@ -549,7 +546,7 @@ pub extern "C" fn bhc_lazy_bs_h_get_contents(handle: *mut u8) -> *mut u8 {
     unsafe {
         let mut buf = Vec::new();
         if is_sentinel(handle) {
-            let h = handle as usize;
+            let h = handle_stream(handle);
             if h == HANDLE_STDIN {
                 let stdin = std::io::stdin();
                 let mut lock = stdin.lock();

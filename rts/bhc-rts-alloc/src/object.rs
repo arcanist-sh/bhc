@@ -73,7 +73,8 @@
 //! there.
 //!
 //! A `Map` (which `IntMap` shares) and a `Set` are Rust collections behind
-//! [`MAP`] and [`SET`], like the objects above.
+//! [`MAP`] and [`SET`], like the objects above. A file handle is behind
+//! [`HANDLE`]; its layout is in the `handle` module.
 //!
 //! # Allocation
 //!
@@ -407,6 +408,8 @@ pub const BYTES: i64 = -21;
 pub const MAP: i64 = -22;
 /// Word 0 of a `Set` or an `IntSet`.
 pub const SET: i64 = -23;
+/// Word 0 of a file handle.
+pub const HANDLE: i64 = -24;
 
 /// The size in bytes of a `Text` or `ByteString` before any bytes it owns.
 pub const BYTES_HEADER: usize = 4 * WORD;
@@ -488,6 +491,7 @@ pub const fn is_first_word(word: i64) -> bool {
             | BYTES
             | MAP
             | SET
+            | HANDLE
     )
 }
 
@@ -579,7 +583,7 @@ mod tests {
             assert!(is_first_word(word), "{word}");
         }
         // An address, a small negative number, an unused kind.
-        for word in [0x1_0000_0000, TAG_LIMIT, -5, -15, -24] {
+        for word in [0x1_0000_0000, TAG_LIMIT, -5, -15, -25] {
             assert!(!is_first_word(word), "{word}");
         }
     }

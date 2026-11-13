@@ -4434,21 +4434,26 @@ pub extern "C" fn bhc_uninterruptible_mask_with_restore(
 
 use std::io::{Read, Seek, Write};
 
-/// Internal handle representation tracking open state and capabilities.
-struct BhcHandle {
-    file: Option<std::fs::File>,
-    readable: bool,
-    writable: bool,
-    closed: bool,
+use bhc_rts_alloc::handle::{
+    Handle as BhcHandle, STDERR as HANDLE_STDERR, STDIN as HANDLE_STDIN, STDOUT as HANDLE_STDOUT,
+};
+
+/// The standard streams' handles. They are heap objects like an opened
+/// file's handle, told apart by the stream they name.
+static STDIN_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDIN);
+static STDOUT_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDOUT);
+static STDERR_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDERR);
+
+/// Which stream a handle is: 0 for an opened file (or null), otherwise one
+/// of the `HANDLE_STD*` numbers.
+fn handle_stream(handle: *mut u8) -> usize {
+    // SAFETY: every handle compiled code holds came from this module.
+    unsafe { bhc_rts_alloc::handle::stream(handle) }
 }
 
-const HANDLE_STDIN: usize = 1;
-const HANDLE_STDOUT: usize = 2;
-const HANDLE_STDERR: usize = 3;
-
+/// Whether `handle` is one of the standard streams.
 fn is_sentinel(handle: *mut u8) -> bool {
-    let h = handle as usize;
-    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+    handle_stream(handle) != 0
 }
 
 fn get_bhc_handle(handle: *mut u8) -> Option<&'static mut BhcHandle> {
@@ -4463,27 +4468,27 @@ fn get_bhc_handle(handle: *mut u8) -> Option<&'static mut BhcHandle> {
 // Standard handle accessors
 // ----------------------------------------------------------------------------
 
-/// Return sentinel pointer for stdin.
+/// The stdin handle.
 #[no_mangle]
 pub extern "C" fn bhc_stdin() -> *mut u8 {
-    HANDLE_STDIN as *mut u8
+    std::ptr::addr_of!(STDIN_HANDLE) as *mut u8
 }
 
 /// Whether `handle` is the stdin handle.
 pub(crate) fn is_stdin_handle(handle: *mut u8) -> bool {
-    handle as usize == HANDLE_STDIN
+    handle_stream(handle) == HANDLE_STDIN
 }
 
-/// Return sentinel pointer for stdout.
+/// The stdout handle.
 #[no_mangle]
 pub extern "C" fn bhc_stdout() -> *mut u8 {
-    HANDLE_STDOUT as *mut u8
+    std::ptr::addr_of!(STDOUT_HANDLE) as *mut u8
 }
 
-/// Return sentinel pointer for stderr.
+/// The stderr handle.
 #[no_mangle]
 pub extern "C" fn bhc_stderr() -> *mut u8 {
-    HANDLE_STDERR as *mut u8
+    std::ptr::addr_of!(STDERR_HANDLE) as *mut u8
 }
 
 // ----------------------------------------------------------------------------
@@ -4533,12 +4538,7 @@ pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut
 
     match file_result {
         Ok(file) => {
-            let handle = Box::new(BhcHandle {
-                file: Some(file),
-                readable,
-                writable,
-                closed: false,
-            });
+            let handle = Box::new(BhcHandle::on_file(file, readable, writable));
             Box::into_raw(handle) as *mut u8
         }
         Err(_) => ptr::null_mut(),
@@ -4578,7 +4578,7 @@ pub unsafe extern "C" fn bhc_close_handle(handle: *mut u8) {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         let mut buf = [0u8; 1];
         match crate::concurrent::outside_baton(|| std::io::stdin().read(&mut buf)) {
@@ -4609,7 +4609,7 @@ pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
-    let h = handle as usize;
+    let h = handle_stream(handle);
 
     if h == HANDLE_STDIN {
         let mut line = String::new();
@@ -4674,7 +4674,7 @@ pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     let mut contents = String::new();
 
     let result = if h == HANDLE_STDIN {
@@ -4744,7 +4744,7 @@ pub unsafe extern "C" fn bhc_hPutStr(handle: *mut u8, s: *const c_char) {
         Err(_) => return,
     };
 
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(str_val.as_bytes());
     } else if h == HANDLE_STDERR {
@@ -4771,7 +4771,7 @@ pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
 
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(s.as_bytes());
     } else if h == HANDLE_STDERR {
@@ -4791,7 +4791,7 @@ pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hFlush(handle: *mut u8) {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().flush();
     } else if h == HANDLE_STDERR {
@@ -4844,7 +4844,7 @@ pub extern "C" fn bhc_hIsClosed(handle: *mut u8) -> c_int {
 /// Check if a handle is readable. Returns 1 if readable, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         return 1;
     }
@@ -4865,7 +4865,7 @@ pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
 /// Check if a handle is writable. Returns 1 if writable, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn bhc_hIsWritable(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         return 0;
     }
@@ -6673,9 +6673,13 @@ mod tests {
         let stdin = bhc_stdin();
         let stdout = bhc_stdout();
         let stderr = bhc_stderr();
-        assert_eq!(stdin as usize, HANDLE_STDIN);
-        assert_eq!(stdout as usize, HANDLE_STDOUT);
-        assert_eq!(stderr as usize, HANDLE_STDERR);
+        assert_eq!(handle_stream(stdin), HANDLE_STDIN);
+        assert_eq!(handle_stream(stdout), HANDLE_STDOUT);
+        assert_eq!(handle_stream(stderr), HANDLE_STDERR);
+        // Each is a heap object, not a number in a pointer's place.
+        for handle in [stdin, stdout, stderr] {
+            assert_eq!(unsafe { object::tag(handle) }, object::HANDLE);
+        }
         assert!(is_sentinel(stdin));
         assert!(is_sentinel(stdout));
         assert!(is_sentinel(stderr));

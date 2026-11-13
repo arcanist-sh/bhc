@@ -72,7 +72,8 @@
 //! A value that owns its bytes keeps them after word 3 and points word 1
 //! there.
 //!
-//! The containers do not start with a kind word yet (#94).
+//! A `Map` (which `IntMap` shares) and a `Set` are Rust collections behind
+//! [`MAP`] and [`SET`], like the objects above.
 //!
 //! # Allocation
 //!
@@ -402,6 +403,10 @@ pub unsafe fn set_closure_captured(object: *mut u8, index: usize, value: *mut u8
 
 /// Word 0 of a strict `Text` or `ByteString`.
 pub const BYTES: i64 = -21;
+/// Word 0 of a `Map` or an `IntMap`.
+pub const MAP: i64 = -22;
+/// Word 0 of a `Set` or an `IntSet`.
+pub const SET: i64 = -23;
 
 /// The size in bytes of a `Text` or `ByteString` before any bytes it owns.
 pub const BYTES_HEADER: usize = 4 * WORD;

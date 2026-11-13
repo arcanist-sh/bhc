@@ -705,16 +705,8 @@ fn read_all(description: &Description, chars: &[char]) -> Option<Value> {
 
 /// Allocate `[tag, fields…]`.
 unsafe fn alloc_con(tag: i64, fields: &[*mut u8]) -> *mut u8 {
-    unsafe {
-        let size = 8 + 8 * fields.len();
-        let layout = std::alloc::Layout::from_size_align_unchecked(size, 8);
-        let obj = std::alloc::alloc(layout);
-        *(obj as *mut i64) = tag;
-        for (i, field) in fields.iter().enumerate() {
-            *(obj.add(8 + 8 * i) as *mut *mut u8) = *field;
-        }
-        obj
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(tag, fields) }
 }
 
 unsafe fn build_string(text: &str) -> *mut u8 {
@@ -756,8 +748,8 @@ unsafe fn build(value: &Value) -> *mut u8 {
 /// The cons cells of a string, and its characters.
 unsafe fn string_cells(str_list: *mut u8) -> (Vec<*mut u8>, Vec<char>) {
     unsafe {
-        let tag = |p: *mut u8| *(p as *const i64);
-        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let tag = |p: *mut u8| bhc_rts_alloc::object::tag(p);
+        let field = |p: *mut u8, i: usize| bhc_rts_alloc::object::field(p, i);
         let mut cells = Vec::new();
         let mut chars = Vec::new();
         let mut list = bhc_force(str_list);

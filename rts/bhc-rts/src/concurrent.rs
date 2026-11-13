@@ -1028,8 +1028,8 @@ pub unsafe extern "C" fn bhc_mvar_finish_pair(
     let (new, result) = unsafe {
         let pair = crate::ffi::bhc_force(pair);
         (
-            *(pair.add(8) as *mut *mut u8),
-            *(pair.add(16) as *mut *mut u8),
+            bhc_rts_alloc::object::field(pair, 0),
+            bhc_rts_alloc::object::field(pair, 1),
         )
     };
     // SAFETY: the caller's guarantee for `mvar`.

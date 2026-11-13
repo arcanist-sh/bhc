@@ -19,7 +19,7 @@ main = do
   takeMVar done
   -- mask_ defers it across work that does not block.
   r <- newIORef (0 :: Int)
-  t2 <- forkIO $ (mask_ (forM_ [1 .. 300000 :: Int] (\i -> modifyIORef' r (+ i))
+  t2 <- forkIO $ (mask_ (forM_ [1 .. 20000000 :: Int] (\i -> modifyIORef' r (+ i))
                          >> putStrLn "masked work done")
                   >> takeMVar never) `finally` putMVar done ()
   threadDelay 1000
@@ -35,7 +35,7 @@ main = do
   takeMVar done
   -- An exception deferred by mask is raised when the thread unmasks.
   t4 <- forkIO $ (mask $ \restore -> do
-                    forM_ [1 .. 300000 :: Int] (\i -> modifyIORef' r (+ i))
+                    forM_ [1 .. 20000000 :: Int] (\i -> modifyIORef' r (+ i))
                     putStrLn "masked part ran"
                     restore (putStrLn "not reached 4"))
                  `catch` \e -> do

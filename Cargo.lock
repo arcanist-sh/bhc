@@ -308,6 +308,7 @@ name = "bhc-base"
 version = "0.2.29"
 dependencies = [
  "bhc-prelude",
+ "bhc-rts-alloc",
  "criterion",
  "proptest",
 ]
@@ -350,6 +351,7 @@ name = "bhc-containers"
 version = "0.2.29"
 dependencies = [
  "bhc-prelude",
+ "bhc-rts-alloc",
  "criterion",
  "proptest",
 ]
@@ -924,6 +926,7 @@ name = "bhc-text"
 version = "0.2.29"
 dependencies = [
  "bhc-prelude",
+ "bhc-rts-alloc",
  "criterion",
  "proptest",
 ]

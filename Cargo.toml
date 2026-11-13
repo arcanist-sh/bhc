@@ -239,6 +239,9 @@ opt-level = 2
 [profile.dev.package.bhc-rts]
 opt-level = 2
 
+[profile.dev.package.bhc-rts-alloc]
+opt-level = 2
+
 [profile.dev.package.bhc-base]
 opt-level = 2
 

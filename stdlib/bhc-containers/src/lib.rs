@@ -124,16 +124,16 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
     let mut out = Vec::new();
     let mut guard = 0usize;
     while !p.is_null() {
-        let tag = unsafe { *(p as *const i64) };
+        let tag = unsafe { bhc_rts_alloc::object::tag(p) };
         if tag != 1 {
             break;
         }
-        let head = unsafe { *(p.add(8) as *const u64) } as u32;
+        let head = unsafe { bhc_rts_alloc::object::field(p, 0) } as u64 as u32;
         if let Some(ch) = char::from_u32(head) {
             let mut buf = [0u8; 4];
             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         }
-        p = unsafe { bhc_prelude::force_heap_object(*(p.add(16) as *const *mut u8)) };
+        p = unsafe { bhc_prelude::force_heap_object(bhc_rts_alloc::object::field(p, 1)) };
         guard += 1;
         if guard > (1 << 24) {
             break;
@@ -149,7 +149,7 @@ const ENUM_KIND_SHIFT: i64 = 16;
 
 /// The constructor tag of a nullary-constructor value (`[tag]`).
 unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
-    let tag = unsafe { *(p as *const i64) };
+    let tag = unsafe { bhc_rts_alloc::object::tag(p) };
     // Big-endian, so byte order is numeric order (constructor order).
     tag.to_be_bytes().to_vec()
 }
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
             // Tags below the threshold are the type's field-less
             // constructors; a constructor with fields keeps its address.
             let threshold = kind >> ENUM_KIND_SHIFT;
-            if unsafe { *(ptr as *const i64) } >= threshold {
+            if unsafe { bhc_rts_alloc::object::tag(ptr) } >= threshold {
                 return raw;
             }
             unsafe { enum_key_bytes(ptr) }
@@ -860,11 +860,8 @@ pub unsafe extern "C" fn bhc_map_to_assoc_list(map_ptr: *mut u8) -> *mut u8 {
     }
     let m = &*(map_ptr as *const RtsMap);
     for (k, v) in m.iter().rev() {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let pair = std::alloc::alloc(layout);
-        *(pair as *mut i64) = 0;
-        *(pair.add(8) as *mut *mut u8) = k.raw as *mut u8;
-        *(pair.add(16) as *mut *mut u8) = *v;
+        let pair =
+            bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::TUPLE, &[k.raw as *mut u8, *v]);
         list = seq_cons_cell(pair, list);
     }
     list
@@ -1304,24 +1301,20 @@ pub unsafe extern "C" fn bhc_intset_elem_at(set_ptr: *mut u8, index: i64) -> i64
 
 /// Allocate a nil cons cell `[i64 tag=0]` (24 bytes, matching the cons layout).
 fn seq_nil() -> *mut u8 {
+    // A nil the size of a cons cell, as it has always been allocated here.
+    // SAFETY: the two padding words are never read.
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 0;
-        cell
+        bhc_rts_alloc::object::alloc_con(
+            bhc_rts_alloc::object::NIL,
+            &[std::ptr::null_mut(), std::ptr::null_mut()],
+        )
     }
 }
 
 /// Allocate a cons cell `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
 fn seq_cons_cell(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 1;
-        *(cell.add(8) as *mut *mut u8) = head;
-        *(cell.add(16) as *mut *mut u8) = tail;
-        cell
-    }
+    // SAFETY: forwarded to the caller.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 /// Walk a Seq (cons list) into a Vec of its element pointers.
@@ -1331,9 +1324,9 @@ fn seq_cons_cell(head: *mut u8, tail: *mut u8) -> *mut u8 {
 unsafe fn seq_to_vec(seq_ptr: *mut u8) -> Vec<*mut u8> {
     let mut v = Vec::new();
     let mut cur = seq_ptr;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
-        v.push(*(cur.add(8) as *const *mut u8));
-        cur = *(cur.add(16) as *const *mut u8);
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
+        v.push(bhc_rts_alloc::object::field(cur, 0));
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     v
 }
@@ -1357,12 +1350,12 @@ unsafe fn seq_nth(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
     }
     let mut cur = seq_ptr;
     let mut i = idx;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
         if i == 0 {
-            return *(cur.add(8) as *const *mut u8);
+            return bhc_rts_alloc::object::field(cur, 0);
         }
         i -= 1;
-        cur = *(cur.add(16) as *const *mut u8);
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     ptr::null_mut()
 }
@@ -1385,7 +1378,7 @@ pub extern "C" fn bhc_seq_singleton(elem: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         1
     } else {
         0
@@ -1400,9 +1393,9 @@ pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
 pub unsafe extern "C" fn bhc_seq_length(seq_ptr: *mut u8) -> i64 {
     let mut n = 0i64;
     let mut cur = seq_ptr;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
         n += 1;
-        cur = *(cur.add(16) as *const *mut u8);
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     n
 }
@@ -1576,7 +1569,7 @@ pub extern "C" fn bhc_seq_replicate(n: i64, elem: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         0
     } else {
         1
@@ -1590,10 +1583,10 @@ pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
 /// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         ptr::null_mut()
     } else {
-        *(seq_ptr.add(8) as *const *mut u8)
+        bhc_rts_alloc::object::field(seq_ptr, 0)
     }
 }
 
@@ -1603,10 +1596,10 @@ pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         seq_nil()
     } else {
-        *(seq_ptr.add(16) as *const *mut u8)
+        bhc_rts_alloc::object::field(seq_ptr, 1)
     }
 }
 
@@ -1616,7 +1609,7 @@ pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         0
     } else {
         1

@@ -13,6 +13,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 
 use crate::{global, init_default, Profile, RuntimeConfig};
+use bhc_rts_alloc::object;
 
 /// Abort the process with an RTS error message.
 ///
@@ -473,10 +474,10 @@ unsafe fn chars_onto(s: &str, tail: *mut u8) -> *mut u8 {
 pub unsafe extern "C" fn bhc_show_ffloat(digits: *mut u8, x: f64, suffix: *mut u8) -> *mut u8 {
     unsafe {
         let m = bhc_force(digits);
-        let decimals = if m.is_null() || *(m as *const i64) == 0 {
+        let decimals = if m.is_null() || object::tag(m) == 0 {
             None
         } else {
-            let field = *(m.add(8) as *const *mut u8) as i64;
+            let field = object::field(m, 0) as i64;
             Some(field.max(0) as usize)
         };
         chars_onto(&format_ffloat(x, decimals), suffix)
@@ -511,10 +512,10 @@ pub unsafe extern "C" fn bhc_printf_pad(
     unsafe {
         let mut chars: Vec<char> = Vec::new();
         let mut list = bhc_force(text);
-        while *(list as *const i64) != 0 {
-            let c = *(list.add(8) as *const u64) as u32;
+        while object::tag(list) != 0 {
+            let c = object::field(list, 0) as usize as u32;
             chars.push(char::from_u32(c).unwrap_or('?'));
-            list = bhc_force(*(list.add(16) as *const *mut u8));
+            list = bhc_force(object::field(list, 1));
         }
         let s: String = chars.into_iter().collect();
         let len = s.chars().count();
@@ -566,8 +567,8 @@ pub unsafe extern "C" fn bhc_enum_ctor_range(
     unsafe {
         let mut list = alloc_nil();
         for &tag in tags.iter().rev() {
-            let con = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(8, 8));
-            *(con as *mut i64) = tag;
+            // A nullary constructor is its tag alone.
+            let con = object::alloc_con(tag, &[]);
             list = alloc_cons(con, list);
         }
         list
@@ -1559,18 +1560,8 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
     let g = bhc_gcd(n.abs(), d);
     let n = n / g;
     let d = d / g;
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align(24, 8).unwrap();
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() {
-            // Writing through a null allocation result would be UB
-            std::alloc::handle_alloc_error(layout);
-        }
-        *(ptr as *mut i64) = 0; // tag
-        *(ptr.add(8) as *mut i64) = n;
-        *(ptr.add(16) as *mut i64) = d;
-        ptr
-    }
+    // SAFETY: both fields are scalars held in the word, never dereferenced.
+    unsafe { object::alloc_con(0, &[n as usize as *mut u8, d as usize as *mut u8]) }
 }
 
 /// Construct a Rational from numerator and denominator, normalizing via GCD.
@@ -1591,7 +1582,7 @@ fn rational_parts(r: *const u8) -> (i64, i64) {
     if r.is_null() {
         rts_abort("Rational operation on null pointer");
     }
-    unsafe { (*(r.add(8) as *const i64), *(r.add(16) as *const i64)) }
+    unsafe { (object::field(r, 0) as i64, object::field(r, 1) as i64) }
 }
 
 /// Extract numerator from a Rational.
@@ -2547,7 +2538,7 @@ unsafe fn nullary_tag(ptr: *const u8, max_tag: usize) -> i64 {
         #[allow(clippy::cast_possible_wrap)]
         return raw as i64;
     }
-    unsafe { *(ptr as *const i64) }
+    unsafe { object::tag(ptr) }
 }
 
 /// Read a [Char] linked list into a Rust String.
@@ -2556,17 +2547,17 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
     unsafe {
         let mut result = String::new();
         while !list_ptr.is_null() {
-            let tag = *(list_ptr as *const i64);
+            let tag = object::tag(list_ptr);
             if tag == 0 {
                 break; // Nil
             }
             // Cons: head at +8, tail at +16
-            let head = *(list_ptr.add(8) as *const *const u8);
+            let head = object::field(list_ptr, 0).cast_const();
             let char_val = head as u32;
             if let Some(ch) = char::from_u32(char_val) {
                 result.push(ch);
             }
-            list_ptr = bhc_force(*(list_ptr.add(16) as *const *mut u8));
+            list_ptr = bhc_force(object::field(list_ptr, 1));
         }
         result
     }
@@ -2600,7 +2591,7 @@ pub unsafe extern "C" fn bhc_string_eq_cstr(list_ptr: *const u8, pat: *const c_c
         // nil is sometimes elided.
         return i64::from(want.is_empty());
     }
-    let tag = unsafe { *(list_ptr as *const i64) };
+    let tag = unsafe { object::tag(list_ptr) };
     if tag == 0 {
         return i64::from(want.is_empty());
     }
@@ -2638,13 +2629,13 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
     let mut cur = list_ptr;
     unsafe {
         while !cur.is_null() {
-            let tag = *(cur as *const i64);
+            let tag = object::tag(cur);
             if tag == 0 {
                 break; // Nil
             }
-            let head = *(cur.add(8) as *const *const u8);
+            let head = object::field(cur, 0).cast_const();
             elems.push(show_elem(head, elem_type_tag));
-            cur = bhc_force(*(cur.add(16) as *const *mut u8));
+            cur = bhc_force(object::field(cur, 1));
         }
     }
     let shown = format!("[{}]", elems.join(","));
@@ -2655,11 +2646,11 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
 /// Show Maybe - "Nothing" or "Just `<val>`"
 #[no_mangle]
 pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
-    let tag = unsafe { *(maybe_ptr as *const i64) };
+    let tag = unsafe { object::tag(maybe_ptr) };
     let shown = if tag == 0 {
         "Nothing".to_string()
     } else {
-        let val = unsafe { *(maybe_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(maybe_ptr, 0).cast_const() };
         format!("Just {}", unsafe { show_elem(val, elem_type_tag) })
     };
     let c_string = CString::new(shown).unwrap();
@@ -2673,12 +2664,12 @@ pub extern "C" fn bhc_show_either(
     left_type_tag: i64,
     right_type_tag: i64,
 ) -> *mut c_char {
-    let tag = unsafe { *(either_ptr as *const i64) };
+    let tag = unsafe { object::tag(either_ptr) };
     let shown = if tag == 0 {
-        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(either_ptr, 0).cast_const() };
         format!("Left {}", unsafe { show_elem(val, left_type_tag) })
     } else {
-        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(either_ptr, 0).cast_const() };
         format!("Right {}", unsafe { show_elem(val, right_type_tag) })
     };
     let c_string = CString::new(shown).unwrap();
@@ -2692,8 +2683,8 @@ pub extern "C" fn bhc_show_tuple2(
     fst_type_tag: i64,
     snd_type_tag: i64,
 ) -> *mut c_char {
-    let fst = unsafe { *(tuple_ptr.add(8) as *const *const u8) };
-    let snd = unsafe { *(tuple_ptr.add(16) as *const *const u8) };
+    let fst = unsafe { object::field(tuple_ptr, 0).cast_const() };
+    let snd = unsafe { object::field(tuple_ptr, 1).cast_const() };
     let shown = format!("({},{})", unsafe { show_elem(fst, fst_type_tag) }, unsafe {
         show_elem(snd, snd_type_tag)
     });
@@ -2920,7 +2911,7 @@ unsafe fn is_constructor_app(ptr: *const u8, desc: &ShowTypeDesc) -> bool {
         match desc.tag {
             11 => {
                 // Maybe: Just is a constructor app, Nothing is not
-                *(ptr as *const i64) == 1
+                object::tag(ptr) == 1
             }
             13 => {
                 // Either: Left/Right are always constructor apps
@@ -2943,13 +2934,13 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
         let mut elems = Vec::new();
         let mut cur = list_ptr;
         while !cur.is_null() {
-            let tag = *(cur as *const i64);
+            let tag = object::tag(cur);
             if tag == 0 {
                 break; // Nil
             }
-            let head = *(cur.add(8) as *const *const u8);
+            let head = object::field(cur, 0).cast_const();
             elems.push(show_any(head, elem_desc));
-            cur = bhc_force(*(cur.add(16) as *const *mut u8));
+            cur = bhc_force(object::field(cur, 1));
         }
         format!("[{}]", elems.join(","))
     }
@@ -2958,11 +2949,11 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
 /// Recursively show a Maybe value.
 unsafe fn show_maybe_recursive(maybe_ptr: *const u8, elem_desc: &ShowTypeDesc) -> String {
     unsafe {
-        let tag = *(maybe_ptr as *const i64);
+        let tag = object::tag(maybe_ptr);
         if tag == 0 {
             "Nothing".to_string()
         } else {
-            let val = *(maybe_ptr.add(8) as *const *const u8);
+            let val = object::field(maybe_ptr, 0).cast_const();
             format!("Just {}", show_any_prec(val, elem_desc, 11))
         }
     }
@@ -2975,8 +2966,8 @@ unsafe fn show_tuple2_recursive(
     snd_desc: &ShowTypeDesc,
 ) -> String {
     unsafe {
-        let fst = *(tuple_ptr.add(8) as *const *const u8);
-        let snd = *(tuple_ptr.add(16) as *const *const u8);
+        let fst = object::field(tuple_ptr, 0).cast_const();
+        let snd = object::field(tuple_ptr, 1).cast_const();
         format!("({},{})", show_any(fst, fst_desc), show_any(snd, snd_desc))
     }
 }
@@ -2988,12 +2979,12 @@ unsafe fn show_either_recursive(
     right_desc: &ShowTypeDesc,
 ) -> String {
     unsafe {
-        let tag = *(either_ptr as *const i64);
+        let tag = object::tag(either_ptr);
         if tag == 0 {
-            let val = *(either_ptr.add(8) as *const *const u8);
+            let val = object::field(either_ptr, 0).cast_const();
             format!("Left {}", show_any_prec(val, left_desc, 11))
         } else {
-            let val = *(either_ptr.add(8) as *const *const u8);
+            let val = object::field(either_ptr, 0).cast_const();
             format!("Right {}", show_any_prec(val, right_desc, 11))
         }
     }
@@ -3289,26 +3280,16 @@ pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
 // String split/join: lines, words, unlines, unwords
 // ----------------------------------------------------------------------------
 
-/// Allocate a cons cell: `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
+/// Allocate `head : tail`.
 pub(crate) unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 1; // tag = cons
-        *(cell.add(8) as *mut *mut u8) = head;
-        *(cell.add(16) as *mut *mut u8) = tail;
-        cell
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { object::cons(head, tail) }
 }
 
-/// Allocate a nil cell: `[i64 tag=0, ...]` (24 bytes, matching cons layout).
+/// Allocate `[]`.
 pub(crate) unsafe fn alloc_nil() -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 0;
-        cell
-    }
+    // SAFETY: no fields to vouch for.
+    unsafe { object::nil() }
 }
 
 /// `reads :: String -> [(Int, String)]`, at `Int` only: optional leading
@@ -3324,8 +3305,8 @@ pub(crate) unsafe fn alloc_nil() -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
     unsafe {
-        let tag = |p: *mut u8| *(p as *const i64);
-        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let tag = |p: *mut u8| object::tag(p);
+        let field = |p: *mut u8, i: usize| object::field(p, i);
         let mut cells: Vec<*mut u8> = Vec::new();
         let mut list = bhc_force(str_list);
         while tag(list) != 0 {
@@ -3358,12 +3339,7 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
         } else {
             alloc_nil()
         };
-        // A pair is constructor 0 with two fields.
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let pair = std::alloc::alloc(layout);
-        *(pair as *mut i64) = 0;
-        *(pair.add(8) as *mut *mut u8) = n as *mut u8;
-        *(pair.add(16) as *mut *mut u8) = rest;
+        let pair = object::alloc_con(object::TUPLE, &[n as *mut u8, rest]);
         alloc_cons(pair, alloc_nil())
     }
 }
@@ -3382,8 +3358,8 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_reads_enum(str_list: *mut u8, names: *const c_char) -> *mut u8 {
     unsafe {
-        let tag = |p: *mut u8| *(p as *const i64);
-        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let tag = |p: *mut u8| object::tag(p);
+        let field = |p: *mut u8, i: usize| object::field(p, i);
         let mut cells: Vec<*mut u8> = Vec::new();
         let mut list = bhc_force(str_list);
         while tag(list) != 0 {
@@ -3418,12 +3394,8 @@ pub unsafe extern "C" fn bhc_reads_enum(str_list: *mut u8, names: *const c_char)
             alloc_nil()
         };
         // A nullary constructor is its tag alone.
-        let con = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(8, 8));
-        *(con as *mut i64) = con_tag as i64;
-        let pair = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(24, 8));
-        *(pair as *mut i64) = 0;
-        *(pair.add(8) as *mut *mut u8) = con;
-        *(pair.add(16) as *mut *mut u8) = rest;
+        let con = object::alloc_con(con_tag as i64, &[]);
+        let pair = object::alloc_con(object::TUPLE, &[con, rest]);
         alloc_cons(pair, alloc_nil())
     }
 }
@@ -3863,13 +3835,8 @@ pub extern "C" fn bhc_catch_typed(
 /// Allocate a one-field constructor cell `[i64 tag, field]` — `Left x` (tag 0)
 /// or `Right x` (tag 1) of `Either`.
 unsafe fn alloc_con1(tag: i64, field: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(16, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = tag;
-        *(cell.add(8) as *mut *mut u8) = field;
-        cell
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { object::alloc_con(tag, &[field]) }
 }
 
 /// Run an IO action and reify a matching exception as `Left`:
@@ -5108,16 +5075,16 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = list;
     while !cur.is_null() {
-        let tag = unsafe { *(cur as *const i64) };
+        let tag = unsafe { object::tag(cur) };
         if tag == 0 {
             break;
         }
-        let head = unsafe { *(cur.add(8) as *const *const c_char) };
+        let head = unsafe { object::field(cur, 0).cast::<c_char>().cast_const() };
         if !head.is_null() {
             let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
             parts.push(s.to_string());
         }
-        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+        cur = unsafe { bhc_force(object::field(cur, 1)) };
     }
     parts
 }
@@ -6097,8 +6064,8 @@ pub extern "C" fn bhc_enum_from_then_to_integer(
 pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut u8 {
     let mut best: *mut u8 = std::ptr::null_mut();
     let mut cur = unsafe { bhc_force(list) };
-    while !cur.is_null() && unsafe { *(cur as *const i64) } == 1 {
-        let head = unsafe { *(cur.add(8) as *const *mut u8) };
+    while !cur.is_null() && unsafe { object::tag(cur) } == 1 {
+        let head = unsafe { object::field(cur, 0) };
         let better = best.is_null() || {
             let (h, b) = unsafe { (&*(head as *const BigInt), &*(best as *const BigInt)) };
             if want_max != 0 {
@@ -6110,7 +6077,7 @@ pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut
         if better {
             best = head;
         }
-        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+        cur = unsafe { bhc_force(object::field(cur, 1)) };
     }
     if best.is_null() {
         let which = if want_max != 0 { "maximum" } else { "minimum" };
@@ -6713,7 +6680,7 @@ mod tests {
         // A Haskell `String` now: a cons list, not a C string.
         let name = bhc_get_prog_name();
         assert!(!name.is_null());
-        assert_eq!(unsafe { *(name as *const i64) }, 1, "a non-empty cons cell");
+        assert_eq!(unsafe { object::tag(name) }, 1, "a non-empty cons cell");
     }
 
     #[test]
@@ -6728,7 +6695,7 @@ mod tests {
         let args = bhc_get_args();
         assert!(!args.is_null());
         // At minimum there should be the program name
-        let tag = unsafe { *(args as *const i64) };
+        let tag = unsafe { object::tag(args) };
         assert!(tag == 0 || tag == 1); // nil or cons
     }
 

@@ -4,7 +4,6 @@
 //! LLVM-generated code. Lists are represented as heap-allocated
 //! ADT nodes with Nil (tag=0) and Cons (tag=1, head, tail) layout.
 
-use std::alloc::{alloc, Layout};
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -13,30 +12,26 @@ use std::collections::HashSet;
 
 /// Read the tag (i64) at offset 0 of an ADT node.
 unsafe fn get_tag(ptr: *mut u8) -> i64 {
-    *(ptr as *const i64)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::tag(ptr) }
 }
 
 /// Read field at `index` (0-based) starting at offset 8.
 unsafe fn get_field(ptr: *mut u8, index: usize) -> *mut u8 {
-    *(ptr.add(8 + index * 8) as *const *mut u8)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::field(ptr, index) }
 }
 
 /// Allocate a Nil node (tag=0, 8 bytes).
 unsafe fn alloc_nil() -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(8, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::nil() }
 }
 
 /// Allocate a Cons node (tag=1, head at offset 8, tail at offset 16).
 unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(24, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 1;
-    *(ptr.add(8) as *mut *mut u8) = head;
-    *(ptr.add(16) as *mut *mut u8) = tail;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,29 +79,20 @@ unsafe fn call_eq_closure(eq_fn: *mut u8, a: *mut u8, b: *mut u8) -> bool {
 
 /// Allocate Nothing ADT (tag=0, 8 bytes).
 unsafe fn alloc_nothing() -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(8, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::NOTHING, &[]) }
 }
 
 /// Allocate Just x ADT (tag=1, field at offset 8, 16 bytes).
 unsafe fn alloc_just(value: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(16, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 1;
-    *(ptr.add(8) as *mut *mut u8) = value;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::JUST, &[value]) }
 }
 
 /// Allocate a 2-tuple (tag=0, fst at offset 8, snd at offset 16, 24 bytes).
 unsafe fn alloc_tuple(fst: *mut u8, snd: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(24, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    *(ptr.add(8) as *mut *mut u8) = fst;
-    *(ptr.add(16) as *mut *mut u8) = snd;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::TUPLE, &[fst, snd]) }
 }
 
 // ---------------------------------------------------------------------------

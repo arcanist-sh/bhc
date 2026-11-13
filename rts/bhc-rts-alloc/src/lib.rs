@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod object;
 pub mod static_alloc;
 
 use std::alloc::{Layout, LayoutError};

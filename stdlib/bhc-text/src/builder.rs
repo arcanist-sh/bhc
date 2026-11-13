@@ -22,17 +22,16 @@ unsafe fn chars_from_list(mut ptr: *const u8) -> String {
         if ptr.is_null() {
             break;
         }
-        let tag = *(ptr as *const i64);
+        let tag = bhc_rts_alloc::object::tag(ptr);
         if tag == 0 {
             break; // Nil
         }
-        let fields_base = (ptr as *const *const u8).add(1);
-        let head_raw = *fields_base;
+        let head_raw = bhc_rts_alloc::object::field(ptr, 0) as *const u8;
         let codepoint = head_raw as i64;
         if let Some(c) = char::from_u32(codepoint as u32) {
             result.push(c);
         }
-        ptr = *fields_base.add(1);
+        ptr = bhc_rts_alloc::object::field(ptr, 1) as *const u8;
     }
     result
 }

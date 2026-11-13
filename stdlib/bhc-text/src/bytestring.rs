@@ -118,16 +118,15 @@ pub extern "C" fn bhc_bs_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let byte_val = head_raw as i64 as u8;
             result.push(byte_val);
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -517,17 +516,16 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     let mut current = path_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let codepoint = head_raw as i64;
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -568,17 +566,16 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
     let mut current = path_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let codepoint = head_raw as i64;
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }

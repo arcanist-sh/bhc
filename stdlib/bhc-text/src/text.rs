@@ -667,20 +667,19 @@ pub extern "C" fn bhc_text_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 // Nil
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             // Head is a Char encoded as a pointer (boxed int)
             let codepoint = head_raw as i64;
             let c = char::from_u32(codepoint as u32).unwrap_or('\u{FFFD}');
             result.push(c);
             // Tail
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -821,17 +820,16 @@ pub extern "C" fn bhc_text_concat(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let text_ptr = *fields_base;
+            let text_ptr = bhc_rts_alloc::object::field(current, 0) as *const u8;
             if !text_ptr.is_null() {
                 combined.extend_from_slice(text_bytes(text_ptr));
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -856,18 +854,17 @@ pub extern "C" fn bhc_text_intercalate(sep: *const u8, list_ptr: *const u8) -> *
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let text_ptr = *fields_base;
+            let text_ptr = bhc_rts_alloc::object::field(current, 0) as *const u8;
             if !text_ptr.is_null() {
                 parts.push(text_bytes(text_ptr));
             } else {
                 parts.push(&[]);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -906,22 +903,12 @@ pub extern "C" fn bhc_text_strip(text: *const u8) -> *mut u8 {
 /// Helper to build a BHC cons-list of Text values from a vector of byte slices.
 unsafe fn build_text_list(parts: &[&[u8]]) -> *mut u8 {
     // Build from the end: start with Nil, then prepend each element
-    let mut list: *mut u8 = {
-        // Nil: tag=0, no fields -> 8 bytes
-        let layout = std::alloc::Layout::from_size_align(8, 8).expect("invalid layout");
-        let ptr = std::alloc::alloc(layout);
-        (ptr as *mut i64).write(0); // tag = 0 (Nil)
-        ptr
-    };
+    let mut list: *mut u8 = bhc_rts_alloc::object::nil();
 
     for part in parts.iter().rev() {
         let text = alloc_text_from_bytes(part);
         // Cons: tag=1, fields[0]=text, fields[1]=tail -> 24 bytes (tag + 2 ptrs)
-        let layout = std::alloc::Layout::from_size_align(24, 8).expect("invalid layout");
-        let cons = std::alloc::alloc(layout);
-        (cons as *mut i64).write(1); // tag = 1 (Cons)
-        (cons as *mut *mut u8).add(1).write(text); // field 0 = head
-        (cons as *mut *mut u8).add(2).write(list); // field 1 = tail
+        let cons = bhc_rts_alloc::object::cons(text, list);
         list = cons;
     }
     list
@@ -1052,25 +1039,19 @@ unsafe fn collect_text_list(list: *const u8) -> Vec<*const u8> {
     let mut out = Vec::new();
     let mut cur = list;
     while !cur.is_null() {
-        let tag = *(cur as *const i64);
+        let tag = bhc_rts_alloc::object::tag(cur);
         if tag == 0 {
             break;
         }
-        out.push(*(cur as *const *const u8).add(1));
-        cur = *(cur as *const *const u8).add(2);
+        out.push(bhc_rts_alloc::object::field(cur, 0) as *const u8);
+        cur = bhc_rts_alloc::object::field(cur, 1) as *const u8;
     }
     out
 }
 
 unsafe fn alloc_adt(tag: i64, fields: &[*mut u8]) -> *mut u8 {
-    let size = 8 + fields.len() * 8;
-    let layout = std::alloc::Layout::from_size_align(size, 8).expect("invalid layout");
-    let ptr = std::alloc::alloc(layout);
-    (ptr as *mut i64).write(tag);
-    for (i, f) in fields.iter().enumerate() {
-        (ptr as *mut *mut u8).add(1 + i).write(*f);
-    }
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(tag, fields) }
 }
 
 /// `T.unlines`: join a cons-list of Texts, appending '\n' after each.
@@ -1262,7 +1243,7 @@ pub(crate) fn pred_holds(v: i64) -> bool {
     }
     // SAFETY: values above 1 are heap pointers to an evaluated Bool
     // constructor; its tag (0 = False, 1 = True) is the first word.
-    unsafe { *(v as *const i64) != 0 }
+    unsafe { bhc_rts_alloc::object::tag(v as *const u8) != 0 }
 }
 
 /// `T.any p t`.

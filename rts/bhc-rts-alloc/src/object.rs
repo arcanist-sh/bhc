@@ -19,8 +19,8 @@
 //!
 //! # Thunks
 //!
-//! A thunk shares word 0 with a constructor: a negative value there is a
-//! thunk state, anything else a constructor tag.
+//! Word 0 says what an object is. A constructor tag is never negative; a
+//! negative value there is a thunk state or [`CLOSURE`].
 //!
 //! ```text
 //! word 0        state: THUNK, BLACKHOLE or INDIRECTION
@@ -36,14 +36,14 @@
 //!
 //! # Closures
 //!
-//! A closure has no tag word: nothing can tell it from a constructor by
-//! looking, which is one of the things the uniform header (#94) is for.
-//!
 //! ```text
-//! word 0        the code, `fn(closure, args...) -> value`
-//! word 1        the number of arguments the code takes
-//! word 2..      the captured values
+//! word 0        CLOSURE
+//! word 1        the code, `fn(closure, args...) -> value`
+//! word 2        the number of arguments the code takes
+//! word 3..      the captured values
 //! ```
+//!
+//! The code and the captured values sit where a thunk's do.
 //!
 //! A partial application is a closure whose captured values are the closure
 //! it applies, the number of arguments held so far, and those arguments.
@@ -257,11 +257,29 @@ pub unsafe fn thunk_env(object: *mut u8) -> *mut u8 {
     unsafe { object.add(3 * WORD) }
 }
 
+/// Word 0 of a closure.
+pub const CLOSURE: i64 = -4;
+
+/// The number of words in a closure before its captured values.
+pub const CLOSURE_HEADER_WORDS: usize = 3;
+
 /// The size in bytes of a closure that captures `captured` values.
 #[inline]
 #[must_use]
 pub const fn closure_size(captured: usize) -> usize {
-    WORD * (2 + captured)
+    WORD * (CLOSURE_HEADER_WORDS + captured)
+}
+
+/// Whether `object` is a closure.
+///
+/// # Safety
+///
+/// `object` must point to a heap object.
+#[inline]
+#[must_use]
+pub unsafe fn is_closure(object: *const u8) -> bool {
+    // SAFETY: every heap object has a first word.
+    unsafe { tag(object) == CLOSURE }
 }
 
 /// Make `object` a closure over `captured` whose `code` takes `arity`
@@ -274,11 +292,12 @@ pub const fn closure_size(captured: usize) -> usize {
 /// closure and then `arity` arguments.
 #[inline]
 pub unsafe fn init_closure(object: *mut u8, code: *const u8, arity: usize, captured: &[*mut u8]) {
-    // SAFETY: the caller guarantees room for two words and the captures.
+    // SAFETY: the caller guarantees room for the header and the captures.
     unsafe {
-        object.cast::<*const u8>().write(code);
-        object.cast::<usize>().add(1).write(arity);
-        let first = object.cast::<*mut u8>().add(2);
+        object.cast::<i64>().write(CLOSURE);
+        object.cast::<*const u8>().add(1).write(code);
+        object.cast::<usize>().add(2).write(arity);
+        let first = object.cast::<*mut u8>().add(CLOSURE_HEADER_WORDS);
         for (index, value) in captured.iter().enumerate() {
             first.add(index).write(*value);
         }
@@ -293,8 +312,8 @@ pub unsafe fn init_closure(object: *mut u8, code: *const u8, arity: usize, captu
 #[inline]
 #[must_use]
 pub unsafe fn closure_code(object: *const u8) -> *const u8 {
-    // SAFETY: the caller guarantees a closure, whose first word is its code.
-    unsafe { object.cast::<*const u8>().read() }
+    // SAFETY: the caller guarantees a closure, whose second word is its code.
+    unsafe { object.cast::<*const u8>().add(1).read() }
 }
 
 /// The number of arguments a closure's code takes.
@@ -305,8 +324,8 @@ pub unsafe fn closure_code(object: *const u8) -> *const u8 {
 #[inline]
 #[must_use]
 pub unsafe fn closure_arity(object: *const u8) -> usize {
-    // SAFETY: the caller guarantees a closure, which has a second word.
-    unsafe { object.cast::<usize>().add(1).read() }
+    // SAFETY: the caller guarantees a closure, which has a third word.
+    unsafe { object.cast::<usize>().add(2).read() }
 }
 
 /// Captured value `index` of a closure, counted from 0.
@@ -318,8 +337,13 @@ pub unsafe fn closure_arity(object: *const u8) -> usize {
 #[must_use]
 pub unsafe fn closure_captured(object: *const u8, index: usize) -> *mut u8 {
     // SAFETY: the caller guarantees the value exists; captures follow the
-    // two header words.
-    unsafe { object.cast::<*mut u8>().add(2 + index).read() }
+    // header.
+    unsafe {
+        object
+            .cast::<*mut u8>()
+            .add(CLOSURE_HEADER_WORDS + index)
+            .read()
+    }
 }
 
 /// Overwrite captured value `index` of a closure.
@@ -330,8 +354,13 @@ pub unsafe fn closure_captured(object: *const u8, index: usize) -> *mut u8 {
 #[inline]
 pub unsafe fn set_closure_captured(object: *mut u8, index: usize, value: *mut u8) {
     // SAFETY: the caller guarantees the value exists; captures follow the
-    // two header words.
-    unsafe { object.cast::<*mut u8>().add(2 + index).write(value) }
+    // header.
+    unsafe {
+        object
+            .cast::<*mut u8>()
+            .add(CLOSURE_HEADER_WORDS + index)
+            .write(value)
+    }
 }
 
 #[cfg(test)]
@@ -381,21 +410,22 @@ mod tests {
     }
 
     #[test]
-    fn a_closure_is_code_arity_and_captures() {
+    fn a_closure_is_kind_code_arity_and_captures() {
         let code = 0x40 as *const u8;
         let a = 0x10 as *mut u8;
-        let mut words = [0usize; 3];
+        let mut words = [0usize; 4];
         let object = words.as_mut_ptr().cast::<u8>();
-        assert_eq!(closure_size(1), 24);
+        assert_eq!(closure_size(1), 32);
         // SAFETY: `words` has room for a closure with one capture.
         unsafe {
             init_closure(object, code, 2, &[a]);
             assert_eq!(closure_code(object), code);
             assert_eq!(closure_arity(object), 2);
             assert_eq!(closure_captured(object, 0), a);
+            assert!(is_closure(object));
         }
         // The layout compiled code relies on, spelled out.
-        assert_eq!(words, [0x40, 2, 0x10]);
+        assert_eq!(words, [CLOSURE as usize, 0x40, 2, 0x10]);
     }
 
     #[test]

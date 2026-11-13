@@ -36239,27 +36239,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         else {
             return Ok(None);
         };
-        let ptr_type = self.type_mapper().ptr_type();
-        let alloc_fn = *self
-            .functions
-            .get(&VarId::new(1000005))
-            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
-        let closure = self
-            .builder()
-            .build_call(
-                alloc_fn,
-                &[self.type_mapper().i64_type().const_int(8, false).into()],
-                "cmp_closure",
-            )
-            .map_err(|e| CodegenError::Internal(format!("cmp closure: {e:?}")))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("cmp closure: void".to_string()))?
-            .into_pointer_value();
-        self.builder()
-            .build_store(closure, cmp_fn.as_global_value().as_pointer_value())
-            .map_err(|e| CodegenError::Internal(format!("cmp closure store: {e:?}")))?;
-        let _ = ptr_type;
+        let closure = self.alloc_closure(cmp_fn.as_global_value().as_pointer_value(), &[])?;
         Ok(Some(closure))
     }
 
@@ -36334,29 +36314,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         available
     }
 
-    /// A one-word closure whose code is `f`, a top-level function taking
-    /// `(env, a, b)`, for the RTS `*_by` list functions.
+    /// A closure capturing nothing whose code is `f`, a top-level function
+    /// taking `(env, a, b)`, for the RTS `*_by` list functions.
     fn code_closure(&mut self, f: FunctionValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
-        let alloc_fn = *self
-            .functions
-            .get(&VarId::new(1000005))
-            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
-        let closure = self
-            .builder()
-            .build_call(
-                alloc_fn,
-                &[self.type_mapper().i64_type().const_int(8, false).into()],
-                "code_closure",
-            )
-            .map_err(|e| CodegenError::Internal(format!("code closure: {e:?}")))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("code closure: void".to_string()))?
-            .into_pointer_value();
-        self.builder()
-            .build_store(closure, f.as_global_value().as_pointer_value())
-            .map_err(|e| CodegenError::Internal(format!("code closure store: {e:?}")))?;
-        Ok(closure)
+        self.alloc_closure(f.as_global_value().as_pointer_value(), &[])
     }
 
     /// Call an RTS `*_by` list function: `name(eq_closure, args…)`, every
@@ -51143,10 +51104,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // Closures are represented as heap-allocated structs:
     //
     //   struct Closure {
+    //       i64 kind;          // bhc_rts_alloc::object::CLOSURE
     //       ptr fn_ptr;        // Pointer to the lifted function
-    //       i64 env_size;      // Number of captured variables
+    //       i64 arity;         // Parameters the function takes; 0 = unknown
     //       ptr env[];         // Array of captured variable pointers
     //   }
+    //
+    // The layout is stated in `bhc_rts_alloc::object`, which the runtime
+    // reads closures through; `closure_type` must agree with it.
     //
     // When a lambda captures free variables, we:
     // 1. Compute the free variables
@@ -51271,7 +51236,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Get the LLVM struct type for a closure with the given environment size.
     ///
-    /// Closure layout: { ptr fn_ptr, i64 env_size, [env_size x ptr] env }
+    /// Closure layout: { i64 kind, ptr fn_ptr, i64 arity, [env_size x ptr] env }
     fn closure_type(&self, env_size: u32) -> inkwell::types::StructType<'ctx> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -51280,9 +51245,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Create array type for environment
         let env_type = ptr_type.array_type(env_size);
 
-        // Struct: { ptr fn_ptr, i64 env_size, [env_size x ptr] env }
-        self.llvm_ctx
-            .struct_type(&[ptr_type.into(), i64_type.into(), env_type.into()], false)
+        // Struct: { i64 kind, ptr fn_ptr, i64 arity, [env_size x ptr] env }
+        self.llvm_ctx.struct_type(
+            &[
+                i64_type.into(),
+                ptr_type.into(),
+                i64_type.into(),
+                env_type.into(),
+            ],
+            false,
+        )
     }
 
     /// Allocate a closure with the given function pointer and captured variables.
@@ -51314,8 +51286,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let env_size = captured_vars.len() as u32;
         let closure_ty = self.closure_type(env_size);
 
-        // Calculate size: sizeof(ptr) + sizeof(i64) + env_size * sizeof(ptr)
-        let size = 8 + 8 + (env_size as u64) * 8;
+        let size = bhc_rts_alloc::object::closure_size(env_size as usize) as u64;
 
         // Call bhc_alloc
         let alloc_fn = self
@@ -51334,21 +51305,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let closure_ptr = raw_ptr.into_pointer_value();
 
-        // Store function pointer at offset 0
+        // Word 0 says the object is a closure
+        let kind_slot = self
+            .builder()
+            .build_struct_gep(closure_ty, closure_ptr, 0, "kind_slot")
+            .map_err(|e| CodegenError::Internal(format!("failed to get kind slot: {:?}", e)))?;
+        let kind_val = tm
+            .i64_type()
+            .const_int(bhc_rts_alloc::object::CLOSURE as u64, true);
+        self.builder()
+            .build_store(kind_slot, kind_val)
+            .map_err(|e| CodegenError::Internal(format!("failed to store kind: {:?}", e)))?;
+
+        // Store function pointer at offset 1
         let fn_ptr_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 0, "fn_ptr_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 1, "fn_ptr_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get fn_ptr slot: {:?}", e)))?;
 
         self.builder()
             .build_store(fn_ptr_slot, fn_ptr)
             .map_err(|e| CodegenError::Internal(format!("failed to store fn_ptr: {:?}", e)))?;
 
-        // Store the physical arity at offset 1 (the env size is known statically
-        // at every use site, so this word carries arity instead — see doc above).
+        // Store the physical arity at offset 2 (the env size is known statically
+        // at every use site, so no word carries it — see doc above).
         let arity_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 2, "arity_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get arity slot: {:?}", e)))?;
 
         let arity_val = tm.i64_type().const_int(arity as u64, false);
@@ -51360,7 +51343,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if env_size > 0 {
             let env_slot = self
                 .builder()
-                .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
                 .map_err(|e| CodegenError::Internal(format!("failed to get env slot: {:?}", e)))?;
 
             for (i, (_var_id, val)) in captured_vars.iter().enumerate() {
@@ -51400,7 +51383,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let fn_ptr_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 0, "fn_ptr_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 1, "fn_ptr_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get fn_ptr slot: {:?}", e)))?;
 
         let fn_ptr = self
@@ -51411,11 +51394,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(fn_ptr.into_pointer_value())
     }
 
-    /// Load a closure's code pointer and refuse to jump to a null one.
+    /// Load a closure's code pointer, refusing an object that is not a closure.
     ///
-    /// A transformer's bind calls its action through word 0, so a value that
-    /// is not a closure jumps to whatever that word holds — usually address 0,
-    /// and a bare SIGSEGV two frames deep. `bhc_bad_action` names the object
+    /// A transformer's bind calls its action through the code word, so a
+    /// value that is not a closure jumps to whatever that word holds, and a
+    /// bare SIGSEGV two frames deep. `bhc_bad_action` names the object
     /// instead, and backtraces through the generated code when
     /// `RUST_BACKTRACE` asks.
     fn checked_closure_fn_ptr(
@@ -51444,41 +51427,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
         let bad_bb = self.llvm_ctx.append_basic_block(current_fn, "action_bad");
         let ok_bb = self.llvm_ctx.append_basic_block(current_fn, "action_ok");
-        let is_null = self
-            .builder()
-            .build_is_null(fn_ptr, "action_fn_null")
-            .map_err(|e| CodegenError::Internal(format!("action null check: {:?}", e)))?;
-        // Also trip on the BhcText header signature: a `Text` object's word 0 is
-        // `self + HEADER_SIZE` (24), a data pointer into itself, not a code
-        // address. When a `Text` (or a thunk that forces to one) is mistakenly
-        // called as a closure, its word 0 is loaded as the fn-ptr and the jump
-        // lands `self + 24` in the heap → `udf`. `readMarkdown` dies exactly
-        // this way (a `Text` in `parserBind`'s continuation slot); routing it to
-        // `bhc_bad_action` names the object and the call site instead.
+        // Word 0 of a closure says so. Anything else called as one (a `Text`
+        // in a continuation slot, a constructor, a null code pointer in an
+        // object that was never a closure) used to be told apart by guessing
+        // from the code word; `bhc_bad_action` names the object and the call
+        // site instead of jumping through it.
         let tm = self.type_mapper();
-        let fn_as_int = self.address_of(fn_ptr, "fn_as_int")?;
-        let obj_as_int = self.address_of(closure_ptr, "obj_as_int")?;
-        let obj_plus_hdr = self
+        let kind_slot = self
             .builder()
-            .build_int_add(
-                obj_as_int,
-                tm.i64_type().const_int(24, false),
-                "obj_plus_hdr",
-            )
-            .map_err(|e| CodegenError::Internal(format!("action add: {:?}", e)))?;
-        let is_text = self
+            .build_struct_gep(self.closure_type(0), closure_ptr, 0, "kind_slot")
+            .map_err(|e| CodegenError::Internal(format!("action kind gep: {:?}", e)))?;
+        let kind = self
             .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                fn_as_int,
-                obj_plus_hdr,
-                "fn_is_text",
-            )
-            .map_err(|e| CodegenError::Internal(format!("action text cmp: {:?}", e)))?;
+            .build_load(tm.i64_type(), kind_slot, "action_kind")
+            .map_err(|e| CodegenError::Internal(format!("action kind load: {:?}", e)))?
+            .into_int_value();
         let is_bad = self
             .builder()
-            .build_or(is_null, is_text, "action_bad_fn")
-            .map_err(|e| CodegenError::Internal(format!("action or: {:?}", e)))?;
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                kind,
+                tm.i64_type()
+                    .const_int(bhc_rts_alloc::object::CLOSURE as u64, true),
+                "action_not_closure",
+            )
+            .map_err(|e| CodegenError::Internal(format!("action kind cmp: {:?}", e)))?;
         self.builder()
             .build_conditional_branch(is_bad, bad_bb, ok_bb)
             .map_err(|e| CodegenError::Internal(format!("action null br: {:?}", e)))?;
@@ -51506,7 +51479,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let env_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get env slot: {:?}", e)))?;
 
         let elem_ptr = unsafe {
@@ -54789,7 +54762,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let closure_ty = self.closure_type(n_provided);
             let env_slot = self
                 .builder()
-                .build_struct_gep(closure_ty, closure_param, 2, "env_slot")
+                .build_struct_gep(closure_ty, closure_param, 3, "env_slot")
                 .map_err(|e| CodegenError::Internal(format!("partial env slot: {:?}", e)))?;
 
             let mut all_args: Vec<BasicValueEnum<'ctx>> = Vec::new();
@@ -58640,13 +58613,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // word says which, and that is what #94 changes.
     //
     // Every conversion between a scalar and such a word goes through the
-    // functions in this section, and each says which of four things it is:
+    // functions in this section, and each says which of three things it is:
     //
     // * `word_from_scalar`: a scalar becomes a value word (boxing);
     // * `scalar_from_word`: a value word is read as a scalar (unboxing);
     // * `word_bits`: the word is inspected to find out HOW it is represented
-    //   (an immediate tag, or a pointer to an object);
-    // * `address_of`: a genuine pointer's address, for comparison.
+    //   (an immediate tag, or a pointer to an object).
     //
     // `inttoptr` and `ptrtoint` appear nowhere else in this file (a test
     // holds that), so the representation can be changed here.
@@ -58690,14 +58662,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_ptr_to_int(word, self.type_mapper().i64_type(), label)
             .map_err(|e| CodegenError::Internal(format!("failed to read a word: {e:?}")))
-    }
-
-    /// The address of a pointer that is known to be one (a function, a
-    /// closure object), for comparison. Not an unboxing.
-    fn address_of(&self, ptr: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
-        self.builder()
-            .build_ptr_to_int(ptr, self.type_mapper().i64_type(), label)
-            .map_err(|e| CodegenError::Internal(format!("failed to take an address: {e:?}")))
     }
 
     /// Convert an integer to a pointer (boxing).
@@ -60661,7 +60625,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 |this: &Self, idx: usize, name: &str| -> CodegenResult<BasicValueEnum<'ctx>> {
                     let env_slot = this
                         .builder()
-                        .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                        .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
                         .map_err(|e| CodegenError::Internal(format!("PAP gep failed: {:?}", e)))?;
                     let elem_ptr = unsafe {
                         this.builder()
@@ -60929,17 +60893,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.apply_closure_values(closure_ptr, &arg_vals, tail)
     }
 
-    /// Load a closure's recorded physical arity (offset-1 i64 header word).
+    /// Load a closure's recorded physical arity (offset-2 i64 header word).
     /// A value of 0 means "unknown" (closure built without an arity).
     fn load_closure_arity(
         &self,
         closure_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
-        // Offset 1 is at the same byte regardless of env size.
+        // Offset 2 is at the same byte regardless of env size.
         let closure_ty = self.closure_type(0);
         let arity_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 2, "arity_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to gep arity: {:?}", e)))?;
         let arity = self
             .builder()
@@ -66457,8 +66421,8 @@ mod tests {
             assert!(
                 (section_start..section_end).contains(&offset),
                 "lower.rs:{}: a scalar/pointer conversion outside the value \
-                 representation boundary; use word_from_scalar, scalar_from_word, \
-                 word_bits or address_of",
+                 representation boundary; use word_from_scalar, scalar_from_word \
+                 or word_bits",
                 index + 1
             );
         }

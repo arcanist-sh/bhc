@@ -562,8 +562,13 @@ unsafe extern "C" fn char_list_eq_code(_closure: *mut u8, a: *mut u8, b: *mut u8
 /// `String` (`nub`, `group`, `elem`, … compared the lists' addresses).
 #[no_mangle]
 pub extern "C" fn bhc_string_eq_closure() -> *mut u8 {
-    // A closure is its code pointer followed by its environment (none).
-    Box::into_raw(Box::new([char_list_eq_code as *const () as usize, 0usize])) as *mut u8
+    use bhc_rts_alloc::object;
+    let words = vec![0usize; object::closure_size(0) / object::WORD].into_boxed_slice();
+    let closure = Box::into_raw(words).cast::<u8>();
+    // SAFETY: `closure` has room for a closure that captures nothing, and
+    // the code takes the closure and two arguments.
+    unsafe { object::init_closure(closure, char_list_eq_code as *const u8, 2, &[]) };
+    closure
 }
 
 /// Strip a prefix from a list, returning `Just remainder` or `Nothing`.

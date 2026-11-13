@@ -322,6 +322,7 @@ dependencies = [
  "bhc-index",
  "bhc-intern",
  "bhc-loop-ir",
+ "bhc-rts-alloc",
  "bhc-session",
  "bhc-span",
  "bhc-target",

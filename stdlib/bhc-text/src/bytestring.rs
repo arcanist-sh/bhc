@@ -6,10 +6,11 @@
 //! # Representation
 //!
 //! ```text
-//! [u64 data_ptr][u64 offset][u64 byte_len][...bytes...]
+//! [i64 kind][u64 data_ptr][u64 offset][u64 byte_len][...bytes...]
 //! ```
 //!
-//! The header is 24 bytes. `data_ptr` points to the start of the
+//! The header is 32 bytes and is stated in `bhc_rts_alloc::object`, which
+//! this module reads and writes it through. `data_ptr` points to the start of the
 //! byte buffer (which may be shared across slices). This enables
 //! zero-copy slicing and allows Text.Encoding to share the byte
 //! buffer directly between Text and ByteString.
@@ -17,8 +18,10 @@
 use std::alloc::{self, Layout};
 use std::ptr;
 
-/// Header: data_ptr (8) + offset (8) + byte_len (8) = 24 bytes.
-const HEADER_SIZE: usize = 24;
+use bhc_rts_alloc::object;
+
+/// The header before a bytestring's own bytes.
+const HEADER_SIZE: usize = object::BYTES_HEADER;
 
 // ============================================================
 // Internal helpers
@@ -26,17 +29,17 @@ const HEADER_SIZE: usize = 24;
 
 /// Read the data pointer from a ByteString header.
 unsafe fn bs_data_ptr(bs: *const u8) -> *const u8 {
-    *(bs as *const *const u8)
+    object::bytes_buffer(bs)
 }
 
 /// Read the byte offset from a ByteString header.
 unsafe fn bs_offset(bs: *const u8) -> usize {
-    *((bs as *const u64).add(1)) as usize
+    object::bytes_offset(bs)
 }
 
 /// Read the byte length from a ByteString header.
 unsafe fn bs_byte_len(bs: *const u8) -> usize {
-    *((bs as *const u64).add(2)) as usize
+    object::bytes_len(bs)
 }
 
 /// Get a slice view of the ByteString's active bytes.
@@ -56,13 +59,9 @@ pub(crate) fn alloc_bs_from_bytes(bytes: &[u8]) -> *mut u8 {
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        // data_ptr = ptr + HEADER_SIZE
+        // The bytes follow the header, and the header points at them.
         let data_start = ptr.add(HEADER_SIZE);
-        (ptr as *mut *mut u8).write(data_start);
-        // offset = 0
-        (ptr as *mut u64).add(1).write(0);
-        // byte_len = bytes.len()
-        (ptr as *mut u64).add(2).write(bytes.len() as u64);
+        object::init_bytes(ptr, data_start, 0, bytes.len());
         // Copy data
         if !bytes.is_empty() {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_start, bytes.len());
@@ -79,9 +78,7 @@ fn alloc_bs_slice(source_data_ptr: *const u8, offset: usize, byte_len: usize) ->
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        (ptr as *mut *const u8).write(source_data_ptr);
-        (ptr as *mut u64).add(1).write(offset as u64);
-        (ptr as *mut u64).add(2).write(byte_len as u64);
+        object::init_bytes(ptr, source_data_ptr, offset, byte_len);
         ptr
     }
 }

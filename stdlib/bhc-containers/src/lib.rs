@@ -102,19 +102,20 @@ static INTERNED_CONTENT: Mutex<Option<HashMap<i64, Arc<[u8]>>>> = Mutex::new(Non
 /// [`Key::of`] skips the table.
 static ANY_INTERNED: AtomicBool = AtomicBool::new(false);
 
-/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`, 24 bytes.
-/// Canonical definition: `bhc-text`'s `text.rs`.
-const TEXT_HEADER_SIZE: usize = 24;
-
 /// Read the active bytes of a `BhcText`.
 unsafe fn text_key_bytes(text: *const u8) -> Vec<u8> {
-    let data = unsafe { *(text as *const *const u8) };
-    let off = unsafe { *((text as *const u64).add(1)) } as usize;
-    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    use bhc_rts_alloc::object;
+    // SAFETY: the caller guarantees a `Text`.
+    let (data, off, len) = unsafe {
+        (
+            object::bytes_buffer(text),
+            object::bytes_offset(text),
+            object::bytes_len(text),
+        )
+    };
     if data.is_null() || len > (1 << 30) {
         return Vec::new();
     }
-    let _ = TEXT_HEADER_SIZE;
     unsafe { std::slice::from_raw_parts(data.add(off), len) }.to_vec()
 }
 

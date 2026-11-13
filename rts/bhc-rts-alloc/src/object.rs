@@ -59,8 +59,20 @@
 //! word 1..      the runtime's own data, not described here
 //! ```
 //!
-//! `Text`, `ByteString` and the containers do not start with a kind word
-//! yet (#94).
+//! A strict `Text` and a strict `ByteString` share one layout, and the text
+//! library builds either from the other's bytes, so they share a kind:
+//!
+//! ```text
+//! word 0        BYTES
+//! word 1        pointer to a byte buffer, which slices share
+//! word 2        offset of the first byte in the buffer
+//! word 3        length in bytes
+//! ```
+//!
+//! A value that owns its bytes keeps them after word 3 and points word 1
+//! there.
+//!
+//! The containers do not start with a kind word yet (#94).
 //!
 //! # Allocation
 //!
@@ -388,6 +400,65 @@ pub unsafe fn set_closure_captured(object: *mut u8, index: usize, value: *mut u8
     }
 }
 
+/// Word 0 of a strict `Text` or `ByteString`.
+pub const BYTES: i64 = -21;
+
+/// The size in bytes of a `Text` or `ByteString` before any bytes it owns.
+pub const BYTES_HEADER: usize = 4 * WORD;
+
+/// Make `object` a `Text` or `ByteString` of `len` bytes starting `offset`
+/// bytes into `buffer`.
+///
+/// # Safety
+///
+/// `object` must be word-aligned and writable for [`BYTES_HEADER`] bytes.
+#[inline]
+pub unsafe fn init_bytes(object: *mut u8, buffer: *const u8, offset: usize, len: usize) {
+    // SAFETY: the caller guarantees room for the four header words.
+    unsafe {
+        object.cast::<i64>().write(BYTES);
+        object.cast::<*const u8>().add(1).write(buffer);
+        object.cast::<usize>().add(2).write(offset);
+        object.cast::<usize>().add(3).write(len);
+    }
+}
+
+/// The byte buffer of a `Text` or `ByteString`.
+///
+/// # Safety
+///
+/// `object` must point to a `Text` or `ByteString`.
+#[inline]
+#[must_use]
+pub unsafe fn bytes_buffer(object: *const u8) -> *const u8 {
+    // SAFETY: the caller guarantees the layout above.
+    unsafe { object.cast::<*const u8>().add(1).read() }
+}
+
+/// The offset of a `Text` or `ByteString`'s first byte in its buffer.
+///
+/// # Safety
+///
+/// `object` must point to a `Text` or `ByteString`.
+#[inline]
+#[must_use]
+pub unsafe fn bytes_offset(object: *const u8) -> usize {
+    // SAFETY: the caller guarantees the layout above.
+    unsafe { object.cast::<usize>().add(2).read() }
+}
+
+/// The length in bytes of a `Text` or `ByteString`.
+///
+/// # Safety
+///
+/// `object` must point to a `Text` or `ByteString`.
+#[inline]
+#[must_use]
+pub unsafe fn bytes_len(object: *const u8) -> usize {
+    // SAFETY: the caller guarantees the layout above.
+    unsafe { object.cast::<usize>().add(3).read() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +522,23 @@ mod tests {
         }
         // The layout compiled code relies on, spelled out.
         assert_eq!(words, [CLOSURE as usize, 0x40, 2, 0x10]);
+    }
+
+    #[test]
+    fn text_is_kind_buffer_offset_and_length() {
+        let buffer = 0x50 as *const u8;
+        let mut words = [0usize; 4];
+        let object = words.as_mut_ptr().cast::<u8>();
+        assert_eq!(BYTES_HEADER, 32);
+        // SAFETY: `words` has room for the header; the buffer is never read.
+        unsafe {
+            init_bytes(object, buffer, 3, 9);
+            assert_eq!(tag(object), BYTES);
+            assert_eq!(bytes_buffer(object), buffer);
+            assert_eq!(bytes_offset(object), 3);
+            assert_eq!(bytes_len(object), 9);
+        }
+        assert_eq!(words, [BYTES as usize, 0x50, 3, 9]);
     }
 
     #[test]

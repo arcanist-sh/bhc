@@ -9,10 +9,11 @@
 //! A BhcText is laid out as:
 //!
 //! ```text
-//! [u64 data_ptr][u64 offset][u64 byte_len][...UTF-8 bytes...]
+//! [i64 kind][u64 data_ptr][u64 offset][u64 byte_len][...UTF-8 bytes...]
 //! ```
 //!
-//! The header is 24 bytes. `data_ptr` points to the start of the
+//! The header is 32 bytes and is stated in `bhc_rts_alloc::object`, which
+//! this module reads and writes it through. `data_ptr` points to the start of the
 //! byte buffer (which may be shared across slices). For self-contained
 //! texts, `data_ptr` points to `header + HEADER_SIZE`.
 
@@ -20,10 +21,12 @@ use std::alloc::{self, Layout};
 use std::ptr;
 use std::str;
 
+use bhc_rts_alloc::object;
+
 use crate::simd::{bhc_ascii_to_lower, bhc_ascii_to_upper, bhc_is_ascii, bhc_text_find_substring};
 
-/// Header: data_ptr (8) + offset (8) + byte_len (8) = 24 bytes.
-pub(crate) const HEADER_SIZE: usize = 24;
+/// The header before a text's own bytes.
+pub(crate) const HEADER_SIZE: usize = object::BYTES_HEADER;
 
 // ============================================================
 // Internal helpers
@@ -31,17 +34,17 @@ pub(crate) const HEADER_SIZE: usize = 24;
 
 /// Read the data pointer from a BhcText header.
 unsafe fn text_data_ptr(text: *const u8) -> *const u8 {
-    *(text as *const *const u8)
+    object::bytes_buffer(text)
 }
 
 /// Read the byte offset from a BhcText header.
 unsafe fn text_offset(text: *const u8) -> usize {
-    *((text as *const u64).add(1)) as usize
+    object::bytes_offset(text)
 }
 
 /// Read the byte length from a BhcText header.
 unsafe fn text_byte_len(text: *const u8) -> usize {
-    *((text as *const u64).add(2)) as usize
+    object::bytes_len(text)
 }
 
 /// Get a slice view of the text's active bytes.
@@ -68,13 +71,9 @@ pub(crate) fn alloc_text_from_bytes(bytes: &[u8]) -> *mut u8 {
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        // data_ptr = ptr + HEADER_SIZE
+        // The bytes follow the header, and the header points at them.
         let data_start = ptr.add(HEADER_SIZE);
-        (ptr as *mut *mut u8).write(data_start);
-        // offset = 0
-        (ptr as *mut u64).add(1).write(0);
-        // byte_len = bytes.len()
-        (ptr as *mut u64).add(2).write(bytes.len() as u64);
+        object::init_bytes(ptr, data_start, 0, bytes.len());
         // Copy data
         if !bytes.is_empty() {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_start, bytes.len());
@@ -94,9 +93,7 @@ fn alloc_text_slice(source_data_ptr: *const u8, offset: usize, byte_len: usize) 
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        (ptr as *mut *const u8).write(source_data_ptr);
-        (ptr as *mut u64).add(1).write(offset as u64);
-        (ptr as *mut u64).add(2).write(byte_len as u64);
+        object::init_bytes(ptr, source_data_ptr, offset, byte_len);
         ptr
     }
 }

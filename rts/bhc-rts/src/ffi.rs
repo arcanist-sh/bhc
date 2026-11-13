@@ -964,20 +964,20 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Call the evaluation function with the environment
         let result = eval_fn(env_ptr);
 
-        // BHC_DBG_FORCETEXT: a thunk that evaluates to a `Text` (word0 =
-        // self+HEADER_SIZE) is the shape that reaches parsec's continuation
+        // BHC_DBG_FORCETEXT: a thunk that evaluates to a `Text` is the shape that reaches parsec's continuation
         // slot and crashes when called as a function. Print the thunk's
         // eval-fn address so it can be slide-symbolised to the Haskell binding
         // that BUILT the thunk — the continuation caller the crash backtrace
         // cannot reach (CPS unwinds the stack).
-        if force_text_dbg() && !result.is_null() && (result as usize) % 8 == 0 {
-            let w0 = unsafe { *(result as *const usize) };
-            if w0 == (result as usize) + 24 {
-                let here = bhc_force as *const () as usize;
-                eprintln!(
-                    "FORCETEXT thunk={obj:p} eval_fn={eval_fn_ptr:p} -> Text {result:p};                      bhc_force at {here:#x}"
-                );
-            }
+        if force_text_dbg()
+            && !result.is_null()
+            && (result as usize) % 8 == 0
+            && unsafe { object::tag(result) } == object::BYTES
+        {
+            let here = bhc_force as *const () as usize;
+            eprintln!(
+                "FORCETEXT thunk={obj:p} eval_fn={eval_fn_ptr:p} -> Text {result:p};                      bhc_force at {here:#x}"
+            );
         }
 
         // Publish the result, then the INDIRECTION tag (both Release so a
@@ -2492,16 +2492,20 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
 
 /// Read the characters of a `Data.Text.Text`.
 ///
-/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`; the canonical
-/// definition is `bhc-text`'s `text.rs`. It is repeated here so `show` can
-/// render a Text without the runtime depending on the text library.
+/// Reads the header through `bhc_rts_alloc::object`, so `show` can render a
+/// Text without the runtime depending on the text library.
 unsafe fn bhc_text_show_str(text: *const u8) -> String {
     if text.is_null() {
         return String::new();
     }
-    let data = unsafe { *(text as *const *const u8) };
-    let off = unsafe { *((text as *const u64).add(1)) } as usize;
-    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    // SAFETY: the caller guarantees a `Text`.
+    let (data, off, len) = unsafe {
+        (
+            object::bytes_buffer(text),
+            object::bytes_offset(text),
+            object::bytes_len(text),
+        )
+    };
     if data.is_null() || len > (1 << 30) {
         return String::new();
     }

@@ -600,7 +600,8 @@ fn wake_with(s: &mut Sched, thread: u64, value: Slot) {
 unsafe fn run_action(action: *mut u8) {
     unsafe {
         let action = crate::ffi::bhc_force(action);
-        let code = *(action as *const extern "C" fn(*mut u8) -> *mut u8);
+        let code: extern "C" fn(*mut u8) -> *mut u8 =
+            std::mem::transmute(bhc_rts_alloc::object::closure_code(action));
         code(action);
     }
 }

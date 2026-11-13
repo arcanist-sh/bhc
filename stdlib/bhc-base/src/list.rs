@@ -73,7 +73,7 @@ unsafe fn extract_ordering(val: *mut u8) -> std::cmp::Ordering {
 
 unsafe fn call_eq_closure(eq_fn: *mut u8, a: *mut u8, b: *mut u8) -> bool {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(eq_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(eq_fn));
     extract_bool(fn_ptr(eq_fn, a, b))
 }
 
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(cmp_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(cmp_fn));
 
     let mut vec = list_to_vec(list);
     vec.sort_by(|&a, &b| extract_ordering(fn_ptr(cmp_fn, a, b)));
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn bhc_list_extreme_by(
     want_max: i64,
 ) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(cmp_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(cmp_fn));
     let vec = list_to_vec(list);
     let mut best = match vec.first() {
         Some(&e) => e,
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn bhc_list_transpose(lists: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(key_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(key_fn));
 
     let vec = list_to_vec(list);
     let mut decorated: Vec<(i64, *mut u8)> = vec
@@ -634,7 +634,7 @@ pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(f as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(f));
 
     let vec = list_to_vec(list);
     let mut current_acc = acc;
@@ -666,7 +666,7 @@ pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *m
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_r(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(f as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(f));
 
     let vec = list_to_vec(list);
     let mut current_acc = acc;

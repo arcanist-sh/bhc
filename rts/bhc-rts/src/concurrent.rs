@@ -98,11 +98,11 @@ impl Slot {
     }
 }
 
-/// An `MVar`. The object header makes it an evaluated heap object, so
+/// An `MVar`. Its first word is the kind word of a heap object, so
 /// `bhc_force` leaves it alone. Fields are only touched under the `SCHED` lock.
 #[repr(C)]
 pub struct MVar {
-    tag: i64,
+    kind: i64,
     full: bool,
     value: Slot,
     waiters: VecDeque<Waiter>,
@@ -112,7 +112,7 @@ pub struct MVar {
 /// A `Chan`: an unbounded queue, with threads waiting when it is empty.
 #[repr(C)]
 pub struct Chan {
-    tag: i64,
+    kind: i64,
     items: VecDeque<Slot>,
     readers: VecDeque<u64>,
 }
@@ -139,10 +139,10 @@ fn deliverable(state: i64, interruptible_point: bool) -> bool {
     state == MASK_UNMASKED || (interruptible_point && state != MASK_UNINTERRUPTIBLE)
 }
 
-/// A `ThreadId`, with the header of an evaluated heap object.
+/// A `ThreadId`, behind the kind word of a heap object.
 #[repr(C)]
 pub struct ThreadIdObject {
-    tag: i64,
+    kind: i64,
     id: u64,
 }
 
@@ -681,7 +681,10 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
 }
 
 fn new_thread_id(id: u64) -> *mut u8 {
-    Box::into_raw(Box::new(ThreadIdObject { tag: 0, id })) as *mut u8
+    Box::into_raw(Box::new(ThreadIdObject {
+        kind: bhc_rts_alloc::object::THREAD_ID,
+        id,
+    })) as *mut u8
 }
 
 /// `myThreadId`.
@@ -769,7 +772,7 @@ pub unsafe extern "C" fn bhc_kill_thread(thread: *mut u8) {
 #[no_mangle]
 pub extern "C" fn bhc_new_empty_mvar() -> *mut u8 {
     Box::into_raw(Box::new(MVar {
-        tag: 0,
+        kind: bhc_rts_alloc::object::MVAR,
         full: false,
         value: Slot::EMPTY,
         waiters: VecDeque::new(),
@@ -923,10 +926,8 @@ unsafe fn put_mvar(mvar: *mut u8, value: Slot) {
 
 /// A heap object: an ADT's tag followed by its fields.
 fn new_object(tag: i64, fields: &[*mut u8]) -> *mut u8 {
-    let mut words: Vec<usize> = Vec::with_capacity(1 + fields.len());
-    words.push(tag as usize);
-    words.extend(fields.iter().map(|f| *f as usize));
-    Box::into_raw(words.into_boxed_slice()) as *mut usize as *mut u8
+    // SAFETY: the fields are the caller's values, stored and not read here.
+    unsafe { bhc_rts_alloc::object::alloc_con(tag, fields) }
 }
 
 /// `tryTakeMVar`: `Just` the value if it was full, otherwise `Nothing`.
@@ -1042,7 +1043,7 @@ pub unsafe extern "C" fn bhc_mvar_finish_pair(
 #[no_mangle]
 pub extern "C" fn bhc_new_chan() -> *mut u8 {
     Box::into_raw(Box::new(Chan {
-        tag: 0,
+        kind: bhc_rts_alloc::object::CHAN,
         items: VecDeque::new(),
         readers: VecDeque::new(),
     })) as *mut u8

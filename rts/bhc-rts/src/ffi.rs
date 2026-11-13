@@ -1718,8 +1718,18 @@ pub extern "C" fn bhc_rational_show(r: *mut u8) -> *mut c_char {
 /// Create a new IORef (mutable reference cell)
 #[no_mangle]
 pub extern "C" fn bhc_new_ioref(val: *const u8) -> *mut u8 {
-    let cell = Box::new(val);
-    Box::into_raw(cell) as *mut u8
+    Box::into_raw(Box::new(IORefObject {
+        kind: object::IOREF,
+        value: val,
+    })) as *mut u8
+}
+
+/// An `IORef` on the heap: the kind word every heap object starts with,
+/// then the value it holds.
+#[repr(C)]
+struct IORefObject {
+    kind: i64,
+    value: *const u8,
 }
 
 /// Read the value from an IORef
@@ -1733,7 +1743,7 @@ pub unsafe extern "C" fn bhc_read_ioref(ref_ptr: *const u8) -> *const u8 {
     if ref_ptr.is_null() {
         rts_abort("readIORef on null reference");
     }
-    unsafe { *(ref_ptr as *const *const u8) }
+    unsafe { (*(ref_ptr as *const IORefObject)).value }
 }
 
 /// Write a value to an IORef
@@ -1748,7 +1758,7 @@ pub unsafe extern "C" fn bhc_write_ioref(ref_ptr: *mut u8, val: *const u8) {
         rts_abort("writeIORef on null reference");
     }
     unsafe {
-        *(ref_ptr as *mut *const u8) = val;
+        (*(ref_ptr as *mut IORefObject)).value = val;
     }
 }
 
@@ -2261,7 +2271,7 @@ pub extern "C" fn bhc_double_to_integer(a: f64, mode: i64) -> *mut u8 {
         _ => a.trunc(),
     };
     let big = BigInt::from_f64(rounded).unwrap_or_default();
-    Box::into_raw(Box::new(big)) as *mut u8
+    new_integer(big)
 }
 
 /// Floor of Double
@@ -2783,7 +2793,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             }
             9 => {
                 // Integer: a boxed BigInt.
-                (*(ptr as *const BigInt)).to_string()
+                integer(ptr).to_string()
             }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
@@ -5689,26 +5699,51 @@ pub extern "C" fn bhc_exit_failure() -> ! {
 
 use num_bigint::BigInt;
 
-/// Create a BigInt from an i64 value. Returns a heap-allocated `Box<BigInt>`.
-#[no_mangle]
-pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
-    let big = Box::new(BigInt::from(n));
-    Box::into_raw(big) as *mut u8
+/// An `Integer` on the heap: the kind word every heap object starts with,
+/// then the number.
+#[repr(C)]
+struct IntegerObject {
+    kind: i64,
+    value: BigInt,
 }
 
-/// Create a BigInt from a C string representation. Returns a heap-allocated `Box<BigInt>`.
+/// Allocate an `Integer`.
+fn new_integer(value: BigInt) -> *mut u8 {
+    Box::into_raw(Box::new(IntegerObject {
+        kind: object::INTEGER,
+        value,
+    })) as *mut u8
+}
+
+/// The number in an `Integer` object.
+///
+/// # Safety
+///
+/// `ptr` must come from [`new_integer`].
+unsafe fn integer<'a>(ptr: *const u8) -> &'a BigInt {
+    // SAFETY: the caller guarantees an `IntegerObject`.
+    unsafe { &(*(ptr as *const IntegerObject)).value }
+}
+
+/// Create an `Integer` from an i64 value.
+#[no_mangle]
+pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
+    new_integer(BigInt::from(n))
+}
+
+/// Create an `Integer` from a C string representation.
 #[no_mangle]
 pub extern "C" fn bhc_integer_from_str(s: *const c_char) -> *mut u8 {
     let c_str = unsafe { CStr::from_ptr(s) };
     let str_val = c_str.to_str().unwrap_or("0");
     let big = str_val.parse::<BigInt>().unwrap_or_default();
-    Box::into_raw(Box::new(big)) as *mut u8
+    new_integer(big)
 }
 
 /// Convert a BigInt to i64 (truncating if necessary).
 #[no_mangle]
 pub extern "C" fn bhc_integer_to_i64(ptr: *const u8) -> i64 {
-    let big = unsafe { &*(ptr as *const BigInt) };
+    let big = unsafe { integer(ptr) };
     use num_traits::ToPrimitive;
     big.to_i64().unwrap_or(0)
 }
@@ -5716,127 +5751,127 @@ pub extern "C" fn bhc_integer_to_i64(ptr: *const u8) -> i64 {
 /// Add two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_add(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a + b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a + b)
 }
 
 /// Subtract two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_sub(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a - b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a - b)
 }
 
 /// Multiply two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_mul(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a * b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a * b)
 }
 
 /// Divide two BigInts (floor division, like Haskell's `div`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_div(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.div_floor(b))) as *mut u8
+    new_integer(a.div_floor(b))
 }
 
 /// Modulo of two BigInts (floor mod, like Haskell's `mod`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_mod(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.mod_floor(b))) as *mut u8
+    new_integer(a.mod_floor(b))
 }
 
 /// Truncating quotient of two BigInts (Haskell's `quot`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_quot(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
-    Box::into_raw(Box::new(a / b)) as *mut u8
+    new_integer(a / b)
 }
 
 /// Truncating remainder of two BigInts (Haskell's `rem`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_rem(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
-    Box::into_raw(Box::new(a % b)) as *mut u8
+    new_integer(a % b)
 }
 
 /// Negate a BigInt.
 #[no_mangle]
 pub extern "C" fn bhc_integer_negate(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    Box::into_raw(Box::new(-a)) as *mut u8
+    let a = unsafe { integer(a) };
+    new_integer(-a)
 }
 
 /// Absolute value of a BigInt.
 #[no_mangle]
 pub extern "C" fn bhc_integer_abs(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_traits::Signed;
-    Box::into_raw(Box::new(a.abs())) as *mut u8
+    new_integer(a.abs())
 }
 
 /// Signum of a BigInt (-1, 0, or 1).
 #[no_mangle]
 pub extern "C" fn bhc_integer_signum(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_traits::Signed;
-    Box::into_raw(Box::new(a.signum())) as *mut u8
+    new_integer(a.signum())
 }
 
 /// GCD of two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_gcd(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.gcd(b))) as *mut u8
+    new_integer(a.gcd(b))
 }
 
 /// Least common multiple of two BigInts, non-negative like `lcm`.
 #[no_mangle]
 pub extern "C" fn bhc_integer_lcm(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.lcm(b))) as *mut u8
+    new_integer(a.lcm(b))
 }
 
 /// Equality check for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a == b {
         1
     } else {
@@ -5847,8 +5882,8 @@ pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
 /// Less-than comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a < b {
         1
     } else {
@@ -5859,8 +5894,8 @@ pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
 /// Less-than-or-equal comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a <= b {
         1
     } else {
@@ -5871,8 +5906,8 @@ pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
 /// Greater-than comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a > b {
         1
     } else {
@@ -5883,8 +5918,8 @@ pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
 /// Greater-than-or-equal comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a >= b {
         1
     } else {
@@ -5895,8 +5930,8 @@ pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
 /// Compare two BigInts, returning Ordering tag (0=LT, 1=EQ, 2=GT).
 #[no_mangle]
 pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     match a.cmp(b) {
         std::cmp::Ordering::Less => 0,
         std::cmp::Ordering::Equal => 1,
@@ -5907,7 +5942,7 @@ pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
 /// 1 if the BigInt is even, else 0 (`even`/`odd` at `Integer`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_is_even(a: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_integer::Integer;
     i64::from(a.is_even())
 }
@@ -5920,14 +5955,14 @@ fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
         unsafe {
             let cur = *(env as *const *const u8);
             let step = *(env.add(8) as *const *const u8);
-            let next = &*(cur as *const BigInt) + &*(step as *const BigInt);
+            let next = integer(cur) + integer(step);
             alloc_cons(cur as *mut u8, integer_enum_thunk(next, step))
         }
     }
     unsafe {
         let size = object::thunk_size(2);
         let obj = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(size, 8));
-        let next = Box::into_raw(Box::new(next)) as *mut u8;
+        let next = new_integer(next);
         object::init_thunk(obj, resume as *const u8, &[next, step.cast_mut()]);
         obj
     }
@@ -5935,9 +5970,9 @@ fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
 
 /// `[from, from + step ..]` at `Integer`, produced lazily.
 fn integer_enum_unbounded(from: BigInt, step: BigInt) -> *mut u8 {
-    let step = Box::into_raw(Box::new(step)) as *const u8;
-    let next = &from + unsafe { &*(step as *const BigInt) };
-    let head = Box::into_raw(Box::new(from)) as *mut u8;
+    let step = new_integer(step).cast_const();
+    let next = &from + unsafe { integer(step) };
+    let head = new_integer(from);
     unsafe { alloc_cons(head, integer_enum_thunk(next, step)) }
 }
 
@@ -5960,7 +5995,7 @@ fn integer_enum_bounded(from: &BigInt, step: BigInt, to: &BigInt) -> *mut u8 {
         &x >= to
     } {
         let next = &x + &step;
-        elems.push(Box::into_raw(Box::new(x)) as *mut u8);
+        elems.push(new_integer(x));
         x = next;
     }
     let mut list = unsafe { alloc_nil() };
@@ -6009,23 +6044,23 @@ pub extern "C" fn bhc_enum_from_step_int(from: i64, step: i64) -> *mut u8 {
 /// `enumFrom` at `Integer`: `[from ..]`, lazily.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_integer(from: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
+    let from = unsafe { integer(from) };
     integer_enum_unbounded(from.clone(), BigInt::from(1))
 }
 
 /// `enumFromThen` at `Integer`: `[from, then ..]`, lazily.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_then_integer(from: *const u8, then: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let then = unsafe { &*(then as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let then = unsafe { integer(then) };
     integer_enum_unbounded(from.clone(), then - from)
 }
 
 /// `enumFromTo` at `Integer`: `[from .. to]`.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_to_integer(from: *const u8, to: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let to = unsafe { &*(to as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let to = unsafe { integer(to) };
     integer_enum_bounded(from, BigInt::from(1), to)
 }
 
@@ -6036,9 +6071,9 @@ pub extern "C" fn bhc_enum_from_then_to_integer(
     then: *const u8,
     to: *const u8,
 ) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let then = unsafe { &*(then as *const BigInt) };
-    let to = unsafe { &*(to as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let then = unsafe { integer(then) };
+    let to = unsafe { integer(to) };
     integer_enum_bounded(from, then - from, to)
 }
 
@@ -6050,7 +6085,7 @@ pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut
     while !cur.is_null() && unsafe { object::tag(cur) } == 1 {
         let head = unsafe { object::field(cur, 0) };
         let better = best.is_null() || {
-            let (h, b) = unsafe { (&*(head as *const BigInt), &*(best as *const BigInt)) };
+            let (h, b) = unsafe { (integer(head), integer(best)) };
             if want_max != 0 {
                 h > b
             } else {
@@ -6072,7 +6107,7 @@ pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut
 /// Show a BigInt as a C string.
 #[no_mangle]
 pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
-    let big = unsafe { &*(ptr as *const BigInt) };
+    let big = unsafe { integer(ptr) };
     let s = big.to_string();
     let c_string = CString::new(s).unwrap_or_else(|_| CString::new("0").unwrap());
     c_string.into_raw()

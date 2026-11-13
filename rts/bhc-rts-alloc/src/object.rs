@@ -20,7 +20,8 @@
 //! # Thunks
 //!
 //! Word 0 says what an object is. A constructor tag is never negative; a
-//! negative value there is a thunk state or [`CLOSURE`].
+//! negative value there is a thunk state, [`CLOSURE`], or the kind of an
+//! object the runtime owns.
 //!
 //! ```text
 //! word 0        state: THUNK, BLACKHOLE or INDIRECTION
@@ -47,6 +48,19 @@
 //!
 //! A partial application is a closure whose captured values are the closure
 //! it applies, the number of arguments held so far, and those arguments.
+//!
+//! # Objects the runtime owns
+//!
+//! An `Integer`, an `IORef`, an `MVar`, a `Chan` and a `ThreadId` are Rust
+//! values behind a kind word:
+//!
+//! ```text
+//! word 0        INTEGER, IOREF, MVAR, CHAN or THREAD_ID
+//! word 1..      the runtime's own data, not described here
+//! ```
+//!
+//! `Text`, `ByteString` and the containers do not start with a kind word
+//! yet (#94).
 //!
 //! # Allocation
 //!
@@ -259,6 +273,17 @@ pub unsafe fn thunk_env(object: *mut u8) -> *mut u8 {
 
 /// Word 0 of a closure.
 pub const CLOSURE: i64 = -4;
+
+/// Word 0 of an `Integer`.
+pub const INTEGER: i64 = -16;
+/// Word 0 of an `IORef`.
+pub const IOREF: i64 = -17;
+/// Word 0 of an `MVar`.
+pub const MVAR: i64 = -18;
+/// Word 0 of a `Chan`.
+pub const CHAN: i64 = -19;
+/// Word 0 of a `ThreadId`.
+pub const THREAD_ID: i64 = -20;
 
 /// The number of words in a closure before its captured values.
 pub const CLOSURE_HEADER_WORDS: usize = 3;

@@ -786,6 +786,7 @@ dependencies = [
 name = "bhc-prelude"
 version = "0.2.29"
 dependencies = [
+ "bhc-rts-alloc",
  "criterion",
  "proptest",
 ]

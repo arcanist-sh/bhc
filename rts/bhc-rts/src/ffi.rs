@@ -10,7 +10,7 @@
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::{global, init_default, Profile, RuntimeConfig};
 use bhc_rts_alloc::object;
@@ -797,38 +797,25 @@ pub extern "C" fn bhc_get_profile() -> c_int {
 // Thunk Support
 // ============================================================================
 //
-// Thunks are heap objects representing suspended computations.
-//
-// Memory Layout:
-//   struct Thunk {
-//       i64   tag;       // -1 = thunk (unevaluated)
-//                        // -2 = blackhole (being evaluated)
-//                        // >= 0 = evaluated (value's ADT tag)
-//       ptr   payload;   // Unevaluated: pointer to eval function
-//                        // Evaluated: the actual value
-//       i64   env_size;  // Number of captured variables
-//       ptr[] env;       // Captured environment
-//   }
+// Thunks are heap objects representing suspended computations. Their
+// layout is in `bhc_rts_alloc::object`.
 //
 // Thunk evaluation:
-//   1. Check tag
-//   2. If tag == -1 (thunk): set tag to -2 (blackhole), call eval_fn(env)
-//   3. If tag == -2 (blackhole): error (circular reference)
-//   4. If tag >= 0: return payload (already evaluated)
+//   1. Check the state word
+//   2. THUNK: set it to BLACKHOLE, call the code on the captured values,
+//      store the value, set it to INDIRECTION
+//   3. BLACKHOLE: wait if another thread owns it, else `<<loop>>`
+//   4. INDIRECTION: return the stored value
+//   5. Anything else is a constructor tag: the object is already a value
 // ============================================================================
 
 /// Thunk tag constant: unevaluated thunk
-pub const BHC_TAG_THUNK: i64 = -1;
-
-/// Offset of the word that holds a blackholed thunk's owner, the thread that
-/// evaluates it. Before that it holds the environment size, which nothing
-/// reads.
-const THUNK_OWNER_OFFSET: usize = 16;
+pub const BHC_TAG_THUNK: i64 = object::THUNK;
 
 /// `obj` is a blackhole. Return once it is evaluated if another thread owns
 /// it; abort with `<<loop>>` if this thread does, or if it can never finish.
 fn wait_for_other_owner(obj: *mut u8, tag: &AtomicI64) {
-    let owner = unsafe { *(obj.add(THUNK_OWNER_OFFSET) as *const u64) };
+    let owner = unsafe { object::thunk_owner(obj) };
     let others_evaluate_it = crate::concurrent::forked()
         && owner != crate::concurrent::current_thread()
         && crate::concurrent::wait_for_blackhole(|| {
@@ -840,10 +827,10 @@ fn wait_for_other_owner(obj: *mut u8, tag: &AtomicI64) {
 }
 
 /// Thunk tag constant: blackhole (being evaluated, used to detect cycles)
-pub const BHC_TAG_BLACKHOLE: i64 = -2;
+pub const BHC_TAG_BLACKHOLE: i64 = object::BLACKHOLE;
 
 /// Thunk tag constant: indirection (evaluated thunk, result cached at offset 8)
-pub const BHC_TAG_INDIRECTION: i64 = -3;
+pub const BHC_TAG_INDIRECTION: i64 = object::INDIRECTION;
 
 /// Force evaluation of a thunk to Weak Head Normal Form (WHNF).
 ///
@@ -905,7 +892,7 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     // Tag and result-slot accesses are atomic: if a thunk is ever shared
     // across tasks, plain loads/stores on these words would be a data race
     // (UB), and a torn update could dispatch on a garbage tag.
-    let tag_atomic = unsafe { &*(obj as *const AtomicI64) };
+    let tag_atomic = unsafe { object::state(obj) };
     let mut tag = tag_atomic.load(Ordering::Acquire);
 
     // Another thread is evaluating this thunk (it was preempted in the
@@ -918,9 +905,8 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
 
     // Check for indirection (previously evaluated thunk) — must check before tag >= 0
     if tag == BHC_TAG_INDIRECTION {
-        // Return cached result from offset 8 (published with Release below)
-        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
-        return result_slot.load(Ordering::Acquire);
+        // Return the cached result (published with Release below)
+        return unsafe { object::thunk_slot(obj) }.load(Ordering::Acquire);
     }
 
     if tag >= 0 {
@@ -951,20 +937,19 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
 
         // Record the owner, which a thread that meets the blackhole checks.
         // The word held the environment size, which nothing reads.
-        unsafe { *(obj.add(THUNK_OWNER_OFFSET) as *mut u64) = crate::concurrent::current_thread() };
+        unsafe { object::set_thunk_owner(obj, crate::concurrent::current_thread()) };
 
-        // Read eval function pointer (at offset 8); we own the thunk after
-        // winning the CAS, so plain reads of its fields are fine
-        let eval_fn_ptr = unsafe { *(obj.add(8) as *const *const u8) };
-
-        // Get environment pointer (at offset 24)
-        let env_ptr = unsafe { obj.add(24) };
+        // The code, and the captured values it runs over. We own the thunk
+        // after winning the CAS, so nothing else writes the slot.
+        let result_slot = unsafe { object::thunk_slot(obj) };
+        let eval_fn_ptr = result_slot.load(Ordering::Relaxed).cast_const();
+        let env_ptr = unsafe { object::thunk_env(obj) };
 
         // A thunk tag with no eval function is not a thunk: something built
         // an object whose first word happens to equal the thunk tag, and
         // jumping through word 1 lands at address 0. Name it instead.
         if eval_fn_ptr.is_null() {
-            let w2 = unsafe { *(obj.add(16) as *const usize) };
+            let w2 = unsafe { object::thunk_owner(obj) };
             rts_abort(&format!(
                 "force: the object at {obj:p} is tagged as a thunk but has no eval \
                  function (word2={w2:#x}); it is most likely not a thunk"
@@ -997,7 +982,6 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
 
         // Publish the result, then the INDIRECTION tag (both Release so a
         // reader that Acquire-loads the tag sees the result pointer)
-        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
         result_slot.store(result, Ordering::Release);
         tag_atomic.store(BHC_TAG_INDIRECTION, Ordering::Release);
 
@@ -1044,7 +1028,7 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
         return 0;
     }
 
-    let tag = unsafe { *(obj as *const i64) };
+    let tag = unsafe { object::tag(obj) };
     if tag == BHC_TAG_THUNK {
         1
     } else {
@@ -1097,7 +1081,7 @@ fn pap_dbg() -> bool {
 }
 
 unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
-    let fn_ptr = unsafe { *(closure as *const *const u8) };
+    let fn_ptr = unsafe { object::closure_code(closure) };
     // BHC_DBG_PAP: the saturated call jumps through the closure's first word.
     // When that word is not a function pointer the jump lands somewhere
     // arbitrary and the crash report names only the caller, so print the
@@ -1109,7 +1093,7 @@ unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
         let t = fn_ptr as usize;
         let plausible =
             t != 0 && t % 4 == 0 && t > here.saturating_sub(0x400_0000) && t < here + 0x400_0000;
-        let arity = unsafe { *(closure.add(8) as *const i64) };
+        let arity = unsafe { object::closure_arity(closure) };
         let argdesc: Vec<String> = args
             .iter()
             .map(|a| {
@@ -1170,11 +1154,13 @@ unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
 ///
 /// `pap` must be a PAP built by `pap_create`.
 unsafe fn pap_resume(pap: *mut u8, new_args: &[*mut u8]) -> *mut u8 {
-    let callee = unsafe { *(pap.add(16) as *const *mut u8) };
-    let k = unsafe { *(pap.add(24) as *const i64) } as usize;
+    // A partial application captures its callee, the number of arguments
+    // held, and those arguments.
+    let callee = unsafe { object::closure_captured(pap, 0) };
+    let k = unsafe { object::closure_captured(pap, 1) } as usize;
     let mut args: Vec<*mut u8> = Vec::with_capacity(k + new_args.len());
     for i in 0..k {
-        args.push(unsafe { *(pap.add(32 + 8 * i) as *const *mut u8) });
+        args.push(unsafe { object::closure_captured(pap, 2 + i) });
     }
     args.extend_from_slice(new_args);
     unsafe { pap_call_closure(callee, &args) }
@@ -1260,14 +1246,14 @@ pub unsafe extern "C" fn bhc_bad_action(obj: *const u8, site: *const c_char) -> 
 }
 
 unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
-    let arity = unsafe { *(closure.add(8) as *const i64) } as usize;
+    let arity = unsafe { object::closure_arity(closure) };
     let k = args.len();
     // A wild `arity` means `closure` is not a closure: codegen under-applied
     // something that has no arity word, and word 1 is whatever that object
     // happens to store. Reporting only the derived `m` (as this used to) sends
     // you looking for a 50-billion-argument function. Report the object.
     if arity < k || arity - k > MAX_PAP_REMAINING {
-        let code = unsafe { *(closure as *const usize) };
+        let code = unsafe { object::closure_code(closure) } as usize;
         rts_abort(&format!(
             "PAP: applied {k} arg(s) to an object at {closure:p} whose arity word reads {arity} \
              (word0={code:#x}); it is most likely not a closure"
@@ -1281,7 +1267,7 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
             .filter(|(_, a)| (**a as usize) % 8 != 0 && !(*a).is_null())
             .map(|(i, a)| format!("arg{i}={:#x}", *a as usize))
             .collect();
-        let cfn = unsafe { *(closure as *const *const u8) };
+        let cfn = unsafe { object::closure_code(closure) };
         if !bad.is_empty() {
             // Name the generated function that built this PAP. The captured
             // argument is what later reaches a slot expecting a heap object,
@@ -1301,14 +1287,14 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
             }
         );
     }
-    let pap = bhc_alloc(32 + 8 * k);
+    // A closure taking the `m` missing arguments, over the callee, the
+    // number of arguments held, and those arguments.
+    let pap = bhc_alloc(object::closure_size(2 + k));
+    // SAFETY: `pap` has room for the two fixed captures and `k` arguments.
     unsafe {
-        *(pap as *mut *const u8) = pap_resume_table(m);
-        *(pap.add(8) as *mut i64) = m as i64;
-        *(pap.add(16) as *mut *mut u8) = closure;
-        *(pap.add(24) as *mut i64) = k as i64;
+        object::init_closure(pap, pap_resume_table(m), m, &[closure, k as *mut u8]);
         for (i, a) in args.iter().enumerate() {
-            *(pap.add(32 + 8 * i) as *mut *mut u8) = *a;
+            object::set_closure_captured(pap, 2 + i, *a);
         }
     }
     pap
@@ -3640,16 +3626,10 @@ fn exception_matches(exc: *mut u8, type_tag: i64) -> bool {
 /// Pointer to the allocated SomeException struct.
 #[no_mangle]
 pub extern "C" fn bhc_make_some_exception(type_tag: i64, payload: *mut u8) -> *mut u8 {
-    let layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        *(ptr as *mut i64) = type_tag;
-        *(ptr.add(8) as *mut *mut u8) = payload;
-    }
-    ptr
+    // An exception is laid out as a one-field constructor whose tag is its
+    // type tag.
+    // SAFETY: the payload is the caller's to vouch for.
+    unsafe { object::alloc_con(type_tag, &[payload]) }
 }
 
 /// The text of `userError msg`, as GHC shows it: `user error (msg)`.
@@ -3679,7 +3659,7 @@ pub extern "C" fn bhc_exc_get_tag(exc: *mut u8) -> i64 {
     if exc.is_null() {
         return EXC_TAG_SOME_EXCEPTION;
     }
-    unsafe { *(exc as *const i64) }
+    unsafe { object::tag(exc) }
 }
 
 /// Get the payload from a SomeException pointer.
@@ -3696,7 +3676,7 @@ pub extern "C" fn bhc_exc_get_payload(exc: *mut u8) -> *mut u8 {
     if exc.is_null() {
         return ptr::null_mut();
     }
-    unsafe { *(exc.add(8) as *const *mut u8) }
+    unsafe { object::field(exc, 0) }
 }
 
 /// Get a human-readable string representation of a SomeException.
@@ -5937,13 +5917,10 @@ fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
         }
     }
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
-        let obj = std::alloc::alloc(layout);
-        *(obj as *mut i64) = BHC_TAG_THUNK;
-        *(obj.add(8) as *mut *const u8) = resume as *const u8;
-        *(obj.add(16) as *mut i64) = 2;
-        *(obj.add(24) as *mut *mut u8) = Box::into_raw(Box::new(next)) as *mut u8;
-        *(obj.add(32) as *mut *const u8) = step;
+        let size = object::thunk_size(2);
+        let obj = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(size, 8));
+        let next = Box::into_raw(Box::new(next)) as *mut u8;
+        object::init_thunk(obj, resume as *const u8, &[next, step.cast_mut()]);
         obj
     }
 }
@@ -6000,13 +5977,11 @@ fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
         }
     }
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
-        let obj = std::alloc::alloc(layout);
-        *(obj as *mut i64) = BHC_TAG_THUNK;
-        *(obj.add(8) as *mut *const u8) = resume as *const u8;
-        *(obj.add(16) as *mut i64) = 2;
-        *(obj.add(24) as *mut i64) = next;
-        *(obj.add(32) as *mut i64) = step;
+        let size = object::thunk_size(2);
+        let obj = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(size, 8));
+        // The captured values are the two scalars themselves.
+        let captured = [next as usize as *mut u8, step as usize as *mut u8];
+        object::init_thunk(obj, resume as *const u8, &captured);
         obj
     }
 }

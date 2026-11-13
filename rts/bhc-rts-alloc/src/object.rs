@@ -464,6 +464,33 @@ pub unsafe fn bytes_len(object: *const u8) -> usize {
     unsafe { object.cast::<usize>().add(3).read() }
 }
 
+/// One more than the largest constructor tag [`is_first_word`] accepts. A
+/// type has far fewer constructors; a larger word 0 is an address or a
+/// number, not a tag.
+pub const TAG_LIMIT: i64 = 1 << 16;
+
+/// Whether `word` can be word 0 of a heap object: a constructor tag, a
+/// thunk state, or one of the kinds above.
+#[must_use]
+pub const fn is_first_word(word: i64) -> bool {
+    matches!(
+        word,
+        0..TAG_LIMIT
+            | THUNK
+            | BLACKHOLE
+            | INDIRECTION
+            | CLOSURE
+            | INTEGER
+            | IOREF
+            | MVAR
+            | CHAN
+            | THREAD_ID
+            | BYTES
+            | MAP
+            | SET
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +571,17 @@ mod tests {
             assert_eq!(bytes_len(object), 9);
         }
         assert_eq!(words, [BYTES as usize, 0x50, 3, 9]);
+    }
+
+    #[test]
+    fn word_0_is_a_tag_a_state_or_a_kind() {
+        for word in [0, 1, 300, THUNK, INDIRECTION, CLOSURE, INTEGER, BYTES, SET] {
+            assert!(is_first_word(word), "{word}");
+        }
+        // An address, a small negative number, an unused kind.
+        for word in [0x1_0000_0000, TAG_LIMIT, -5, -15, -24] {
+            assert!(!is_first_word(word), "{word}");
+        }
     }
 
     #[test]

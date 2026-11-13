@@ -103,6 +103,9 @@ pub unsafe extern "C" fn bhc_rts_init(argc: c_int, argv: *const *const c_char) {
 pub extern "C" fn bhc_shutdown() {
     // The global runtime will be shutdown on process exit
     // For explicit shutdown, we could clear the global mutex
+    if validate_objects() {
+        report_validation();
+    }
 }
 
 /// Exit the program with the given status code.
@@ -851,6 +854,9 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return obj;
     }
+    if validate_objects() {
+        validate_forced(obj);
+    }
 
     // Debug aid (BHC_TRAP_CODE_OBJ): deliberately SIGSEGV — while the
     // caller's registers are still intact for a crash-probe dump — when the
@@ -1070,6 +1076,66 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
 ///
 /// Cached: `pap_call_closure` is on the hot path of every partial application,
 /// and reading the environment there would allocate on each call.
+/// `BHC_VALIDATE_OBJECTS`: check that everything `bhc_force` is handed is a
+/// heap object, and say at exit what was not.
+fn validate_objects() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_VALIDATE_OBJECTS").is_some())
+}
+
+/// What `BHC_VALIDATE_OBJECTS` has seen forced.
+struct Validation {
+    /// Heap objects: word 0 is a tag, a thunk state or a kind.
+    objects: u64,
+    /// Words that cannot be the address of an object: a scalar in a value
+    /// word (#94).
+    scalars: u64,
+    /// Addresses whose word 0 is none of those, with a count per value of
+    /// that word.
+    unknown: u64,
+    unknown_words: std::collections::BTreeMap<i64, u64>,
+}
+
+static VALIDATION: std::sync::Mutex<Validation> = std::sync::Mutex::new(Validation {
+    objects: 0,
+    scalars: 0,
+    unknown: 0,
+    unknown_words: std::collections::BTreeMap::new(),
+});
+
+/// Classify a value handed to `bhc_force`.
+fn validate_forced(obj: *mut u8) {
+    let address = obj as usize;
+    let mut seen = VALIDATION.lock().unwrap_or_else(|e| e.into_inner());
+    // Below the first page, or not word-aligned: not an object's address.
+    if address < 0x1_0000 || address % object::WORD != 0 {
+        seen.scalars += 1;
+        return;
+    }
+    // SAFETY: `bhc_force` reads this word of whatever it is given.
+    let word = unsafe { object::tag(obj) };
+    if object::is_first_word(word) {
+        seen.objects += 1;
+    } else {
+        seen.unknown += 1;
+        *seen.unknown_words.entry(word).or_insert(0) += 1;
+    }
+}
+
+/// Print what `BHC_VALIDATE_OBJECTS` saw.
+fn report_validation() {
+    let seen = VALIDATION.lock().unwrap_or_else(|e| e.into_inner());
+    eprintln!(
+        "BHC_VALIDATE_OBJECTS: forced {} heap objects, {} scalars, {} objects with an unknown first word",
+        seen.objects, seen.scalars, seen.unknown
+    );
+    let mut words: Vec<(&i64, &u64)> = seen.unknown_words.iter().collect();
+    words.sort_by(|a, b| b.1.cmp(a.1));
+    for (word, count) in words.into_iter().take(10) {
+        eprintln!("  first word {word:#x}: {count}");
+    }
+}
+
 fn force_text_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_FORCETEXT").is_some())

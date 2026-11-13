@@ -1,0 +1,16 @@
+readFile: /nonexistent-bhc/a.txt: openFile: does not exist (No such file or directory)
+openFile: /nonexistent-bhc/b.txt: openFile: does not exist (No such file or directory)
+writeFile: /nonexistent-bhc/c.txt: withFile: does not exist (No such file or directory)
+appendFile: /nonexistent-bhc/d.txt: withFile: does not exist (No such file or directory)
+openFile then hGetLine: /nonexistent-bhc/e.txt: openFile: does not exist (No such file or directory)
+caught: /nonexistent-bhc/f.txt: openFile: does not exist (No such file or directory)
+one
+two
+one
+TIO.readFile: /nonexistent-bhc/g.txt: openFile: does not exist (No such file or directory)
+TIO.writeFile: /nonexistent-bhc/h.txt: withFile: does not exist (No such file or directory)
+TIO.appendFile: /nonexistent-bhc/i.txt: withFile: does not exist (No such file or directory)
+BS.readFile: /nonexistent-bhc/j.bin: openBinaryFile: does not exist (No such file or directory)
+BS.writeFile: /nonexistent-bhc/k.bin: withBinaryFile: does not exist (No such file or directory)
+BL.readFile: /nonexistent-bhc/l.bin: openBinaryFile: does not exist (No such file or directory)
+text

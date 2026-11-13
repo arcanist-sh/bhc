@@ -3287,8 +3287,60 @@ pub extern "C" fn bhc_string_length(s: *const c_char) -> i64 {
     unsafe { CStr::from_ptr(s) }.to_bytes().len() as i64
 }
 
+/// Raise the `IOException` of a file operation that failed, worded as GHC
+/// words it: `<path>: openFile: does not exist (No such file or directory)`.
+/// Returns what a runtime function returns while an exception is pending.
+fn throw_io_error(path: &str, operation: &str, error: &std::io::Error) -> *mut u8 {
+    use std::io::ErrorKind;
+    let kind = match error.kind() {
+        ErrorKind::NotFound => "does not exist",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::AlreadyExists => "already exists",
+        ErrorKind::InvalidData => "invalid argument",
+        _ => "failed",
+    };
+    // The system's own wording, without Rust's "(os error N)" suffix.
+    let detail = error.to_string();
+    let detail = detail.split(" (os error").next().unwrap_or(&detail);
+    let message = format!("{path}: {operation}: {kind} ({detail})");
+    let payload = CString::new(message).map_or(ptr::null_mut(), |cs| cs.into_raw());
+    bhc_throw(bhc_make_some_exception(
+        EXC_TAG_IO_EXCEPTION,
+        payload as *mut u8,
+    ))
+}
+
+/// [`throw_io_error`] for a library that has only the OS error code: the
+/// text library, which does not link the runtime, is handed this function
+/// at startup (`bhc_text_set_io_error_hook`).
+///
+/// # Safety
+///
+/// `path` and `operation` must be NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_throw_io_error_code(
+    path: *const c_char,
+    operation: *const c_char,
+    os_error: i32,
+) -> *mut u8 {
+    let text = |s: *const c_char| {
+        if s.is_null() {
+            String::new()
+        } else {
+            // SAFETY: the caller guarantees a NUL-terminated string.
+            unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
+        }
+    };
+    let error = if os_error == 0 {
+        std::io::Error::other("unknown error")
+    } else {
+        std::io::Error::from_raw_os_error(os_error)
+    };
+    throw_io_error(&text(path), &text(operation), &error)
+}
+
 /// Read entire file contents into a heap-allocated C string.
-/// Returns null on error.
+/// Raises an `IOException` if the file cannot be read.
 #[no_mangle]
 pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3297,17 +3349,12 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     match std::fs::read_to_string(path_str) {
         Ok(contents) => CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw()),
-        Err(e) => {
-            // Throw an IOException with the error message as payload
-            let msg = format!("{}: {}", path_str, e);
-            let payload = CString::new(msg).map_or(ptr::null_mut(), |cs| cs.into_raw());
-            let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, payload as *mut u8);
-            bhc_throw(exc) as *mut c_char
-        }
+        Err(e) => throw_io_error(path_str, "openFile", &e) as *mut c_char,
     }
 }
 
-/// Write a C string to a file, replacing its contents.
+/// Write a C string to a file, replacing its contents. Raises an
+/// `IOException` if the file cannot be written.
 #[no_mangle]
 pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
     if bhc_exception_pending() {
@@ -3318,10 +3365,13 @@ pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
     }
     let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
-    let _ = std::fs::write(p, c);
+    if let Err(e) = std::fs::write(p, c) {
+        throw_io_error(p, "withFile", &e);
+    }
 }
 
-/// Append a C string to a file, creating it if needed.
+/// Append a C string to a file, creating it if needed. Raises an
+/// `IOException` if the file cannot be written.
 #[no_mangle]
 pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
     if bhc_exception_pending() {
@@ -3333,12 +3383,13 @@ pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
     let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let appended = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(p)
-    {
-        let _ = f.write_all(c.as_bytes());
+        .and_then(|mut f| f.write_all(c.as_bytes()));
+    if let Err(e) = appended {
+        throw_io_error(p, "withFile", &e);
     }
 }
 
@@ -4498,7 +4549,7 @@ pub extern "C" fn bhc_stderr() -> *mut u8 {
 /// Open a file and return a handle pointer.
 ///
 /// Mode: 0=ReadMode, 1=WriteMode, 2=AppendMode, 3=ReadWriteMode.
-/// Returns null on error.
+/// Raises an `IOException` if the file cannot be opened.
 ///
 /// # Safety
 ///
@@ -4541,7 +4592,7 @@ pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut
             let handle = Box::new(BhcHandle::on_file(file, readable, writable));
             Box::into_raw(handle) as *mut u8
         }
-        Err(_) => ptr::null_mut(),
+        Err(e) => throw_io_error(path_str, "openFile", &e),
     }
 }
 

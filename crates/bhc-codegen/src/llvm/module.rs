@@ -239,6 +239,27 @@ impl<'ctx> LlvmModule<'ctx> {
                 CodegenError::Internal(format!("failed to build rts_init call: {:?}", e))
             })?;
 
+        // Hand the text library the runtime's way of raising an IOException
+        // (it does not link the runtime; see bhc-text's `io_error`).
+        let throw_io_type =
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false);
+        let throw_io = self
+            .module
+            .add_function("bhc_throw_io_error_code", throw_io_type, None);
+        let set_hook_type = void_type.fn_type(&[ptr_type.into()], false);
+        let set_hook = self
+            .module
+            .add_function("bhc_text_set_io_error_hook", set_hook_type, None);
+        self.builder
+            .build_call(
+                set_hook,
+                &[throw_io.as_global_value().as_pointer_value().into()],
+                "",
+            )
+            .map_err(|e| {
+                CodegenError::Internal(format!("failed to set the IO error hook: {e:?}"))
+            })?;
+
         // Run the body, and wait for it.
         let body_ptr = body_fn.as_global_value().as_pointer_value();
         self.builder

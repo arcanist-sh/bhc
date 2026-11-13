@@ -470,7 +470,7 @@ pub extern "C" fn bhc_lazy_bs_read_file(path_ptr: *const u8) -> *mut u8 {
             let empty = alloc_lazy_empty();
             alloc_lazy_chunk(strict, empty)
         }
-        Err(_) => alloc_lazy_empty(),
+        Err(e) => crate::io_error::raise(&path_str, "openBinaryFile", &e),
     }
 }
 
@@ -486,7 +486,9 @@ pub extern "C" fn bhc_lazy_bs_write_file(path_ptr: *const u8, lazy: *const u8) {
     } else {
         unsafe { flatten_to_bytes(lazy) }
     };
-    let _ = std::fs::write(&path_str, &bytes);
+    if let Err(e) = std::fs::write(&path_str, &bytes) {
+        crate::io_error::raise(&path_str, "withBinaryFile", &e);
+    }
 }
 
 /// Write a lazy ByteString to stdout.

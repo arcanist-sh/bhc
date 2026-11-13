@@ -60,7 +60,7 @@ pub unsafe extern "C" fn bhc_text_read_file(path: *const c_char) -> *mut u8 {
     };
     match fs::read(path_str) {
         Ok(bytes) => alloc_text_from_bytes(&bytes),
-        Err(_) => alloc_text_from_bytes(&[]),
+        Err(e) => crate::io_error::raise(path_str, "openFile", &e),
     }
 }
 
@@ -87,7 +87,9 @@ pub unsafe extern "C" fn bhc_text_write_file(path: *const c_char, text: *const u
     } else {
         text_bytes(text)
     };
-    let _ = fs::write(path_str, bytes);
+    if let Err(e) = fs::write(path_str, bytes) {
+        crate::io_error::raise(path_str, "withFile", &e);
+    }
 }
 
 /// Append Text to a file.
@@ -113,15 +115,14 @@ pub unsafe extern "C" fn bhc_text_append_file(path: *const c_char, text: *const 
     } else {
         text_bytes(text)
     };
-    let mut file = match fs::OpenOptions::new()
+    let appended = fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path_str)
-    {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let _ = file.write_all(bytes);
+        .and_then(|mut file| file.write_all(bytes));
+    if let Err(e) = appended {
+        crate::io_error::raise(path_str, "withFile", &e);
+    }
 }
 
 // ============================================================

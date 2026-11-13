@@ -530,7 +530,7 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     }
     match std::fs::read(&path_str) {
         Ok(bytes) => alloc_bs_from_bytes(&bytes),
-        Err(_) => bhc_bs_empty(),
+        Err(e) => crate::io_error::raise(&path_str, "openBinaryFile", &e),
     }
 }
 
@@ -583,7 +583,9 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
     } else {
         unsafe { bs_bytes(bs) }
     };
-    let _ = std::fs::write(&path_str, bytes);
+    if let Err(e) = std::fs::write(&path_str, bytes) {
+        crate::io_error::raise(&path_str, "withBinaryFile", &e);
+    }
 }
 
 // ============================================================

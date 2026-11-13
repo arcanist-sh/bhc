@@ -23,7 +23,6 @@ bhc-lower.workspace = true
 # External dependencies
 rustc-hash.workspace = true
 thiserror.workspace = true
-im.workspace = true           # Persistent hash maps for scoping
 petgraph.workspace = true     # SCC computation for binding groups
 indexmap.workspace = true     # Ordered maps for DefMap
 

@@ -2441,6 +2441,11 @@ fn test_tier3_bytestring_literals_native() {
 }
 
 #[test]
+fn test_tier3_fold_m_value_monads_native() {
+    run_native_test("tier3_io/fold_m_value_monads", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_io_errors_native() {
     run_native_test("tier3_io/file_io_errors", Profile::Default);
 }

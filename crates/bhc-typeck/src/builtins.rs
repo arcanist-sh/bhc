@@ -1085,14 +1085,19 @@ impl Builtins {
                 )
             }),
             ("foldM", {
-                // foldM :: (b -> a -> IO b) -> b -> [a] -> IO b
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                // foldM :: (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m b
+                // In any monad, not only IO: at `Maybe` or `Either` it stops
+                // at the first `Nothing`/`Left`. Typed at IO alone, a use at
+                // another monad left the result type unresolved. And over
+                // any container, not only a list: pandoc's Markdown writer
+                // folds a `Doc Text`.
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, star_to_star.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
+                let io_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
+                let list_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![t, m, a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(b.clone()),
@@ -7017,7 +7022,23 @@ impl Builtins {
                 ),
             );
 
-            // foldM :: (b -> a -> IO b) -> b -> [a] -> IO b
+            // foldM :: (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m b
+            let fold_m = TyVar::new(
+                BUILTIN_TYVAR_M,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let fold_t = TyVar::new(
+                BUILTIN_TYVAR_TRAV,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let fold_t_a = Ty::App(
+                Box::new(Ty::Var(fold_t.clone())),
+                Box::new(Ty::Var(a.clone())),
+            );
+            let fold_m_b = Ty::App(
+                Box::new(Ty::Var(fold_m.clone())),
+                Box::new(Ty::Var(b.clone())),
+            );
             let io_b = Ty::App(
                 Box::new(Ty::Con(self.io_con.clone())),
                 Box::new(Ty::Var(b.clone())),
@@ -7027,13 +7048,13 @@ impl Builtins {
                 DefId::new(11001),
                 Symbol::intern("foldM"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![fold_t, fold_m, a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(a.clone()), io_b.clone()),
+                            Ty::fun(Ty::Var(a.clone()), fold_m_b.clone()),
                         ),
-                        Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a2.clone(), io_b.clone())),
+                        Ty::fun(Ty::Var(b.clone()), Ty::fun(fold_t_a, fold_m_b)),
                     ),
                 ),
             );

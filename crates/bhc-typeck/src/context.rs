@@ -8278,6 +8278,11 @@ impl TyCtxt {
                         | "traverse"
                         | "for"
                         | "sequenceA"
+                        // `import Control.Monad (foldM)`: its scheme is the
+                        // real one (any monad). Typed fresh, the fold's monad
+                        // was unknown and `print (foldM f z xs)` at `Maybe`
+                        // printed an address.
+                        | "foldM"
                         // `import Data.List` re-exports these with their exact
                         // builtin schemes. Typed fresh, `print (sort xs)` at a
                         // user type could not see the element type and

@@ -16637,6 +16637,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 value_monad.is_none()
             }
             "return" | "pure" | "forever" => self.value_monad_of_ty(head_ty).is_none(),
+            // `foldM` at `Maybe` or `Either` is a value, computed where it
+            // stands (`lower_fold_m_short_circuit`); the monad is read off
+            // its function's type, `b -> a -> m b`.
+            "foldM" => !matches!(
+                match head_ty {
+                    Ty::Fun(function, _) => self.value_monad_of_ty(function),
+                    _ => None,
+                },
+                Some(ValueMonad::Maybe | ValueMonad::Either)
+            ),
             // `try` also names Parsec's, which is not an IO action.
             "try" => Self::try_result_in_io(head_ty).is_some(),
             _ => crate::is_io_primitive(name),
@@ -33562,6 +33572,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         init_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // At `Maybe` or `Either` the function's result is not the next
+        // accumulator but a value that may end the fold.
+        // The monad is read off the function's type, `b -> a -> m b`:
+        // `foldM`'s own result type can be an unresolved variable.
+        let function_ty = match &self.current_builtin_ty {
+            Ty::Fun(function, _) => function.as_ref().clone(),
+            _ => func_expr.ty(),
+        };
+        if matches!(
+            self.value_monad_of_ty(&function_ty)
+                .or_else(|| self.value_monad_of_ty(&self.current_builtin_ty)),
+            Some(ValueMonad::Maybe | ValueMonad::Either)
+        ) {
+            return self.lower_fold_m_short_circuit(func_expr, init_expr, list_expr);
+        }
         let func_val = self
             .lower_expr(func_expr)?
             .ok_or_else(|| CodegenError::Internal("foldM: no function".to_string()))?;
@@ -33674,6 +33699,139 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Exit: return final accumulator
         self.builder().position_at_end(loop_exit);
         Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// `foldM f z xs` at `Maybe` or `Either`.
+    ///
+    /// `f acc x` gives `Nothing`/`Left e`, which is the result of the whole
+    /// fold, or `Just acc'`/`Right acc'`, whose field is the next
+    /// accumulator; when the list ends the accumulator is wrapped again. The
+    /// loop written for `IO` took the wrapped value as the accumulator, so
+    /// the fold's result was whatever `f` last returned, read as a number.
+    ///
+    /// In both monads the constructor that ends the fold has tag 0 and the
+    /// one that continues has tag 1 and one field.
+    fn lower_fold_m_short_circuit(
+        &mut self,
+        func_expr: &Expr,
+        init_expr: &Expr,
+        list_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("foldM: {step}: {e:?}"))
+        };
+        let func_val = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no function".to_string()))?;
+        let func_ptr = self.value_to_ptr(func_val)?;
+        let init_val = self
+            .lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no init".to_string()))?;
+        let init_ptr = self.value_to_ptr(init_val)?;
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldM: no current block".to_string()))?;
+        let current_fn = entry_block
+            .get_parent()
+            .ok_or_else(|| CodegenError::Internal("foldM: no current function".to_string()))?;
+        let header = self.llvm_ctx.append_basic_block(current_fn, "foldm_header");
+        let body = self.llvm_ctx.append_basic_block(current_fn, "foldm_body");
+        let next = self.llvm_ctx.append_basic_block(current_fn, "foldm_next");
+        let finish = self.llvm_ctx.append_basic_block(current_fn, "foldm_finish");
+        let exit = self.llvm_ctx.append_basic_block(current_fn, "foldm_exit");
+
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(header);
+        let acc_phi = self
+            .builder()
+            .build_phi(ptr_type, "foldm_acc")
+            .map_err(|e| internal("phi", &e))?;
+        let list_phi = self
+            .builder()
+            .build_phi(ptr_type, "foldm_list")
+            .map_err(|e| internal("phi", &e))?;
+        // The rest of the list may be a thunk.
+        let list = self
+            .build_force(list_phi.as_basic_value())?
+            .into_pointer_value();
+        let list_tag = self.extract_adt_tag(list)?;
+        let is_empty = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                list_tag,
+                i64_type.const_zero(),
+                "foldm_done",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        self.builder()
+            .build_conditional_branch(is_empty, finish, body)
+            .map_err(|e| internal("branch", &e))?;
+
+        // Apply f; a `Nothing`/`Left` is the result.
+        self.builder().position_at_end(body);
+        let head_ptr = self.extract_adt_field(list, 2, 0)?;
+        let tail_ptr = self.extract_list_tail(list)?;
+        let step = self.call_fold_function(
+            func_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            head_ptr,
+            "foldM",
+        )?;
+        let step = self.build_force(step)?.into_pointer_value();
+        let step_tag = self.extract_adt_tag(step)?;
+        let stops = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                step_tag,
+                i64_type.const_zero(),
+                "foldm_stops",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldM: no insert block".to_string()))?;
+        self.builder()
+            .build_conditional_branch(stops, exit, next)
+            .map_err(|e| internal("branch", &e))?;
+
+        // Otherwise its field is the next accumulator.
+        self.builder().position_at_end(next);
+        let next_acc = self.extract_adt_field(step, 1, 0)?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&next_acc, next)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, next)]);
+
+        // The list ended: `Just acc` / `Right acc`.
+        self.builder().position_at_end(finish);
+        let wrapped = self.alloc_adt(1, 1)?;
+        self.store_adt_field(wrapped, 1, 0, acc_phi.as_basic_value())?;
+        self.builder()
+            .build_unconditional_branch(exit)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(exit);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "foldm_result")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[(&step, body_end), (&wrapped, finish)]);
+        Ok(Some(result.as_basic_value()))
     }
 
     /// Lower `foldM_ f acc list` — monadic left fold, discards result.

@@ -680,11 +680,26 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
     new_thread_id(id)
 }
 
+/// The `ThreadId` object of thread `id`: one object per thread.
+///
+/// `==` on two `ThreadId`s compares the two words, as it does for any type
+/// the compiler has no equality for. With a fresh object from every
+/// `myThreadId`, a thread's id was not equal to itself, and no `ThreadId`
+/// could be found in a list or a map.
 fn new_thread_id(id: u64) -> *mut u8 {
-    Box::into_raw(Box::new(ThreadIdObject {
-        kind: bhc_rts_alloc::object::THREAD_ID,
-        id,
-    })) as *mut u8
+    static OBJECTS: std::sync::Mutex<Option<std::collections::HashMap<u64, usize>>> =
+        std::sync::Mutex::new(None);
+    let mut objects = OBJECTS.lock().unwrap_or_else(|e| e.into_inner());
+    let object = *objects
+        .get_or_insert_with(std::collections::HashMap::new)
+        .entry(id)
+        .or_insert_with(|| {
+            Box::into_raw(Box::new(ThreadIdObject {
+                kind: bhc_rts_alloc::object::THREAD_ID,
+                id,
+            })) as usize
+        });
+    object as *mut u8
 }
 
 /// `myThreadId`.

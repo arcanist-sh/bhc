@@ -2451,6 +2451,11 @@ fn test_tier3_container_equality_native() {
 }
 
 #[test]
+fn test_tier3_thread_id_equality_native() {
+    run_native_test("tier3_io/thread_id_equality", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_io_errors_native() {
     run_native_test("tier3_io/file_io_errors", Profile::Default);
 }

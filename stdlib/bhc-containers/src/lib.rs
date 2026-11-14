@@ -329,6 +329,102 @@ pub unsafe extern "C" fn bhc_set_canon(set_ptr: *mut u8, kind: i64) {
 }
 
 // ========================================================================
+// Equality
+// ========================================================================
+
+/// The `Bool` an equality closure returned: the tag itself in the word
+/// (0 or 1), or a `Bool` object.
+unsafe fn closure_said_true(result: *mut u8) -> bool {
+    let word = result as usize;
+    if word <= 1 {
+        word != 0
+    } else {
+        // SAFETY: anything else is a pointer to a `Bool` constructor.
+        unsafe { bhc_rts_alloc::object::tag(result) != 0 }
+    }
+}
+
+/// `==` on two maps: the same keys, each with an equal value. Returns 1 or 0.
+///
+/// Keys are compared as the maps order them. Values are compared with
+/// `value_eq`, a closure taking two values, or as machine words when it is
+/// null (right for values that are scalars in the word).
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be null or a map from this crate, and
+/// `value_eq` null or a two-argument closure returning a `Bool`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_map_eq(map1: *mut u8, map2: *mut u8, value_eq: *mut u8) -> i64 {
+    let empty = RtsMap::new();
+    // SAFETY: the caller guarantees maps from this crate.
+    let (m1, m2) = unsafe {
+        (
+            if map1.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsMap>(map1)
+            },
+            if map2.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsMap>(map2)
+            },
+        )
+    };
+    if m1.len() != m2.len() {
+        return 0;
+    }
+    let equal = m1.iter().zip(m2.iter()).all(|((k1, v1), (k2, v2))| {
+        if k1.cmp(k2) != Ordering::Equal {
+            return false;
+        }
+        if value_eq.is_null() {
+            return v1 == v2;
+        }
+        // SAFETY: the caller guarantees a closure of two arguments.
+        unsafe {
+            let code: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+                std::mem::transmute(bhc_rts_alloc::object::closure_code(value_eq));
+            closure_said_true(code(value_eq, *v1, *v2))
+        }
+    });
+    i64::from(equal)
+}
+
+/// `==` on two sets: the same elements, compared as the sets order them.
+/// Returns 1 or 0.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be null or a set from this crate.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_set_eq(set1: *mut u8, set2: *mut u8) -> i64 {
+    let empty = RtsSet::new();
+    // SAFETY: the caller guarantees sets from this crate.
+    let (s1, s2) = unsafe {
+        (
+            if set1.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsSet>(set1)
+            },
+            if set2.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsSet>(set2)
+            },
+        )
+    };
+    let equal = s1.len() == s2.len()
+        && s1
+            .iter()
+            .zip(s2.iter())
+            .all(|(a, b)| a.cmp(b) == Ordering::Equal);
+    i64::from(equal)
+}
+
+// ========================================================================
 // Data.Map operations
 // ========================================================================
 

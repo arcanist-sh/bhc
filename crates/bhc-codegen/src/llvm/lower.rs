@@ -59402,6 +59402,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     return self.lower_text_comparison(op, args);
                 }
 
+                // A `Map` or `Set` is an RTS object too: equal when they hold
+                // the same entries, not when they are the same object.
+                if matches!(op, PrimOp::Eq | PrimOp::Ne) {
+                    let container_ty = match op_ty {
+                        Ty::Fun(a, _) if Self::container_of_ty(a).is_some() => {
+                            Some(a.as_ref().clone())
+                        }
+                        _ => [args[0].ty(), args[1].ty()]
+                            .into_iter()
+                            .find(|t| Self::container_of_ty(t).is_some()),
+                    };
+                    if let Some(ty) = container_ty {
+                        return self.lower_container_equality(op, args, &ty);
+                    }
+                }
+
                 // Tuples compare component-wise, each component by its type.
                 // Falling through compared the two tuple boxes by address, so
                 // `(3, 9) == (3, 9)` was False.
@@ -59943,6 +59959,128 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "arithmetic operations require matching numeric types".to_string(),
             )),
         }
+    }
+
+    /// Whether a type is a `Map`/`IntMap` (`Some(true)`) or a `Set`/`IntSet`
+    /// (`Some(false)`).
+    fn container_of_ty(ty: &Ty) -> Option<bool> {
+        match ty {
+            Ty::Con(con) => match con.name.as_str().rsplit('.').next().unwrap_or("") {
+                "Map" | "IntMap" => Some(true),
+                "Set" | "IntSet" => Some(false),
+                _ => None,
+            },
+            Ty::App(f, _) => Self::container_of_ty(f),
+            _ => None,
+        }
+    }
+
+    /// `==` or `/=` on two maps or two sets, through the RTS.
+    ///
+    /// They are objects the containers library owns, and `==` fell through
+    /// to the comparison of their addresses: two maps with the same entries
+    /// were unequal unless they were the same map.
+    ///
+    /// A map's values are compared with their type's own equality where
+    /// code generation has one to hand (`String`, a type with a derived
+    /// `Eq`), and as machine words otherwise, which is right for `Int`,
+    /// `Char` and the like but not for every boxed type.
+    fn lower_container_equality(
+        &mut self,
+        op: PrimOp,
+        args: &[&Expr],
+        container_ty: &Ty,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("container equality: {step}: {e:?}"))
+        };
+        let mut operands = Vec::with_capacity(2);
+        for arg in &args[..2] {
+            let value = self.lower_expr(arg)?.ok_or_else(|| {
+                CodegenError::Internal("container equality: no value".to_string())
+            })?;
+            let value = self.value_to_ptr(value)?;
+            operands.push(self.build_force(value.into())?.into_pointer_value());
+        }
+        let is_map = Self::container_of_ty(container_ty) == Some(true);
+        let flag = if is_map {
+            // The value type is the container's last argument.
+            let value_ty = match container_ty {
+                Ty::App(_, value) => Some(value.as_ref().clone()),
+                _ => None,
+            };
+            let value_eq = match value_ty {
+                Some(ty) if self.is_string_type(&ty) => {
+                    let f = match self.module.get_function("bhc_string_eq_closure") {
+                        Some(f) => f,
+                        None => self
+                            .module
+                            .add_function("bhc_string_eq_closure", ptr_type.fn_type(&[], false)),
+                    };
+                    self.builder()
+                        .build_call(f, &[], "string_eq")
+                        .map_err(|e| internal("string eq closure", &e))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::Internal("container equality: void".to_string())
+                        })?
+                        .into_pointer_value()
+                }
+                Some(Ty::Con(con)) => {
+                    let derived = self
+                        .derived_eq_fns
+                        .get(con.name.as_str())
+                        .and_then(|id| self.functions.get(id))
+                        .copied();
+                    match derived {
+                        Some(eq_fn) => self.code_closure(eq_fn)?,
+                        None => ptr_type.const_null(),
+                    }
+                }
+                _ => ptr_type.const_null(),
+            };
+            let eq_fn = match self.module.get_function("bhc_map_eq") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_map_eq",
+                    i64_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            self.builder()
+                .build_call(
+                    eq_fn,
+                    &[operands[0].into(), operands[1].into(), value_eq.into()],
+                    "map_eq",
+                )
+                .map_err(|e| internal("call", &e))?
+        } else {
+            let eq_fn = match self.module.get_function("bhc_set_eq") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_set_eq",
+                    i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            self.builder()
+                .build_call(eq_fn, &[operands[0].into(), operands[1].into()], "set_eq")
+                .map_err(|e| internal("call", &e))?
+        };
+        let flag = flag
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("container equality: void".to_string()))?
+            .into_int_value();
+        let result = if matches!(op, PrimOp::Ne) {
+            self.builder()
+                .build_xor(flag, i64_type.const_int(1, false), "container_ne")
+                .map_err(|e| internal("xor", &e))?
+        } else {
+            flag
+        };
+        Ok(Some(result.into()))
     }
 
     /// Lower a list comparison operation (== or /= for lists).

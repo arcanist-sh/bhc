@@ -519,6 +519,24 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
         ));
     }
 
+    // `ByteString`, strict or lazy, is packed the same way: its RTS entry
+    // points read a header too. A literal at `ByteString` stayed a char list
+    // and was read as one: `BS.length ("four" :: ByteString)` was 0 and
+    // `BC.putStrLn "lit"` printed an empty line.
+    if let Some(pack) = occ.as_ref().and_then(bytestring_pack_for) {
+        let pack = Var {
+            name: Symbol::intern(pack),
+            id: VarId::new(0),
+            ty: Ty::Error,
+            checked_ty: Ty::Error,
+        };
+        return Ok(core::Expr::App(
+            Box::new(core::Expr::Var(pack, span)),
+            Box::new(core_lit),
+            span,
+        ));
+    }
+
     // OverloadedStrings at a user type: dispatch its `IsString` instance's
     // `fromString`. BHC otherwise lowers every string literal to a `[Char]`
     // (identity `fromString`, right only for `String` itself), so a literal at
@@ -567,6 +585,30 @@ fn dispatchable_isstring_ty(ty: &Ty) -> bool {
         Ty::App(f, _) => dispatchable_isstring_ty(f),
         // `[Char]` and bare lists are the native string form.
         _ => false,
+    }
+}
+
+/// The builtin that packs a string literal into this type, when its head is
+/// a `ByteString`: strict (`ByteString`, `Data.ByteString.ByteString`) or
+/// lazy (`LazyByteString`, as the type checker names `Data.ByteString.Lazy`'s,
+/// or that module's name spelled out).
+fn bytestring_pack_for(ty: &Ty) -> Option<&'static str> {
+    match ty {
+        Ty::Con(c) => {
+            let n = c.name.as_str();
+            if n == "LazyByteString"
+                || n.ends_with(".LazyByteString")
+                || n.ends_with(".Lazy.ByteString")
+            {
+                Some("Data.ByteString.Lazy.pack")
+            } else if n == "ByteString" || n.ends_with(".ByteString") {
+                Some("Data.ByteString.pack")
+            } else {
+                None
+            }
+        }
+        Ty::App(f, _) => bytestring_pack_for(f),
+        _ => None,
     }
 }
 

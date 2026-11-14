@@ -2436,6 +2436,11 @@ fn test_tier3_io_error_predicates_native() {
 }
 
 #[test]
+fn test_tier3_bytestring_literals_native() {
+    run_native_test("tier3_io/bytestring_literals", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_io_errors_native() {
     run_native_test("tier3_io/file_io_errors", Profile::Default);
 }

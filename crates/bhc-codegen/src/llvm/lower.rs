@@ -519,6 +519,11 @@ pub struct Lowering<'ctx, 'm> {
     /// block in `IO`. The operator's own type can: `>>=` is a `Ty::Fun`, and
     /// those reach Core.
     current_builtin_ty: Ty,
+    /// The type checker's type for the same occurrence (`Var::checked_ty`).
+    /// `current_builtin_ty` can still hold type variables where this one is
+    /// resolved (`sortOn fst pairs`: the key type). Set for a saturated
+    /// builtin application; `Ty::Error` otherwise.
+    current_builtin_checked_ty: Ty,
     /// The arity a builtin expects of a function argument it is about to
     /// lower, keyed by the address of the argument's expression. `lower_expr`
     /// adapts the closure it produces for such an expression; see
@@ -643,6 +648,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            current_builtin_checked_ty: Ty::Error,
             expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -710,6 +716,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            current_builtin_checked_ty: Ty::Error,
             expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -6319,6 +6326,428 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 })
                 .collect(),
         ))
+    }
+
+    /// Whether values of `ty` are ordered by their contents rather than by
+    /// the word that represents them: lists and strings, tuples, `Text`,
+    /// `Integer`, `Double` and `Float`.
+    fn is_ordered_by_contents(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Tuple(_))
+            || self.is_list_type(ty)
+            || self.is_string_type(ty)
+            || self.is_text_type(ty)
+            || self.is_integer_type(ty)
+            || self.is_double_type(ty)
+            || self.is_float_type(ty)
+    }
+
+    /// The `Ordering` tag (0 = LT, 1 = EQ, 2 = GT) for "less" and "greater".
+    fn ordering_tag(
+        &self,
+        is_lt: IntValue<'ctx>,
+        is_gt: IntValue<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        let gt_or_eq = self
+            .builder()
+            .build_select(
+                is_gt,
+                i64_ty.const_int(2, false),
+                i64_ty.const_int(1, false),
+                "ord_gt_or_eq",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ordering select: {e:?}")))?
+            .into_int_value();
+        Ok(self
+            .builder()
+            .build_select(is_lt, i64_ty.const_zero(), gt_or_eq, "ord_tag")
+            .map_err(|e| CodegenError::Internal(format!("ordering select: {e:?}")))?
+            .into_int_value())
+    }
+
+    /// The ordering of two values of type `ty`, as an `Ordering` tag
+    /// (0 = LT, 1 = EQ, 2 = GT): the counterpart of [`Self::eq_by_type`].
+    ///
+    /// Lists and strings compare lexicographically, tuples component by
+    /// component, `Text` and `Integer` through the RTS, `Double` and `Float`
+    /// as numbers; anything else (Int, Char, unknown types) as a signed
+    /// machine word. Without this, `<` on two strings compared their
+    /// addresses and `compare` on them compared their first words.
+    fn ord_by_type(
+        &mut self,
+        ty: &Ty,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("ordering: {step}: {e:?}"))
+        };
+        let as_ptr = |this: &Self, v: BasicValueEnum<'ctx>| -> CodegenResult<PointerValue<'ctx>> {
+            let p = this.value_to_ptr(v)?;
+            Ok(this.build_force(p.into())?.into_pointer_value())
+        };
+        match ty {
+            Ty::Tuple(elems) => {
+                let arity = elems.len() as u32;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                // The first component that is not EQ decides.
+                let mut acc = i64_ty.const_int(1, false);
+                for (i, ety) in elems.iter().enumerate() {
+                    let lf = self.extract_adt_field(l, arity, i as u32)?;
+                    let rf = self.extract_adt_field(r, arity, i as u32)?;
+                    let component = self.ord_by_type(ety, lf.into(), rf.into())?;
+                    let undecided = self
+                        .builder()
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            acc,
+                            i64_ty.const_int(1, false),
+                            "tuple_ord_undecided",
+                        )
+                        .map_err(|e| internal("compare", &e))?;
+                    acc = self
+                        .builder()
+                        .build_select(undecided, component, acc, "tuple_ord")
+                        .map_err(|e| internal("select", &e))?
+                        .into_int_value();
+                }
+                Ok(acc)
+            }
+            t if self.is_text_type(t) => {
+                // bhc_text_compare answers the Ordering tag.
+                let cmp_fn = *self.functions.get(&VarId::new(1000205)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_compare not declared".to_string())
+                })?;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                Ok(self
+                    .builder()
+                    .build_call(cmp_fn, &[l.into(), r.into()], "text_ord")
+                    .map_err(|e| internal("text compare", &e))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("ordering: text compare void".to_string())
+                    })?
+                    .into_int_value())
+            }
+            t if self.is_list_type(t) || self.is_string_type(t) => {
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let elem = match t {
+                    Ty::List(e) => Some(e.as_ref().clone()),
+                    _ => None,
+                };
+                self.lower_list_ordering(l, r, elem)
+            }
+            t if self.is_integer_type(t) => {
+                // bhc_integer_compare answers the Ordering tag.
+                let cmp_fn = *self.functions.get(&VarId::new(1000617)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_integer_compare not declared".to_string())
+                })?;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                Ok(self
+                    .builder()
+                    .build_call(cmp_fn, &[l.into(), r.into()], "integer_ord")
+                    .map_err(|e| internal("integer compare", &e))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("ordering: integer compare void".to_string())
+                    })?
+                    .into_int_value())
+            }
+            t if self.is_double_type(t) || self.is_float_type(t) => {
+                // As numbers: the bits of a negative double order backwards.
+                let l = self.coerce_to_f64(lhs)?;
+                let r = self.coerce_to_f64(rhs)?;
+                let is_lt = self
+                    .builder()
+                    .build_float_compare(inkwell::FloatPredicate::OLT, l, r, "ord_flt")
+                    .map_err(|e| internal("compare", &e))?;
+                let is_gt = self
+                    .builder()
+                    .build_float_compare(inkwell::FloatPredicate::OGT, l, r, "ord_fgt")
+                    .map_err(|e| internal("compare", &e))?;
+                self.ordering_tag(is_lt, is_gt)
+            }
+            _ => {
+                let l = self.coerce_to_int(lhs)?;
+                let r = self.coerce_to_int(rhs)?;
+                let is_lt = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, l, r, "ord_lt")
+                    .map_err(|e| internal("compare", &e))?;
+                let is_gt = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::SGT, l, r, "ord_gt")
+                    .map_err(|e| internal("compare", &e))?;
+                self.ordering_tag(is_lt, is_gt)
+            }
+        }
+    }
+
+    /// The lexicographic ordering of two lists, as an `Ordering` tag: the
+    /// first pair of elements that differ decides, and a list that ends
+    /// first is the lesser. Elements compare by `elem_ty`
+    /// ([`Self::ord_by_type`]), or as signed words when it is unknown.
+    fn lower_list_ordering(
+        &mut self,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+        elem_ty: Option<Ty>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_ty = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("list ordering: {step}: {e:?}"))
+        };
+        let entry = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("list ordering: no block".to_string()))?;
+        let current_fn = entry
+            .get_parent()
+            .ok_or_else(|| CodegenError::Internal("list ordering: no function".to_string()))?;
+        let header = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_loop");
+        let left_ended = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_left_ended");
+        let left_more = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_left_more");
+        let heads = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_heads");
+        let next = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_next");
+        let done = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "list_ord_done");
+
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(header);
+        let left_phi = self
+            .builder()
+            .build_phi(ptr_type, "list_ord_left")
+            .map_err(|e| internal("phi", &e))?;
+        let right_phi = self
+            .builder()
+            .build_phi(ptr_type, "list_ord_right")
+            .map_err(|e| internal("phi", &e))?;
+        // A tail may be an unevaluated thunk.
+        let left = self
+            .build_force(left_phi.as_basic_value())?
+            .into_pointer_value();
+        let right = self
+            .build_force(right_phi.as_basic_value())?
+            .into_pointer_value();
+        let zero = i64_ty.const_zero();
+        let left_tag = self.extract_adt_tag(left)?;
+        let right_tag = self.extract_adt_tag(right)?;
+        let left_nil = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, zero, "left_nil")
+            .map_err(|e| internal("compare", &e))?;
+        let right_nil = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, right_tag, zero, "right_nil")
+            .map_err(|e| internal("compare", &e))?;
+        self.builder()
+            .build_conditional_branch(left_nil, left_ended, left_more)
+            .map_err(|e| internal("branch", &e))?;
+
+        // The left list ended: EQ if the right did too, else LT.
+        self.builder().position_at_end(left_ended);
+        let ended_tag = self
+            .builder()
+            .build_select(right_nil, i64_ty.const_int(1, false), zero, "ended_tag")
+            .map_err(|e| internal("select", &e))?
+            .into_int_value();
+        self.builder()
+            .build_unconditional_branch(done)
+            .map_err(|e| internal("branch", &e))?;
+
+        // The left list goes on: GT if the right ended.
+        self.builder().position_at_end(left_more);
+        self.builder()
+            .build_conditional_branch(right_nil, done, heads)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(heads);
+        let left_head = self.extract_adt_field(left, 2, 0)?;
+        let right_head = self.extract_adt_field(right, 2, 0)?;
+        let head_tag = match &elem_ty {
+            Some(ety) => self.ord_by_type(ety, left_head.into(), right_head.into())?,
+            None => {
+                let l = self.scalar_from_word(left_head, "left_head")?;
+                let r = self.scalar_from_word(right_head, "right_head")?;
+                let is_lt = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, l, r, "head_lt")
+                    .map_err(|e| internal("compare", &e))?;
+                let is_gt = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::SGT, l, r, "head_gt")
+                    .map_err(|e| internal("compare", &e))?;
+                self.ordering_tag(is_lt, is_gt)?
+            }
+        };
+        // The comparison of the heads may have added blocks of its own.
+        let heads_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("list ordering: no block".to_string()))?;
+        let heads_equal = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                head_tag,
+                i64_ty.const_int(1, false),
+                "heads_equal",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        self.builder()
+            .build_conditional_branch(heads_equal, next, done)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(next);
+        let left_tail = self.extract_list_tail(left)?;
+        let right_tail = self.extract_list_tail(right)?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+        left_phi.add_incoming(&[(&lhs, entry), (&left_tail, next)]);
+        right_phi.add_incoming(&[(&rhs, entry), (&right_tail, next)]);
+
+        self.builder().position_at_end(done);
+        let result = self
+            .builder()
+            .build_phi(i64_ty, "list_ord")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[
+            (&ended_tag, left_ended),
+            (&i64_ty.const_int(2, false), left_more),
+            (&head_tag, heads_end),
+        ]);
+        Ok(result.as_basic_value().into_int_value())
+    }
+
+    /// `<`, `<=`, `>` or `>=` from an `Ordering` tag, as an i64 0/1.
+    fn ordering_satisfies(&self, op: PrimOp, tag: IntValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        let (predicate, against) = match op {
+            PrimOp::Lt => (inkwell::IntPredicate::EQ, 0),
+            PrimOp::Le => (inkwell::IntPredicate::NE, 2),
+            PrimOp::Gt => (inkwell::IntPredicate::EQ, 2),
+            PrimOp::Ge => (inkwell::IntPredicate::NE, 0),
+            other => {
+                return Err(CodegenError::Internal(format!(
+                    "ordering_satisfies: {other:?} is not an ordering operator"
+                )))
+            }
+        };
+        let holds = self
+            .builder()
+            .build_int_compare(
+                predicate,
+                tag,
+                i64_ty.const_int(against, false),
+                "ord_holds",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ordering compare: {e:?}")))?;
+        self.builder()
+            .build_int_z_extend(holds, i64_ty, "ord_holds_i64")
+            .map_err(|e| CodegenError::Internal(format!("ordering extend: {e:?}")))
+    }
+
+    /// A comparison closure, `(a, b) -> Ordering`, for values of `ty`, for
+    /// the RTS functions that take one (`bhc_list_sort_by`, …).
+    fn ordering_closure(&mut self, ty: &Ty) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let saved_block = self.builder().get_insert_block();
+        let name = format!("{}_ord", self.next_closure_name());
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let compare_fn = self.module.add_internal_function(&name, fn_type);
+        let entry = self.llvm_context().append_basic_block(compare_fn, "entry");
+        self.builder().position_at_end(entry);
+        let operand = |index: u32| {
+            compare_fn.get_nth_param(index).ok_or_else(|| {
+                CodegenError::Internal("ordering closure: missing parameter".to_string())
+            })
+        };
+        let tag = self.ord_by_type(ty, operand(1)?, operand(2)?)?;
+        let ordering = self
+            .allocate_ordering_adt(tag, "closure_ordering")?
+            .ok_or_else(|| CodegenError::Internal("ordering closure: no value".to_string()))?;
+        let ordering = self.value_to_ptr(ordering)?;
+        self.builder()
+            .build_return(Some(&ordering))
+            .map_err(|e| CodegenError::Internal(format!("ordering closure return: {e:?}")))?;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        self.alloc_closure_with_arity(compare_fn.as_global_value().as_pointer_value(), &[], 2)
+    }
+
+    /// A comparison closure, `(a, b) -> Ordering`, that orders two values
+    /// by the keys `key` gives them, the keys being of type `key_ty`.
+    fn ordering_closure_on(
+        &mut self,
+        key: PointerValue<'ctx>,
+        key_ty: &Ty,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let saved_block = self.builder().get_insert_block();
+        let name = format!("{}_ord_on", self.next_closure_name());
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let compare_fn = self.module.add_internal_function(&name, fn_type);
+        let entry = self.llvm_context().append_basic_block(compare_fn, "entry");
+        self.builder().position_at_end(entry);
+        let param = |index: u32| {
+            compare_fn
+                .get_nth_param(index)
+                .map(BasicValueEnum::into_pointer_value)
+                .ok_or_else(|| {
+                    CodegenError::Internal("ordering closure: missing parameter".to_string())
+                })
+        };
+        // The key function is the closure's one captured value.
+        let key_fn = self.extract_closure_env_elem(param(0)?, 1, 0)?;
+        let mut keys = Vec::with_capacity(2);
+        for index in [1, 2] {
+            let key = self
+                .apply_closure_values(key_fn, &[param(index)?], false)?
+                .ok_or_else(|| {
+                    CodegenError::Internal("ordering closure: key is void".to_string())
+                })?;
+            keys.push(key);
+        }
+        let tag = self.ord_by_type(key_ty, keys[0], keys[1])?;
+        let ordering = self
+            .allocate_ordering_adt(tag, "closure_ordering")?
+            .ok_or_else(|| CodegenError::Internal("ordering closure: no value".to_string()))?;
+        let ordering = self.value_to_ptr(ordering)?;
+        self.builder()
+            .build_return(Some(&ordering))
+            .map_err(|e| CodegenError::Internal(format!("ordering closure return: {e:?}")))?;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        self.alloc_closure_with_arity(
+            compare_fn.as_global_value().as_pointer_value(),
+            &[(VarId::new(900_002), key.into())],
+            2,
+        )
     }
 
     /// Structural equality of two values of type `ty`, as an i64 0/1.
@@ -28769,6 +29198,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             return self.allocate_ordering_adt(tag.into_int_value(), "integer_compare");
         }
 
+        // A type ordered by its contents: lists and strings, tuples, Text.
+        // The fallback below compares two words, which for these is two
+        // addresses (`compare "b" "a"` was LT).
+        let operand_ty = match &self.current_builtin_ty {
+            Ty::Fun(a, _) if self.is_ordered_by_contents(a) => Some(a.as_ref().clone()),
+            _ => [a_expr.ty(), b_expr.ty()]
+                .into_iter()
+                .find(|t| self.is_ordered_by_contents(t)),
+        };
+        if let Some(ty) = operand_ty.filter(|t| {
+            matches!(t, Ty::Tuple(_))
+                || self.is_list_type(t)
+                || self.is_string_type(t)
+                || self.is_text_type(t)
+        }) {
+            let a_val = self
+                .lower_expr(a_expr)?
+                .ok_or_else(|| CodegenError::Internal("compare: no lhs".to_string()))?;
+            let b_val = self
+                .lower_expr(b_expr)?
+                .ok_or_else(|| CodegenError::Internal("compare: no rhs".to_string()))?;
+            let tag = self.ord_by_type(&ty, a_val, b_val)?;
+            return self.allocate_ordering_adt(tag, "compare_by_contents");
+        }
+
         // Integer comparison fallback
         let a_val = self
             .lower_expr(a_expr)?
@@ -36731,13 +37185,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// These builtins otherwise compare raw words, which for a boxed value is
     /// its address: `sort [Hi, Lo, Mid]` came back in allocation order.
     fn derived_ord_list_comparator(&mut self) -> CodegenResult<Option<PointerValue<'ctx>>> {
-        let elem = match &self.current_builtin_ty {
-            Ty::Fun(a, _) => match a.as_ref() {
-                Ty::List(e) => e.as_ref().clone(),
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
+        // The element type of the list the builtin takes, from a type of
+        // the builtin.
+        fn elem_of(builtin: &Ty) -> Option<Ty> {
+            let Ty::Fun(list, _) = builtin else {
+                return None;
+            };
+            match list.as_ref() {
+                Ty::List(e) => Some(e.as_ref().clone()),
+                // `maximum :: t a -> a` at a list: the container is `[]`
+                // applied to the element.
+                Ty::App(f, e) => match f.as_ref() {
+                    Ty::Con(c) if matches!(c.name.as_str(), "[]" | "List") => {
+                        Some(e.as_ref().clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        // Prefer a type that names the element over one that leaves it a
+        // variable.
+        let candidates = [
+            elem_of(&self.current_builtin_ty),
+            elem_of(&self.current_builtin_checked_ty),
+        ];
+        let Some(elem) = candidates
+            .iter()
+            .flatten()
+            .find(|e| !matches!(e, Ty::Var(_) | Ty::Error))
+            .or_else(|| candidates.iter().flatten().next())
+            .cloned()
+        else {
+            return Ok(None);
         };
+        // Elements ordered by their contents (strings, lists, tuples, Text,
+        // Integer, Double): `sort ["pear", "apple"]` left them in place, as
+        // it compared addresses.
+        if self.is_ordered_by_contents(&elem) {
+            return Ok(Some(self.ordering_closure(&elem)?));
+        }
         let Ty::Con(con) = elem else {
             return Ok(None);
         };
@@ -40603,6 +41090,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("sortOn: no list".to_string()))?;
         let list_ptr = self.value_to_ptr(list_val)?;
+        // A key ordered by its contents (a string, a tuple, ...): the RTS's
+        // `sortOn` orders keys as words, which for these is by address. Sort
+        // by a comparison of the keys instead.
+        // sortOn :: (a -> key) -> [a] -> [a], by whichever of the builtin's
+        // two types names the key.
+        let key_of = |sort_on: &Ty| match sort_on {
+            Ty::Fun(key_fn, _) => match key_fn.as_ref() {
+                Ty::Fun(_, key) => Some(key.as_ref().clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let key_ty = [
+            key_of(&self.current_builtin_ty),
+            key_of(&self.current_builtin_checked_ty),
+            match key_expr.ty() {
+                Ty::Fun(_, key) => Some(key.as_ref().clone()),
+                _ => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .find(|key| self.is_ordered_by_contents(key));
+        if let Some(key_ty) = key_ty {
+            let cmp = self.ordering_closure_on(key_ptr, &key_ty)?;
+            let sort_by = *self.functions.get(&VarId::new(1000171)).ok_or_else(|| {
+                CodegenError::Internal("bhc_list_sort_by not declared".to_string())
+            })?;
+            return Ok(self
+                .builder()
+                .build_call(
+                    sort_by,
+                    &[cmp.into(), list_ptr.into()],
+                    "sort_on_by_contents",
+                )
+                .map_err(|e| CodegenError::Internal(format!("sortOn call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic());
+        }
         let rts_fn = self
             .functions
             .get(&VarId::new(1000550))
@@ -59473,6 +59999,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                 }
 
+                // `<`, `<=`, `>`, `>=` on tuples: by the first component that
+                // differs. They compared the two boxes' addresses.
+                if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+                    let tuple_ty = match op_ty {
+                        Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Tuple(_)) => {
+                            Some(a.as_ref().clone())
+                        }
+                        _ => [args[0].ty(), args[1].ty()]
+                            .into_iter()
+                            .find(|t| matches!(t, Ty::Tuple(_)))
+                            // Types erased (eager model): a literal tuple on
+                            // either side still gives the components.
+                            .or_else(|| args.iter().find_map(|a| self.literal_tuple_ty(a))),
+                    };
+                    if let Some(tuple_ty) = tuple_ty {
+                        let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
+                            CodegenError::Internal("tuple ordering: no lhs value".to_string())
+                        })?;
+                        let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
+                            CodegenError::Internal("tuple ordering: no rhs value".to_string())
+                        })?;
+                        let tag = self.ord_by_type(&tuple_ty, lhs, rhs)?;
+                        return Ok(Some(self.ordering_satisfies(op, tag)?.into()));
+                    }
+                }
+
                 // Tuples compare component-wise, each component by its type.
                 // Falling through compared the two tuple boxes by address, so
                 // `(3, 9) == (3, 9)` was False.
@@ -59548,6 +60100,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         }
                         .or_else(|| elem_of(&args[0].ty()))
                         .or_else(|| elem_of(&args[1].ty()));
+                        // `<` and the like are lexicographic; the walk
+                        // below only decides equality.
+                        if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+                            let l = self.build_force(lhs)?.into_pointer_value();
+                            let r = self.build_force(rhs)?.into_pointer_value();
+                            let tag = self.lower_list_ordering(l, r, elem_ty)?;
+                            return Ok(Some(self.ordering_satisfies(op, tag)?.into()));
+                        }
                         return self.lower_list_comparison_of(op, lhs, rhs, elem_ty);
                     }
                     return self.lower_comparison(op, lhs, rhs);
@@ -60198,21 +60758,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .basic()
                     .ok_or_else(|| CodegenError::Internal("text cmp returned void".to_string()))?
                     .into_int_value();
-                let pred = match op {
-                    PrimOp::Lt => inkwell::IntPredicate::SLT,
-                    PrimOp::Le => inkwell::IntPredicate::SLE,
-                    PrimOp::Gt => inkwell::IntPredicate::SGT,
-                    _ => inkwell::IntPredicate::SGE,
-                };
-                let bit = self
-                    .builder()
-                    .build_int_compare(pred, res, i64_type.const_zero(), "text_ord")
-                    .map_err(|e| CodegenError::Internal(format!("text ord cmp: {:?}", e)))?;
-                let out = self
-                    .builder()
-                    .build_int_z_extend(bit, i64_type, "text_ord_i64")
-                    .map_err(|e| CodegenError::Internal(format!("text ord zext: {:?}", e)))?;
-                Ok(Some(out.into()))
+                // `bhc_text_compare` answers an `Ordering` tag (0 = LT,
+                // 1 = EQ, 2 = GT). It was read here as a sign, against zero,
+                // so `a < b` was never true and `a >= b` always was.
+                Ok(Some(self.ordering_satisfies(op, res)?.into()))
             }
             _ => Err(CodegenError::Internal(
                 "non-comparison op in text comparison".to_string(),
@@ -61006,9 +61555,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     return Ok(Some(self.build_io_action(&full_app)?.into()));
                 }
             }
+            // The head's checked type, for the builtins that need a type
+            // the first one leaves as a variable.
+            let mut head = &full_app;
+            while let Expr::App(inner, _, _) | Expr::TyApp(inner, _, _) = head {
+                head = inner.as_ref();
+            }
+            let checked_ty = match head {
+                Expr::Var(var, _) => var.checked_ty.clone(),
+                _ => Ty::Error,
+            };
             let saved = std::mem::replace(&mut self.current_builtin_ty, head_ty);
+            let saved_checked = std::mem::replace(&mut self.current_builtin_checked_ty, checked_ty);
             let result = self.lower_builtin(name, &builtin_args);
             self.current_builtin_ty = saved;
+            self.current_builtin_checked_ty = saved_checked;
             return result;
         }
 

@@ -1,0 +1,13 @@
+(True,False,True,False,True,True,False)
+(LT,GT,EQ,LT)
+("banana","apple",["apple","fig","pear"])
+(True,True,True,LT)
+first half
+(True,False,True,True)
+([(1,"z"),(2,"a"),(2,"b")],[[2],[3,0],[3,1]])
+([-2.5,-1.5,0.0,2.5],-1.5,-2.5)
+("pear","apple",(1,"b"))
+(["apple","fig","pear"],True,GT)
+([(2,"a"),(1,"b")],[("a",2),("b",1)])
+([P "a" 1,P "a" 2,P "b" 1],True,GT)
+([1,2,3],"ehllo",True,[5,10000000000000000000,100000000000000000000])

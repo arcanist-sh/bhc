@@ -54729,6 +54729,61 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .then_some(t)
     }
 
+    /// An operator applied to fewer arguments than it takes, as a lambda
+    /// over the rest: `(op) a` becomes `let p = a in \\q -> op p q`, with `p`
+    /// and `q` typed from the operator's type at this occurrence. `None`
+    /// when that type does not name each parameter.
+    ///
+    /// The given arguments are bound once, outside the lambda, so they are
+    /// evaluated once however often the lambda is applied.
+    fn eta_expand_operator(var: &Var, args: &[&Expr], arity: usize) -> Option<Expr> {
+        if args.is_empty() || args.len() >= arity {
+            return None;
+        }
+        let mut param_tys = Vec::with_capacity(arity);
+        let mut ty = &var.ty;
+        for _ in 0..arity {
+            let Ty::Fun(param, rest) = ty else {
+                return None;
+            };
+            if matches!(param.as_ref(), Ty::Error) {
+                return None;
+            }
+            param_tys.push(param.as_ref().clone());
+            ty = rest;
+        }
+        let span = bhc_span::Span::default();
+        let params: Vec<Var> = param_tys
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| Var {
+                name: Symbol::intern(&format!("$operand_{index}")),
+                id: VarId::new(usize::MAX - 60 - index),
+                ty,
+                checked_ty: Ty::Error,
+            })
+            .collect();
+        let mut body = Expr::Var(var.clone(), span);
+        for param in &params {
+            body = Expr::App(
+                Box::new(body),
+                Box::new(Expr::Var(param.clone(), span)),
+                span,
+            );
+        }
+        for param in params[args.len()..].iter().rev() {
+            body = Expr::Lam(param.clone(), Box::new(body), span);
+        }
+        for (param, arg) in params.iter().zip(args).rev() {
+            body = Expr::Let(
+                Box::new(Bind::NonRec(param.clone(), Box::new((*arg).clone()))),
+                Box::new(body),
+                span,
+            );
+        }
+        Some(body)
+    }
+
     /// `\\x y -> x op y` for a bare `+`/`-`/`*` typed at `Integer`, `Double`
     /// or `Float` (`foldr (+) 0 xs`): a generic wrapper closure has no operand
     /// types and did machine-int arithmetic on bignums and doubles.
@@ -61113,6 +61168,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             )));
                         }
                     }
+                }
+
+                // A primitive operator applied to fewer arguments than it
+                // takes, in prefix form: `(+) 1`, `(==) k`. The saturated
+                // application is a primop and the bare operator a closure;
+                // this one was neither, and ran as "stub: + not implemented".
+                // Make the operator's closure, as for the bare operator, and
+                // apply it: the application builds a partial application.
+                if let Some((_, arity)) = self.primitive_op_info(name) {
+                    // With the operator's type, as the lambda it stands for:
+                    // the saturated application inside it is lowered by the
+                    // operands' types, which the untyped closure cannot do
+                    // (`(<) "b"` compared two strings' addresses).
+                    // Only for the comparisons: an arithmetic operator's
+                    // closure is already typed where it matters
+                    // (`typed_arith_lambda`), and its occurrence type can be
+                    // looser than its operands (`(/) 10` at `Double`).
+                    let is_comparison = matches!(name, "==" | "/=" | "<" | "<=" | ">" | ">=");
+                    if let Some(lam) = is_comparison
+                        .then(|| Self::eta_expand_operator(var, &args, arity as usize))
+                        .flatten()
+                    {
+                        return self.lower_expr(&lam);
+                    }
+                    let operator = self.lower_expr(current)?.ok_or_else(|| {
+                        CodegenError::Internal(format!("operator `{name}` has no value"))
+                    })?;
+                    return self.lower_closure_call(operator, &args);
                 }
 
                 {

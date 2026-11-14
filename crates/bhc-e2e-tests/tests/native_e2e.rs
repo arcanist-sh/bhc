@@ -2726,6 +2726,14 @@ fn test_tier2_hof_curried_function_native() {
 }
 
 #[test]
+fn test_tier2_operator_partial_application_native() {
+    run_native_test(
+        "tier2_functions/operator_partial_application",
+        Profile::Default,
+    );
+}
+
+#[test]
 fn test_tier2_map_runtime_string_keys_native() {
     run_native_test("tier2_functions/map_runtime_string_keys", Profile::Default);
 }

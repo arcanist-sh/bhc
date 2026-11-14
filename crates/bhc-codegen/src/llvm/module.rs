@@ -181,13 +181,21 @@ impl<'ctx> LlvmModule<'ctx> {
             .map_err(|e| CodegenError::Internal(format!("failed to build call: {:?}", e)))?;
 
         // Closure IO model: `main` evaluates to an action closure; run it by
-        // calling its code (word 0) with the closure as environment.
+        // calling its code with the closure as environment. The code is the
+        // word after the kind word (`bhc_rts_alloc::object`).
         if crate::io_closure_mode() {
             if let Some(action) = main_value.try_as_basic_value().basic() {
                 let action = action.into_pointer_value();
+                let llvm_ctx = self.type_mapper.context();
+                let closure_header =
+                    llvm_ctx.struct_type(&[llvm_ctx.i64_type().into(), ptr_type.into()], false);
+                let code_slot = self
+                    .builder
+                    .build_struct_gep(closure_header, action, 1, "main_code_slot")
+                    .map_err(|e| CodegenError::Internal(format!("main action gep: {:?}", e)))?;
                 let code = self
                     .builder
-                    .build_load(ptr_type, action, "main_code")
+                    .build_load(ptr_type, code_slot, "main_code")
                     .map_err(|e| CodegenError::Internal(format!("main action load: {:?}", e)))?
                     .into_pointer_value();
                 let run_type = ptr_type.fn_type(&[ptr_type.into()], false);
@@ -229,6 +237,27 @@ impl<'ctx> LlvmModule<'ctx> {
             .build_call(rts_init, &[argc.into(), argv.into()], "")
             .map_err(|e| {
                 CodegenError::Internal(format!("failed to build rts_init call: {:?}", e))
+            })?;
+
+        // Hand the text library the runtime's way of raising an IOException
+        // (it does not link the runtime; see bhc-text's `io_error`).
+        let throw_io_type =
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false);
+        let throw_io = self
+            .module
+            .add_function("bhc_throw_io_error_code", throw_io_type, None);
+        let set_hook_type = void_type.fn_type(&[ptr_type.into()], false);
+        let set_hook = self
+            .module
+            .add_function("bhc_text_set_io_error_hook", set_hook_type, None);
+        self.builder
+            .build_call(
+                set_hook,
+                &[throw_io.as_global_value().as_pointer_value().into()],
+                "",
+            )
+            .map_err(|e| {
+                CodegenError::Internal(format!("failed to set the IO error hook: {e:?}"))
             })?;
 
         // Run the body, and wait for it.

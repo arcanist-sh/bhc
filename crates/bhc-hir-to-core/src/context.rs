@@ -76,6 +76,11 @@ pub struct LowerContext {
     /// Counter for generating fresh variable names.
     fresh_counter: u32,
 
+    /// The data types and newtypes of this module that derive `Read`, by
+    /// name: what `read` at one of them is described from
+    /// ([`crate::read_desc`]).
+    pub(crate) read_shapes: FxHashMap<Symbol, crate::read_desc::ReadShape>,
+
     /// Mapping from HIR `DefIds` to Core variables.
     var_map: FxHashMap<DefId, Var>,
 
@@ -93,6 +98,11 @@ pub struct LowerContext {
     /// call at a user-defined monad; never used to type a Core node. Empty
     /// unless threaded from `TypedModule::resolved_expr_types`.
     resolved_expr_types: crate::ExprTypeMap,
+
+    /// The type of each pattern-bound variable, from the checker
+    /// (`TypedModule::binder_types`). Read only to give a binder its
+    /// [`Var::checked_ty`].
+    binder_types: crate::BinderTypeMap,
 
     /// The type a CALLER expects a sub-expression to have, keyed by `Span`.
     ///
@@ -309,10 +319,12 @@ impl LowerContext {
             // above any realistic DefId count (~11k today) and deriving usage,
             // and below the builtin range.
             fresh_counter: 200_000,
+            read_shapes: FxHashMap::default(),
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             resolved_expr_types: FxHashMap::default(),
+            binder_types: FxHashMap::default(),
             expected_arg_tys: FxHashMap::default(),
             method_level_active: FxHashSet::default(),
             app_head_spans: FxHashSet::default(),
@@ -362,6 +374,11 @@ impl LowerContext {
     /// (spec/BHC-BRIEF-0002).
     pub fn set_expr_types(&mut self, expr_types: crate::ExprTypeMap) {
         self.expr_types = expr_types;
+    }
+
+    /// Set the checker's types for pattern-bound variables.
+    pub fn set_binder_types(&mut self, binders: crate::BinderTypeMap) {
+        self.binder_types = binders;
     }
 
     /// Set the fixpoint-resolved per-node types (dispatch-only side channel).
@@ -681,7 +698,8 @@ impl LowerContext {
             let var = Var {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -701,6 +719,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -812,7 +831,8 @@ impl LowerContext {
             let var = Var {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -832,6 +852,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -852,6 +873,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -865,6 +887,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -890,6 +913,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -918,6 +942,7 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(method_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }
@@ -1740,7 +1765,8 @@ impl LowerContext {
             let var = Var {
                 name: def_info.name,
                 id: VarId::new(def_info.id.index()),
-                ty: Ty::Error, // Types resolved during evaluation
+                ty: Ty::Error, // Types resolved during evaluation,
+                checked_ty: Ty::Error,
             };
             self.var_map.insert(def_info.id, var);
         }
@@ -1824,10 +1850,12 @@ impl LowerContext {
     pub fn fresh_var(&mut self, base: &str, ty: Ty, _span: Span) -> Var {
         let name = Symbol::intern(&format!("{}_{}", base, self.fresh_counter));
         self.fresh_counter += 1;
+        let checked_ty = bhc_core::fresh_checked_ty(base, &ty);
         Var {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
+            checked_ty,
         }
     }
 
@@ -1837,10 +1865,12 @@ impl LowerContext {
     /// for external visibility (e.g., `main`).
     pub fn named_var(&mut self, name: Symbol, ty: Ty) -> Var {
         self.fresh_counter += 1;
+        let checked_ty = bhc_core::fresh_checked_ty(name.as_str(), &ty);
         Var {
             name,
             id: VarId::new(self.fresh_counter as usize),
             ty,
+            checked_ty,
         }
     }
 
@@ -1934,7 +1964,20 @@ impl LowerContext {
     }
 
     /// Register a HIR definition with a Core variable.
-    pub fn register_var(&mut self, def_id: DefId, var: Var) {
+    ///
+    /// The variable takes the type the checker gave the definition, where it
+    /// gave one that is not a scheme over type variables of its own: that is
+    /// the type of every occurrence, and what says how the value is held.
+    pub fn register_var(&mut self, def_id: DefId, mut var: Var) {
+        if matches!(var.checked_ty, Ty::Error) {
+            if let Some(ty) = self.binder_types.get(&def_id) {
+                var.checked_ty = ty.clone();
+            } else if let Some(scheme) = self.type_schemes.get(&def_id) {
+                if scheme.vars.is_empty() {
+                    var.checked_ty = scheme.ty.clone();
+                }
+            }
+        }
         self.var_map.insert(def_id, var);
     }
 
@@ -2432,6 +2475,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(idx),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             expr = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(expr), span);
         }
@@ -2527,6 +2571,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             cur = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
         }
@@ -3213,6 +3258,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(idx),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let super_expr =
                 core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
@@ -3237,6 +3283,7 @@ impl LowerContext {
             name: Symbol::intern(&format!("$sel_{field_index}")),
             id: VarId::new(field_index),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let mut result = core::Expr::App(
             Box::new(core::Expr::Var(sel_var, span)),
@@ -4002,6 +4049,7 @@ impl LowerContext {
                 name: Symbol::intern(&format!("$sel_{slot}")),
                 id: VarId::new(slot),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let selected = core::Expr::App(
                 Box::new(core::Expr::Var(selector, span)),
@@ -4372,6 +4420,7 @@ impl LowerContext {
                 )),
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             })
         })?;
         let lifted = core::Expr::Var(var, span);
@@ -5416,8 +5465,16 @@ impl LowerContext {
                 Item::Data(data_def) => {
                     self.register_data_constructors(data_def);
                     self.register_derived_traversable(data_def);
+                    if let Some(shape) = crate::read_desc::ReadShape::of_data(data_def) {
+                        self.read_shapes.insert(data_def.name, shape);
+                    }
                 }
-                Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
+                Item::Newtype(newtype_def) => {
+                    self.register_newtype_constructor(newtype_def);
+                    if let Some(shape) = crate::read_desc::ReadShape::of_newtype(newtype_def) {
+                        self.read_shapes.insert(newtype_def.name, shape);
+                    }
+                }
                 _ => {}
             }
         }
@@ -5857,14 +5914,56 @@ impl LowerContext {
         lazify_self_recursive_monadic_args(&mut bindings);
         expand_transformer_synonyms(&mut bindings, &self.type_aliases);
 
-        Ok(CoreModule {
+        let core_module = CoreModule {
             name: module.name,
             bindings,
             exports: vec![],
             foreign_imports,
             overloaded_strings: module.overloaded_strings,
             constructors,
-        })
+        };
+        // BHC_REP_COVERAGE: how many binders have a known representation
+        // (#94, #95). A number to watch while the checker's types are
+        // threaded through, not a diagnostic for users.
+        if std::env::var_os("BHC_REP_COVERAGE").is_some() {
+            // What this module's newtypes and synonyms stand for: a newtype
+            // is erased, so its binder is whatever its field is.
+            let mut expansions: bhc_core::TypeExpansions = self.type_aliases.clone();
+            for item in &module.items {
+                let Item::Newtype(newtype_def) = item else {
+                    continue;
+                };
+                let field = match &newtype_def.con.fields {
+                    bhc_hir::ConFields::Positional(tys) => tys.first().cloned(),
+                    bhc_hir::ConFields::Named(fields) => fields.first().map(|f| f.ty.clone()),
+                };
+                if let Some(field) = field {
+                    expansions.insert(newtype_def.name, (newtype_def.params.clone(), field));
+                }
+            }
+            let coverage = bhc_core::rep_coverage::binder_rep_coverage(&core_module, &expansions);
+            eprintln!(
+                "rep-coverage {}: {} binders, {:.1}% known ({} scalar, {} lifted, {} polymorphic, {} unknown)",
+                core_module.name.as_str(),
+                coverage.total(),
+                coverage.known_percent(),
+                coverage.scalar,
+                coverage.lifted,
+                coverage.polymorphic,
+                coverage.unknown
+            );
+            // `BHC_REP_COVERAGE=names`: where the unknown ones come from.
+            if std::env::var("BHC_REP_COVERAGE").as_deref() == Ok("names") {
+                let names = bhc_core::rep_coverage::unknown_binder_names(&core_module);
+                let shown: Vec<String> = names
+                    .iter()
+                    .take(25)
+                    .map(|(name, count)| format!("{name}:{count}"))
+                    .collect();
+                eprintln!("rep-coverage unknown by name: {}", shown.join(" "));
+            }
+        }
+        Ok(core_module)
     }
 
     /// Standalone-derive `Semigroup`/`Monoid` for a synonym of a local newtype

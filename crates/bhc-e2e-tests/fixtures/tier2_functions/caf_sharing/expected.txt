@@ -1,0 +1,11 @@
+225075
+1
+832040
+1664080
+(385,10)
+hello 832040
+hello from an IO CAF
+hello from an IO CAF
+caught: bad CAF
+caught again: bad CAF
+(0,1)

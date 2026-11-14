@@ -133,9 +133,11 @@ fn test_float_literal() {
     let typed = result.unwrap();
     let scheme = typed.def_schemes.get(&def_id(0)).unwrap();
 
+    // An unannotated fractional literal defaults to Double, as Haskell's
+    // `default (Integer, Double)`.
     match &scheme.ty {
-        Ty::Con(c) => assert_eq!(c.name, Symbol::intern("Float")),
-        _ => panic!("Expected Float type"),
+        Ty::Con(c) => assert_eq!(c.name, Symbol::intern("Double")),
+        _ => panic!("Expected Double type"),
     }
 }
 

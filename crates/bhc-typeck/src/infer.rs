@@ -45,6 +45,12 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             let scheme = ctx.env.lookup_def_id(def_ref.def_id).cloned();
             if let Some(s) = scheme {
                 let result = ctx.instantiate(&s);
+                if let Some(class) = ctx.class_op_defs.get(&def_ref.def_id).copied() {
+                    if let Ty::Fun(operand, _) = &result {
+                        ctx.class_op_uses
+                            .push((class, operand.as_ref().clone(), def_ref.span));
+                    }
+                }
                 // For rank-2: if the result resolves to a Forall type (e.g., a lambda
                 // parameter with type `forall a. a -> a`), instantiate it so each use
                 // gets independent type variables.
@@ -314,6 +320,25 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             scheme
                                 .vars
                                 .retain(|v| !applied.iter().any(|a| a.id == v.id));
+                            // A numeric conversion's result is constrained
+                            // (`Num b`), which the restriction keeps
+                            // monomorphic: `where w = fromInteger n` takes its
+                            // type from the use `w + 1 :: Int`. Builtin
+                            // numeric classes leave no constraint here, so
+                            // generalized, `w` stayed `forall b. b`, the
+                            // conversion was typed `Integer -> b`, and codegen
+                            // compiled it as the identity (an Integer box read
+                            // as an Int).
+                            if !ctx.numeric_conversion_defs.is_empty() {
+                                let mut refs = Vec::new();
+                                crate::binding_groups::collect_expr_references(
+                                    &binding.rhs,
+                                    &mut refs,
+                                );
+                                if refs.iter().any(|r| ctx.numeric_conversion_defs.contains(r)) {
+                                    scheme.vars.clear();
+                                }
+                            }
                             scheme
                         } else if crate::io_closure_mode() {
                             // A local function used as a value stays general

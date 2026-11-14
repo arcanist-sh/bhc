@@ -12,8 +12,6 @@
 //!
 //! This matches GHC's `Empty | Chunk !StrictText LazyText` representation.
 
-use std::alloc::{self, Layout};
-
 use crate::text::{alloc_text_from_bytes, text_bytes};
 
 // ============================================================
@@ -25,39 +23,29 @@ const LAZY_CHUNK_TAG: i64 = 1;
 
 /// Read the tag from a lazy value.
 unsafe fn lazy_tag(ptr: *const u8) -> i64 {
-    *(ptr as *const i64)
+    bhc_rts_alloc::object::tag(ptr)
 }
 
 /// Read the strict chunk pointer from a Chunk node (at offset 8).
 unsafe fn lazy_chunk(ptr: *const u8) -> *const u8 {
-    *((ptr as *const *const u8).add(1))
+    bhc_rts_alloc::object::field(ptr, 0) as *const u8
 }
 
 /// Read the rest pointer from a Chunk node (at offset 16).
 unsafe fn lazy_rest(ptr: *const u8) -> *const u8 {
-    *((ptr as *const *const u8).add(2))
+    bhc_rts_alloc::object::field(ptr, 1) as *const u8
 }
 
 /// Allocate an Empty lazy node (tag=0, 8 bytes).
 fn alloc_lazy_empty() -> *mut u8 {
-    let layout = Layout::from_size_align(8, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(LAZY_EMPTY_TAG);
-        ptr
-    }
+    // SAFETY: no fields.
+    unsafe { bhc_rts_alloc::object::alloc_con(LAZY_EMPTY_TAG, &[]) }
 }
 
 /// Allocate a Chunk lazy node (tag=1, 24 bytes).
 fn alloc_lazy_chunk(chunk: *mut u8, rest: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(LAZY_CHUNK_TAG);
-        (ptr as *mut *mut u8).add(1).write(chunk);
-        (ptr as *mut *mut u8).add(2).write(rest);
-        ptr
-    }
+    // SAFETY: the caller supplies a chunk and the rest of the lazy value.
+    unsafe { bhc_rts_alloc::object::alloc_con(LAZY_CHUNK_TAG, &[chunk, rest]) }
 }
 
 /// Collect all strict chunk byte slices from a lazy text into a Vec.
@@ -150,11 +138,7 @@ pub extern "C" fn bhc_lazy_text_unpack(lazy: *const u8) -> *mut u8 {
         let mut list = alloc_nil();
         for &c in chars.iter().rev() {
             let char_val = c as i64;
-            let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-            let cons = alloc::alloc(layout);
-            (cons as *mut i64).write(1); // tag = 1 (Cons)
-            (cons as *mut *mut u8).add(1).write(char_val as *mut u8); // head = char as ptr
-            (cons as *mut *mut u8).add(2).write(list); // tail
+            let cons = bhc_rts_alloc::object::cons(char_val as *mut u8, list);
             list = cons;
         }
         list
@@ -241,13 +225,13 @@ pub extern "C" fn bhc_lazy_text_from_chunks(list: *const u8) -> *mut u8 {
         return alloc_lazy_empty();
     }
     unsafe {
-        let tag = *(list as *const i64);
+        let tag = bhc_rts_alloc::object::tag(list);
         if tag == 0 {
             return alloc_lazy_empty();
         }
         // Cons: tag=1, head at offset 8, tail at offset 16
-        let head = *((list as *const *const u8).add(1));
-        let tail = *((list as *const *const u8).add(2));
+        let head = bhc_rts_alloc::object::field(list, 0) as *const u8;
+        let tail = bhc_rts_alloc::object::field(list, 1) as *const u8;
         let rest = bhc_lazy_text_from_chunks(tail);
         alloc_lazy_chunk(head as *mut u8, rest)
     }
@@ -386,24 +370,14 @@ pub extern "C" fn bhc_lazy_text_drop(n: i64, lazy: *const u8) -> *mut u8 {
 
 /// Allocate a Nil node (tag=0, 8 bytes).
 fn alloc_nil() -> *mut u8 {
-    let layout = Layout::from_size_align(8, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(0);
-        ptr
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::nil() }
 }
 
 /// Allocate a Cons node (tag=1, head, tail — 24 bytes).
 fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(1);
-        (ptr as *mut *mut u8).add(1).write(head);
-        (ptr as *mut *mut u8).add(2).write(tail);
-        ptr
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 // ============================================================

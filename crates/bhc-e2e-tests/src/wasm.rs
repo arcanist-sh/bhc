@@ -49,9 +49,12 @@ pub fn compile_wasm(
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let stdout = String::from_utf8_lossy(&result.stdout);
+        // The exit status says whether the compiler reported an error or
+        // was killed: a batch of these failures passes on a rerun and shows
+        // nothing from bhc itself.
         return Err(E2EError::CompileError(format!(
-            "WASM compilation failed:\nstdout: {}\nstderr: {}",
-            stdout, stderr
+            "WASM compilation failed ({}):\nstdout: {}\nstderr: {}",
+            result.status, stdout, stderr
         )));
     }
 

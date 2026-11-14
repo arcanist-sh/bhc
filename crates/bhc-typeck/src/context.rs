@@ -118,6 +118,18 @@ pub struct TyCtxt {
     /// The builtin `$`, so a local binding's uses can tell `f $ x` (an
     /// application of `f`) from `f` passed as a value.
     pub(crate) dollar_def: Option<DefId>,
+    /// The builtin numeric conversions (`fromInteger`, `fromIntegral`,
+    /// `realToFrac`, `truncate`, …), whose result type a local value binding
+    /// must not generalize (see the monomorphism restriction in `infer`).
+    pub(crate) numeric_conversion_defs: rustc_hash::FxHashSet<DefId>,
+
+    /// The builtin operations of `Show`, `Eq` and `Ord` whose schemes carry
+    /// no class constraint (`show :: a -> String`), with their class.
+    pub(crate) class_op_defs: FxHashMap<DefId, &'static str>,
+    /// For each occurrence of one of those, the type its first argument was
+    /// instantiated at, checked once the module is solved
+    /// ([`Self::check_class_ops_not_at_functions`]).
+    pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
 
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
@@ -246,6 +258,9 @@ impl TyCtxt {
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
             dollar_def: None,
+            numeric_conversion_defs: rustc_hash::FxHashSet::default(),
+            class_op_defs: FxHashMap::default(),
+            class_op_uses: Vec::new(),
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -436,6 +451,35 @@ impl TyCtxt {
 
         // Add all new constraints
         self.constraints.extend(new_constraints);
+    }
+
+    /// Reject `show`, `print`, `==`, `<`, … used at a function type.
+    ///
+    /// The builtin schemes of these operations have no class constraint
+    /// (`show :: a -> String`), so nothing else objects to `print id` or to
+    /// `f == g`: the program compiled and printed an empty line. Until the
+    /// standard classes are real classes with instances, this catches the
+    /// one case that can never have an instance. It sees the type an
+    /// occurrence ends up at in this module; a function reaching `show`
+    /// through another polymorphic function is not caught.
+    pub fn check_class_ops_not_at_functions(&mut self) {
+        for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
+            let operand = self.subst.apply(&operand);
+            if !matches!(operand, Ty::Fun(..)) {
+                continue;
+            }
+            // A function type is printed in its own parentheses.
+            let shown = crate::diagnostics::pretty_ty(&operand);
+            let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                .with_label(
+                    self.full_span(span),
+                    format!("used here at the function type `{shown}`"),
+                )
+                .with_note(format!(
+                    "a function has no `{class}` instance; maybe an argument is missing"
+                ));
+            self.emit_error(diag);
+        }
     }
 
     /// Solve collected constraints using instance resolution.
@@ -1047,8 +1091,9 @@ impl TyCtxt {
                 Some(self.builtins.int_ty.clone())
             }
             "Fractional" | "Floating" | "RealFrac" | "RealFloat" => {
-                // Default to Double/Float
-                Some(self.builtins.float_ty.clone())
+                // Default to Double, as Haskell's `default (Integer, Double)`.
+                // `Float` made `show 3.0` take the Float path and print "0".
+                Some(self.builtins.double_ty.clone())
             }
             "IsString" => {
                 // Default to String ([Char]), matching GHC behavior
@@ -2473,6 +2518,41 @@ impl TyCtxt {
         if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
             self.dollar_def = Some(*id);
         }
+        self.class_op_defs = defs
+            .iter()
+            // The Prelude's own: not a name this module defines, a pattern
+            // variable, or a value another module's interface gave a type.
+            .filter(|(id, d)| {
+                !local_value_ids.contains(id)
+                    && !matches!(d.kind, DefKind::PatVar | DefKind::ImportedValue)
+                    && d.type_scheme.is_none()
+            })
+            .filter_map(|(id, d)| {
+                let class = match d.name.as_str() {
+                    "show" | "print" => "Show",
+                    "==" | "/=" => "Eq",
+                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => "Ord",
+                    _ => return None,
+                };
+                Some((*id, class))
+            })
+            .collect();
+        self.numeric_conversion_defs = defs
+            .iter()
+            .filter(|(_, d)| {
+                matches!(
+                    d.name.as_str(),
+                    "fromInteger"
+                        | "fromIntegral"
+                        | "realToFrac"
+                        | "truncate"
+                        | "round"
+                        | "floor"
+                        | "ceiling"
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
 
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {
@@ -2515,39 +2595,50 @@ impl TyCtxt {
             let normalized_name;
             let _is_char8 = raw_name.starts_with("Data.ByteString.Char8.")
                 || raw_name.starts_with("Data.ByteString.Lazy.Char8.");
-            let name =
-                if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
-                    // Char8 functions that use Char where strict ByteString uses Word8/Int
-                    // are handled separately below — don't normalize them.
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name =
-                                raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
-                            normalized_name.as_str()
-                        }
+            let name = if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
+                // Char8 functions that use Char where strict ByteString uses Word8/Int
+                // are handled separately below — don't normalize them.
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'"
+                    | "index" => raw_name,
+                    _ => {
+                        normalized_name =
+                            raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
+                        normalized_name.as_str()
                     }
-                } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name = raw_name.replacen(
-                                "Data.ByteString.Lazy.Char8.",
-                                "Data.ByteString.Lazy.",
-                                1,
-                            );
-                            normalized_name.as_str()
-                        }
+                }
+            } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'" => {
+                        raw_name
                     }
-                } else {
-                    raw_name
-                };
+                    _ => {
+                        normalized_name = raw_name.replacen(
+                            "Data.ByteString.Lazy.Char8.",
+                            "Data.ByteString.Lazy.",
+                            1,
+                        );
+                        normalized_name.as_str()
+                    }
+                }
+            } else {
+                raw_name
+            };
+            // `Set e`, as `Data.Set.fromList` and the other Set schemes
+            // below spell it.
+            let set_of = |elem: Ty| {
+                Ty::App(
+                    Box::new(Ty::Con(TyCon::new(
+                        Symbol::intern("Set"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    ))),
+                    Box::new(elem),
+                )
+            };
             let scheme = match name {
                 // Arithmetic operators
                 // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
@@ -2927,6 +3018,23 @@ impl TyCtxt {
                 )),
                 // otherwise :: Bool
                 "otherwise" => Scheme::mono(self.builtins.bool_ty.clone()),
+                // The `Floating`/`RealFloat` functions at `Double`.
+                "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+                | "atanh" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.double_ty.clone(),
+                )),
+                "atan2" | "logBase" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    Ty::fun(
+                        self.builtins.double_ty.clone(),
+                        self.builtins.double_ty.clone(),
+                    ),
+                )),
+                "isNaN" | "isInfinite" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.bool_ty.clone(),
+                )),
                 // show :: a -> String
                 "show" => Scheme::poly(
                     vec![a.clone()],
@@ -3285,6 +3393,25 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // Numeric.showFFloat :: Maybe Int -> Double -> ShowS
+                "showFFloat" | "Numeric.showFFloat" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::mono(Ty::fun(
+                        self.builtins.maybe_of(self.builtins.int_ty.clone()),
+                        Ty::fun(
+                            self.builtins.double_ty.clone(),
+                            Ty::fun(string.clone(), string),
+                        ),
+                    ))
+                }
+                // showHex, showOct :: Int -> ShowS
+                "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::mono(Ty::fun(
+                        self.builtins.int_ty.clone(),
+                        Ty::fun(string.clone(), string),
+                    ))
+                }
                 "comparing" => {
                     let ordering_ty = Ty::Con(self.builtins.ordering_con.clone());
                     Scheme::poly(
@@ -3631,6 +3758,30 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b)),
                     )
                 }
+                // unsafePerformIO :: IO a -> a
+                "unsafePerformIO" | "unsafeDupablePerformIO" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(io_a, Ty::Var(a.clone())))
+                }
+                // trace :: String -> a -> a
+                "trace" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
+                ),
+                // traceIO :: String -> IO ()
+                "traceIO" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    ),
+                )),
                 // evaluate :: a -> IO a
                 "evaluate" => {
                     let io_a = Ty::App(
@@ -4470,6 +4621,16 @@ impl TyCtxt {
                         self.builtins.char_ty.clone(),
                     ))
                 }
+                "Data.ByteString.Char8.index" => {
+                    // index :: ByteString -> Int -> Char
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.int_ty.clone(),
+                            self.builtins.char_ty.clone(),
+                        ),
+                    ))
+                }
                 "Data.ByteString.Char8.singleton" | "Data.ByteString.Lazy.Char8.singleton" => {
                     // singleton :: Char -> ByteString
                     Scheme::mono(Ty::fun(
@@ -4477,16 +4638,23 @@ impl TyCtxt {
                         self.builtins.bytestring_ty.clone(),
                     ))
                 }
-                "Data.ByteString.Char8.cons"
-                | "Data.ByteString.Lazy.Char8.cons"
-                | "Data.ByteString.Char8.snoc"
-                | "Data.ByteString.Lazy.Char8.snoc" => {
+                "Data.ByteString.Char8.cons" | "Data.ByteString.Lazy.Char8.cons" => {
                     // cons :: Char -> ByteString -> ByteString
-                    // snoc :: ByteString -> Char -> ByteString (same signature shape for permissiveness)
                     Scheme::mono(Ty::fun(
                         self.builtins.char_ty.clone(),
                         Ty::fun(
                             self.builtins.bytestring_ty.clone(),
+                            self.builtins.bytestring_ty.clone(),
+                        ),
+                    ))
+                }
+                "Data.ByteString.Char8.snoc" | "Data.ByteString.Lazy.Char8.snoc" => {
+                    // snoc :: ByteString -> Char -> ByteString. It shared
+                    // `cons`'s scheme, which rejected every correct use.
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.char_ty.clone(),
                             self.builtins.bytestring_ty.clone(),
                         ),
                     ))
@@ -4796,6 +4964,14 @@ impl TyCtxt {
                             ),
                         ),
                     )
+                }
+                // Data.ByteString: ByteString -> IO ()
+                "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.bytestring_ty.clone(), io_unit))
                 }
                 // Data.ByteString: Handle -> ByteString -> IO ()
                 "Data.ByteString.hPutStr" | "Data.ByteString.hPut" => {
@@ -5518,13 +5694,60 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // The key-aware traversals, at their real types. Permissive
+                // (`a -> b`), `M.foldrWithKey (\k v acc -> k ++ show v ++
+                // acc) "" m` had no result type and printed an address.
+                "Data.Map.foldrWithKey"
+                | "Data.Map.foldlWithKey"
+                | "Data.Map.mapWithKey"
+                | "Data.Map.filterWithKey" => {
+                    let map_con = TyCon::new(
+                        Symbol::intern("Map"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    let k = TyVar::new_star(0xFFFF_0003);
+                    let v = a.clone();
+                    let r = b.clone();
+                    let map_of = |key: &TyVar, val: Ty| {
+                        Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(map_con.clone())),
+                                Box::new(Ty::Var(key.clone())),
+                            )),
+                            Box::new(val),
+                        )
+                    };
+                    let (kt, vt, rt) = (Ty::Var(k.clone()), Ty::Var(v.clone()), Ty::Var(r.clone()));
+                    let body = match name {
+                        // (k -> v -> b -> b) -> b -> Map k v -> b
+                        "Data.Map.foldrWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), Ty::fun(rt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (b -> k -> v -> b) -> b -> Map k v -> b
+                        "Data.Map.foldlWithKey" => Ty::fun(
+                            Ty::fun(rt.clone(), Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (k -> v -> w) -> Map k v -> Map k w
+                        "Data.Map.mapWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone())),
+                            Ty::fun(map_of(&k, vt), map_of(&k, rt)),
+                        ),
+                        // (k -> v -> Bool) -> Map k v -> Map k v
+                        _ => Ty::fun(
+                            Ty::fun(kt, Ty::fun(vt.clone(), self.builtins.bool_ty.clone())),
+                            Ty::fun(map_of(&k, vt.clone()), map_of(&k, vt)),
+                        ),
+                    };
+                    Scheme::poly(vec![v, r, k], body)
+                }
                 "Data.Map.differenceWith"
                 | "Data.Map.unionWithKey"
-                | "Data.Map.mapWithKey"
                 | "Data.Map.mapKeys"
-                | "Data.Map.filterWithKey"
-                | "Data.Map.foldrWithKey"
-                | "Data.Map.foldlWithKey"
                 | "Data.Map.keysSet"
                 | "Data.Map.mapMaybeWithKey" => {
                     // Permissive fallback: a -> b
@@ -5534,7 +5757,7 @@ impl TyCtxt {
                     )
                 }
                 // Data.Set operations
-                "Data.Set.empty" => Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
+                "Data.Set.empty" => Scheme::poly(vec![a.clone()], set_of(Ty::Var(a.clone()))),
                 "Data.Set.fromList" => {
                     // fromList :: Ord a => [a] -> Set a
                     let set_con = TyCon::new(
@@ -5646,36 +5869,42 @@ impl TyCtxt {
                         ),
                     )
                 }
-                "Data.Set.insert" | "Data.Set.delete" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
-                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.Set.deleteMin" | "Data.Set.deleteMax" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                ),
+                // These were permissive (`insert :: a -> b -> b`, `map ::
+                // (a -> b) -> a -> b`): with the set standing where the
+                // element should, `S.map (+ 1) s` asked for `Num (Set Int)`.
+                "Data.Set.insert" | "Data.Set.delete" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(set_a.clone(), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            set_a.clone(),
+                            Ty::fun(set_a, self.builtins.bool_ty.clone()),
+                        ),
+                    )
+                }
+                "Data.Set.deleteMin" | "Data.Set.deleteMax" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(vec![a.clone()], Ty::fun(set_a.clone(), set_a))
+                }
                 "Data.Set.map" => Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(set_of(Ty::Var(a.clone())), set_of(Ty::Var(b.clone()))),
                     ),
                 ),
                 "Data.Set.filter" => {
@@ -7806,6 +8035,23 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                     )
                 }
+                // The `System.IO.Error` predicates: IOError -> Bool. Their
+                // result type is what lets `show` and `&&` treat it as a Bool.
+                "isDoesNotExistError"
+                | "isAlreadyExistsError"
+                | "isPermissionError"
+                | "isUserError"
+                | "isEOFError"
+                | "isFullError"
+                | "isAlreadyInUseError"
+                | "isIllegalOperation"
+                    if def_info.kind == DefKind::StubValue =>
+                {
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                    )
+                }
                 "option" | "maybeReader" if def_info.kind == DefKind::StubValue => {
                     // option :: ReadM a -> Mod OptionFields a -> Parser a
                     // Needs at least a -> b -> c to avoid sharing
@@ -8032,6 +8278,56 @@ impl TyCtxt {
                         | "traverse"
                         | "for"
                         | "sequenceA"
+                        // `import Control.Monad (foldM)`: its scheme is the
+                        // real one (any monad). Typed fresh, the fold's monad
+                        // was unknown and `print (foldM f z xs)` at `Maybe`
+                        // printed an address.
+                        | "foldM"
+                        // `import Data.List` re-exports these with their exact
+                        // builtin schemes. Typed fresh, `print (sort xs)` at a
+                        // user type could not see the element type and
+                        // printed addresses.
+                        | "sort"
+                        | "sortBy"
+                        | "sortOn"
+                        | "nub"
+                        | "nubBy"
+                        | "group"
+                        | "groupBy"
+                        | "partition"
+                        | "isPrefixOf"
+                        | "isSuffixOf"
+                        | "isInfixOf"
+                        | "tails"
+                        | "inits"
+                        | "transpose"
+                        | "foldl'"
+                        | "insert"
+                        | "delete"
+                        | "union"
+                        | "intersect"
+                        | "find"
+                        | "zip3"
+                        | "unzip3"
+                        // `a -> a -> a` (shared with Data.Set), which keeps
+                        // the operands' type on the result.
+                        | "\\\\"
+                        // Data.Maybe / Data.Either re-exports, exact schemes.
+                        // Typed fresh, `print (lefts es)` printed addresses.
+                        | "lefts"
+                        | "rights"
+                        | "partitionEithers"
+                        | "either"
+                        | "catMaybes"
+                        | "mapMaybe"
+                        | "fromMaybe"
+                        | "listToMaybe"
+                        | "maybeToList"
+                        | "isJust"
+                        | "isNothing"
+                        | "maybe"
+                        // `import Control.Monad (replicateM)`, in any monad.
+                        | "replicateM"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
@@ -9332,6 +9628,45 @@ impl TyCtxt {
 
     /// Convert the context into a `TypedModule`.
     #[must_use]
+    /// `ty` with every reducible type family application inside it reduced.
+    /// `families` names the families worth trying (see
+    /// [`TypeEnv::reducible_family_names`]), so a type that mentions none
+    /// costs one walk.
+    fn reduce_families_deep(&self, ty: &Ty, families: &rustc_hash::FxHashSet<Symbol>) -> Ty {
+        match ty {
+            Ty::App(f, a) => {
+                let applied = Ty::App(
+                    Box::new(self.reduce_families_deep(f, families)),
+                    Box::new(self.reduce_families_deep(a, families)),
+                );
+                let mut head = &applied;
+                while let Ty::App(inner, _) = head {
+                    head = inner;
+                }
+                if !matches!(head, Ty::Con(c) if families.contains(&c.name)) {
+                    return applied;
+                }
+                let reduced = crate::unify::try_reduce_type_family(self, &applied);
+                if reduced == applied {
+                    applied
+                } else {
+                    self.reduce_families_deep(&reduced, families)
+                }
+            }
+            Ty::Fun(a, r) => Ty::Fun(
+                Box::new(self.reduce_families_deep(a, families)),
+                Box::new(self.reduce_families_deep(r, families)),
+            ),
+            Ty::List(e) => Ty::List(Box::new(self.reduce_families_deep(e, families))),
+            Ty::Tuple(es) => Ty::Tuple(
+                es.iter()
+                    .map(|e| self.reduce_families_deep(e, families))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     pub fn into_typed_module(self, hir: Module) -> TypedModule {
         // Apply final substitution to all expression types. Single-pass apply:
         // these values are baked into Core by lowering, and codegen's width
@@ -9345,10 +9680,34 @@ impl TyCtxt {
         // A fixpoint-resolved copy for lowering's dispatch decisions only (never
         // baked into Core). Resolves triangular chains that a single apply leaves
         // partial, e.g. `return 42 :: M a` recorded as `App(Var m, Int)`.
+        // Type family applications are reduced in this copy too: lowering
+        // and codegen dispatch on the type (`print` at `[Elem String]` has to
+        // know it is showing a `String`), and neither can reduce a family.
+        let families = self.env.reducible_family_names();
         let resolved_expr_types: rustc_hash::FxHashMap<Span, Ty> = self
             .expr_types
             .iter()
-            .map(|(id, ty)| (*id, self.subst.apply_resolved(ty)))
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (*id, resolved)
+                } else {
+                    (*id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
+            .collect();
+
+        let binder_types: FxHashMap<DefId, Ty> = self
+            .env
+            .pattern_var_types()
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (id, resolved)
+                } else {
+                    (id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
             .collect();
 
         // Apply final substitution to all definition schemes
@@ -9437,6 +9796,7 @@ impl TyCtxt {
             expr_types,
             resolved_expr_types,
             def_schemes,
+            binder_types,
             type_aliases: self.type_aliases.clone(),
         }
     }

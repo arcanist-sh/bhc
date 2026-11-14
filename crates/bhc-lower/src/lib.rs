@@ -149,8 +149,9 @@ pub enum LowerWarning {
         /// What kind of stub (value, type, or constructor).
         kind: &'static str,
     },
-    /// A builtin that type-checks but has no implementation yet, so calling
-    /// it aborts at run time (the concurrency primitives, #38).
+    /// A builtin that type-checks but has no implementation on this target,
+    /// so calling it aborts at run time (the concurrency primitives on
+    /// WebAssembly, #75).
     NotImplemented {
         /// The builtin's name.
         name: String,
@@ -179,6 +180,17 @@ pub enum LowerWarning {
         /// Source location of the import.
         span: Span,
     },
+    /// An import list names something the imported module does not export
+    /// (`import A (Hidden)`). GHC rejects this; it is a warning here because
+    /// some module interfaces bhc provides are not complete.
+    NotExported {
+        /// The imported module.
+        module: String,
+        /// The name it does not export.
+        name: String,
+        /// Source location of the import.
+        span: Span,
+    },
 }
 
 impl std::fmt::Display for LowerWarning {
@@ -199,12 +211,15 @@ impl std::fmt::Display for LowerWarning {
             LowerWarning::NotImplemented { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is not implemented yet: calling it aborts at run time \
-                     (concurrency is not wired to the runtime, see issue #38)"
+                    "`{name}` is not implemented on WebAssembly yet: calling it aborts \
+                     at run time (threads run on native targets only, see issue #75)"
                 )
             }
             LowerWarning::UnknownExtension { name, .. } => {
                 write!(f, "unknown extension `{name}`")
+            }
+            LowerWarning::NotExported { module, name, .. } => {
+                write!(f, "module `{module}` does not export `{name}`")
             }
             LowerWarning::ModuleNotFound { name, .. } => {
                 write!(

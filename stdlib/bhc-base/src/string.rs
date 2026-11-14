@@ -4,34 +4,28 @@
 //! LLVM-generated code. Strings are lists of characters where each
 //! character is a Unicode code point stored as `i64` cast to `*mut u8`.
 
-use std::alloc::{alloc, Layout};
-
 // ---------------------------------------------------------------------------
 // ADT helpers (internal, duplicated from list.rs for module independence)
 // ---------------------------------------------------------------------------
 
 unsafe fn get_tag(ptr: *mut u8) -> i64 {
-    *(ptr as *const i64)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::tag(ptr) }
 }
 
 unsafe fn get_field(ptr: *mut u8, index: usize) -> *mut u8 {
-    *(ptr.add(8 + index * 8) as *const *mut u8)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::field(ptr, index) }
 }
 
 unsafe fn alloc_nil() -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(8, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::nil() }
 }
 
 unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(24, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 1;
-    *(ptr.add(8) as *mut *mut u8) = head;
-    *(ptr.add(16) as *mut *mut u8) = tail;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 unsafe fn list_to_vec(mut list: *mut u8) -> Vec<*mut u8> {
@@ -351,18 +345,11 @@ pub unsafe extern "C" fn bhc_try_read_int(str_list: *mut u8) -> *mut u8 {
     match trimmed.parse::<i64>() {
         Ok(n) => {
             // Just n: tag=1, 1 field (the Int as int-as-pointer)
-            let layout = Layout::from_size_align_unchecked(16, 8);
-            let ptr = alloc(layout);
-            *(ptr as *mut i64) = 1; // tag = 1 (Just)
-            *(ptr.add(8) as *mut *mut u8) = n as *mut u8; // field 0 = int-as-pointer
-            ptr
+            bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::JUST, &[n as *mut u8])
         }
         Err(_) => {
             // Nothing: tag=0, 0 fields
-            let layout = Layout::from_size_align_unchecked(8, 8);
-            let ptr = alloc(layout);
-            *(ptr as *mut i64) = 0; // tag = 0 (Nothing)
-            ptr
+            bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::NOTHING, &[])
         }
     }
 }

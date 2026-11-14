@@ -6,8 +6,8 @@
 //! File path functions (readFile, writeFile, appendFile) take C-string paths
 //! since the codegen already converts `[Char]` to C-strings.
 //!
-//! Handle functions use the same sentinel-pointer convention as bhc-rts:
-//! 1=stdin, 2=stdout, 3=stderr, otherwise heap-allocated BhcHandle.
+//! Handle functions take the runtime's handles: heap objects that name
+//! their stream (`bhc_rts_alloc::handle`).
 
 use std::ffi::CStr;
 use std::fs;
@@ -17,25 +17,23 @@ use std::os::raw::c_char;
 use crate::text::{alloc_text_from_bytes, text_bytes};
 
 // ============================================================
-// Handle sentinel constants (must match bhc-rts/src/ffi.rs)
+// Handles (defined in bhc_rts_alloc::handle)
 // ============================================================
 
-const HANDLE_STDIN: usize = 1;
-const HANDLE_STDOUT: usize = 2;
-const HANDLE_STDERR: usize = 3;
+use bhc_rts_alloc::handle::{
+    Handle as BhcHandle, STDERR as HANDLE_STDERR, STDIN as HANDLE_STDIN, STDOUT as HANDLE_STDOUT,
+};
 
-/// Mirror of BhcHandle from bhc-rts. Must have identical layout.
-#[repr(C)]
-struct BhcHandle {
-    file: Option<std::fs::File>,
-    readable: bool,
-    writable: bool,
-    closed: bool,
+/// Which stream a handle is: 0 for an opened file (or null), otherwise one
+/// of the `HANDLE_STD*` numbers.
+fn handle_stream(handle: *mut u8) -> usize {
+    // SAFETY: every handle compiled code holds came from the runtime.
+    unsafe { bhc_rts_alloc::handle::stream(handle) }
 }
 
+/// Whether `handle` is one of the standard streams.
 fn is_sentinel(handle: *mut u8) -> bool {
-    let h = handle as usize;
-    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+    handle_stream(handle) != 0
 }
 
 // ============================================================
@@ -62,7 +60,7 @@ pub unsafe extern "C" fn bhc_text_read_file(path: *const c_char) -> *mut u8 {
     };
     match fs::read(path_str) {
         Ok(bytes) => alloc_text_from_bytes(&bytes),
-        Err(_) => alloc_text_from_bytes(&[]),
+        Err(e) => crate::io_error::raise(path_str, "openFile", &e),
     }
 }
 
@@ -89,7 +87,9 @@ pub unsafe extern "C" fn bhc_text_write_file(path: *const c_char, text: *const u
     } else {
         text_bytes(text)
     };
-    let _ = fs::write(path_str, bytes);
+    if let Err(e) = fs::write(path_str, bytes) {
+        crate::io_error::raise(path_str, "withFile", &e);
+    }
 }
 
 /// Append Text to a file.
@@ -115,15 +115,14 @@ pub unsafe extern "C" fn bhc_text_append_file(path: *const c_char, text: *const 
     } else {
         text_bytes(text)
     };
-    let mut file = match fs::OpenOptions::new()
+    let appended = fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path_str)
-    {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let _ = file.write_all(bytes);
+        .and_then(|mut file| file.write_all(bytes));
+    if let Err(e) = appended {
+        crate::io_error::raise(path_str, "withFile", &e);
+    }
 }
 
 // ============================================================
@@ -137,11 +136,11 @@ pub unsafe extern "C" fn bhc_text_append_file(path: *const c_char, text: *const 
 /// # Safety
 ///
 /// `handle` must be a valid BHC handle: either one of the sentinel values
-/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`
+/// (stdin, stdout or stderr), null, or a pointer to a live `BhcHandle`
 /// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_get_contents(handle: *mut u8) -> *mut u8 {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         let mut buf = Vec::new();
         let _ = std::io::stdin().lock().read_to_end(&mut buf);
@@ -165,11 +164,11 @@ pub unsafe extern "C" fn bhc_text_h_get_contents(handle: *mut u8) -> *mut u8 {
 /// # Safety
 ///
 /// `handle` must be a valid BHC handle: either one of the sentinel values
-/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`
+/// (stdin, stdout or stderr), null, or a pointer to a live `BhcHandle`
 /// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_get_line(handle: *mut u8) -> *mut u8 {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
@@ -206,7 +205,7 @@ pub unsafe extern "C" fn bhc_text_h_get_line(handle: *mut u8) -> *mut u8 {
 /// # Safety
 ///
 /// `handle` must be a valid BHC handle: either one of the sentinel values
-/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`.
+/// (stdin, stdout or stderr), null, or a pointer to a live `BhcHandle`.
 /// `text` must either be null or point to a valid BhcText allocation. Both
 /// must remain valid for the duration of the call.
 #[no_mangle]
@@ -219,7 +218,7 @@ pub unsafe extern "C" fn bhc_text_h_put_str(handle: *mut u8, text: *const u8) {
     if bytes.is_empty() {
         return;
     }
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(bytes);
     } else if h == HANDLE_STDERR {
@@ -239,7 +238,7 @@ pub unsafe extern "C" fn bhc_text_h_put_str(handle: *mut u8, text: *const u8) {
 /// # Safety
 ///
 /// `handle` must be a valid BHC handle: either one of the sentinel values
-/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`.
+/// (stdin, stdout or stderr), null, or a pointer to a live `BhcHandle`.
 /// `text` must either be null or point to a valid BhcText allocation. Both
 /// must remain valid for the duration of the call.
 #[no_mangle]
@@ -249,7 +248,7 @@ pub unsafe extern "C" fn bhc_text_h_put_str_ln(handle: *mut u8, text: *const u8)
     } else {
         text_bytes(text)
     };
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(bytes);
         let _ = std::io::stdout().write_all(b"\n");

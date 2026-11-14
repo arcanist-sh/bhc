@@ -74,6 +74,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             // Default pattern with a binder
             Ok(Alt {
@@ -118,7 +119,15 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     .filter(|t| !crate::context::has_type_variables(t))
                     .cloned()
                     .unwrap_or(Ty::Error);
+                // The declared field type is the binder's checked type even
+                // where it mentions the data type's parameters.
+                let declared_ty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
                 let binder = ctx.fresh_var(&binder_name, binder_ty, span);
+                let binder = if matches!(binder.checked_ty, Ty::Error) {
+                    binder.with_checked_ty(declared_ty)
+                } else {
+                    binder
+                };
 
                 match sub_pat {
                     Pat::Var(name, def_id, _) => {
@@ -131,6 +140,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                 name: *name,
                                 id: ctx.fresh_id(),
                                 ty: Ty::Error,
+                                checked_ty: Ty::Error,
                             }
                         };
                         binders.push(var);
@@ -297,6 +307,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                     name: *name,
                                     id: ctx.fresh_id(),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 }
                             };
                             binders.push(var);
@@ -363,6 +374,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, v.clone());
                 v
@@ -623,6 +635,7 @@ pub fn compile_match_to_expr(
                     name: tuple_con_name,
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 value_def.span,
             );
@@ -984,12 +997,25 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                             .collect()
                     })
                 });
+                // The declared field types, type parameters included, for
+                // the binders' checked types.
+                let declared_tys: Vec<Ty> = ctx
+                    .constructor_field_types(*con_name)
+                    .filter(|declared| declared.len() == *arity as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 let field_vars: Vec<Var> = (0..*arity)
                     .map(|i| {
                         let ty = field_tys
                             .as_ref()
                             .map_or(Ty::Error, |tys| tys[i as usize].clone());
-                        ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span)
+                        let var = ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span);
+                        match declared_tys.get(i as usize) {
+                            Some(declared) if matches!(var.checked_ty, Ty::Error) => {
+                                var.with_checked_ty(declared.clone())
+                            }
+                            _ => var,
+                        }
                     })
                     .collect();
 
@@ -1797,6 +1823,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *_name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1830,6 +1857,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1926,6 +1954,7 @@ fn compile_tuple_pattern(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 binders.push(var);
             }
@@ -1980,6 +2009,7 @@ fn args_tuple(args: &[Var], span: Span) -> core::Expr {
             name: tuple_con_name,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -2301,6 +2331,7 @@ pub fn make_pattern_error(span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
         Literal::String(Symbol::intern(&format!(

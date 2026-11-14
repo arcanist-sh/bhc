@@ -26,6 +26,54 @@ fn run_native_test(fixture_name: &str, profile: Profile) {
     );
 }
 
+/// Check that a program under `fixtures/rejected/` does not type-check, and
+/// that the error says `needle`.
+fn expect_rejected(file: &str, needle: &str) {
+    let path = bhc_e2e_tests::fixtures_dir().join("rejected").join(file);
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--", "check"])
+        .arg(&path)
+        .output()
+        .expect("failed to run the compiler");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "{file} was accepted, expected an error containing `{needle}`:\n{text}"
+    );
+    assert!(
+        text.contains(needle),
+        "{file} was rejected, but not with `{needle}`:\n{text}"
+    );
+}
+
+// =============================================================================
+// Programs the type checker must reject
+// =============================================================================
+
+#[test]
+fn test_rejected_show_function() {
+    expect_rejected("show_function.hs", "No instance for `Show (Int -> Int)`");
+}
+
+#[test]
+fn test_rejected_show_tuple_section() {
+    expect_rejected("show_tuple_section.hs", "No instance for `Show (");
+}
+
+#[test]
+fn test_rejected_compare_functions() {
+    // The operand type is not fully resolved in the message (`t1 -> t1`).
+    expect_rejected("compare_functions.hs", "No instance for `Eq (");
+    expect_rejected(
+        "compare_functions.hs",
+        "No instance for `Ord (Bool -> Bool)`",
+    );
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================
@@ -2113,6 +2161,85 @@ fn test_tier3_gadt_basic_native() {
 }
 
 #[test]
+fn test_tier2_numeric_functions_as_values() {
+    run_native_test(
+        "tier2_functions/numeric_functions_as_values",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_numeric_functions_as_values_numeric_profile() {
+    run_native_test(
+        "tier2_functions/numeric_functions_as_values",
+        Profile::Numeric,
+    );
+}
+
+#[test]
+fn test_tier3_derived_tree_eq_foldable_native() {
+    run_native_test("tier3_io/derived_tree_eq_foldable", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_keys_in_lambda_native() {
+    run_native_test("tier3_io/map_keys_in_lambda", Profile::Default);
+}
+
+#[test]
+fn test_tier3_read_derived_and_compound_native() {
+    run_native_test("tier3_io/read_derived_and_compound", Profile::Default);
+}
+
+#[test]
+fn test_tier3_set_map_and_filters_native() {
+    run_native_test("tier3_io/set_map_and_filters", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_exception_in_container_native() {
+    run_native_test("tier3_io/show_exception_in_container", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bytestring_char8_native() {
+    run_native_test("tier3_io/bytestring_char8", Profile::Default);
+}
+
+#[test]
+fn test_tier3_user_functor_parser_native() {
+    run_native_test("tier3_io/user_functor_parser", Profile::Default);
+}
+
+#[test]
+fn test_tier3_assoc_type_and_string_instances_native() {
+    run_native_test("tier3_io/assoc_type_and_string_instances", Profile::Default);
+}
+
+#[test]
+fn test_tier2_float_values() {
+    run_native_test("tier2_functions/float_values", Profile::Default);
+}
+
+#[test]
+fn test_tier2_shadowed_prelude_names() {
+    run_native_test("tier2_functions/shadowed_prelude_names", Profile::Default);
+}
+
+#[test]
+fn test_tier2_prelude_numeric_functions() {
+    run_native_test(
+        "tier2_functions/prelude_numeric_functions",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier3_gadt_kind_signature_native() {
+    run_native_test("tier3_io/gadt_kind_signature", Profile::Default);
+}
+
+#[test]
 fn test_tier3_gadt_phantom_native() {
     run_native_test("tier3_io/gadt_phantom", Profile::Default);
 }
@@ -2304,6 +2431,36 @@ fn test_tier4_foldl_map_lambda_numeric() {
 // writeFile/appendFile with computed strings, read back; `++` after a
 // computed String (#40).
 #[test]
+fn test_tier3_io_error_predicates_native() {
+    run_native_test("tier3_io/io_error_predicates", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bytestring_literals_native() {
+    run_native_test("tier3_io/bytestring_literals", Profile::Default);
+}
+
+#[test]
+fn test_tier3_fold_m_value_monads_native() {
+    run_native_test("tier3_io/fold_m_value_monads", Profile::Default);
+}
+
+#[test]
+fn test_tier3_container_equality_native() {
+    run_native_test("tier3_io/container_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_thread_id_equality_native() {
+    run_native_test("tier3_io/thread_id_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_file_io_errors_native() {
+    run_native_test("tier3_io/file_io_errors", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_append_roundtrip() {
     run_native_test("tier3_io/file_append_roundtrip", Profile::Default);
 }
@@ -2393,37 +2550,24 @@ fn test_tier3_transformer_lift_run_except_native() {
     run_native_test("tier3_io/transformer_lift_run_except", Profile::Default);
 }
 
-/// Threads, `MVar`s and `Chan`s run under the closure IO model only (#38).
+/// Threads, `MVar`s and `Chan`s, under either IO model (#38, #75).
 #[test]
 fn test_tier3_concurrent_mvar_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_mvar", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_chan_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_chan", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_threads_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_threads", Profile::Default);
 }
 
 #[test]
 fn test_tier3_forever_exception_native() {
-    // Under the eager model a throw does not end `forever`.
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/forever_exception", Profile::Default);
 }
 
@@ -2459,25 +2603,16 @@ fn test_tier2_integer_division_family_native() {
 
 #[test]
 fn test_tier3_concurrent_async_exceptions_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_async_exceptions", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_throw_to_main_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_throw_to_main", Profile::Default);
 }
 
 #[test]
 fn test_tier3_concurrent_preemption_native() {
-    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
-        return;
-    }
     run_native_test("tier3_io/concurrent_preemption", Profile::Default);
 }
 
@@ -2501,9 +2636,152 @@ fn test_tier2_print_polymorphic_string_native() {
 
 #[test]
 fn test_tier3_mask_restore_native() {
-    // Under the eager model `mask` with `restore` still crashes (#91).
+    // Under the eager model an IO action passed to a user function runs at
+    // the call, so `forkFinally'`'s failing action escapes its `try`.
+    // `tier3_io/mask_restore_direct` covers `mask` itself in both models.
     if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
         return;
     }
     run_native_test("tier3_io/mask_restore", Profile::Default);
+}
+
+#[test]
+fn test_tier3_concurrent_mask_deferral_native() {
+    // Its last case needs `restore` to unmask; under the eager model the
+    // action given to `restore` has already run, masked, at the call.
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/concurrent_mask_deferral", Profile::Default);
+}
+
+#[test]
+fn test_tier3_concurrent_pure_preemption_native() {
+    run_native_test("tier3_io/concurrent_pure_preemption", Profile::Default);
+}
+
+#[test]
+fn test_tier3_mvar_lazy_contents_native() {
+    run_native_test("tier3_io/mvar_lazy_contents", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monad_poly_recursive_bind_native() {
+    run_native_test("tier3_io/monad_poly_recursive_bind", Profile::Default);
+}
+
+#[test]
+fn test_tier2_caf_sharing_native() {
+    run_native_test("tier2_functions/caf_sharing", Profile::Default);
+}
+
+#[test]
+fn test_tier2_recursive_caf_lists_native() {
+    run_native_test("tier2_functions/recursive_caf_lists", Profile::Default);
+}
+
+#[test]
+fn test_tier3_trace_helpers_native() {
+    run_native_test("tier3_io/trace_helpers", Profile::Default);
+}
+
+#[test]
+fn test_tier2_maybe_show_results_native() {
+    run_native_test("tier2_functions/maybe_show_results", Profile::Default);
+}
+
+#[test]
+fn test_tier3_mask_restore_direct_native() {
+    run_native_test("tier3_io/mask_restore_direct", Profile::Default);
+}
+
+#[test]
+fn test_tier2_infix_constructor_lhs_native() {
+    run_native_test("tier2_functions/infix_constructor_lhs", Profile::Default);
+}
+
+#[test]
+fn test_tier2_reads_enum_native() {
+    run_native_test("tier2_functions/reads_enum", Profile::Default);
+}
+
+#[test]
+fn test_tier2_local_numeric_conversion_native() {
+    run_native_test("tier2_functions/local_numeric_conversion", Profile::Default);
+}
+
+#[test]
+fn test_tier2_sort_derived_ord_native() {
+    run_native_test("tier2_functions/sort_derived_ord", Profile::Default);
+}
+
+#[test]
+fn test_tier2_fold_curried_function_native() {
+    run_native_test("tier2_functions/fold_curried_function", Profile::Default);
+}
+
+#[test]
+fn test_tier2_hof_curried_function_native() {
+    run_native_test("tier2_functions/hof_curried_function", Profile::Default);
+}
+
+#[test]
+fn test_tier2_map_runtime_string_keys_native() {
+    run_native_test("tier2_functions/map_runtime_string_keys", Profile::Default);
+}
+
+#[test]
+fn test_tier2_show_fractional_defaults_native() {
+    run_native_test("tier2_functions/show_fractional_defaults", Profile::Default);
+}
+
+#[test]
+fn test_tier2_negation_precedence_native() {
+    run_native_test("tier2_functions/negation_precedence", Profile::Default);
+}
+
+#[test]
+fn test_tier2_list_eq_functions_native() {
+    run_native_test("tier2_functions/list_eq_functions", Profile::Default);
+}
+
+#[test]
+fn test_tier2_list_difference_native() {
+    // Under the eager model the `deleteBy` lambda that `\\` lowers to does not
+    // see its operands' boxed type and compares addresses (it did before, as
+    // a `filter`, too).
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier2_functions/list_difference", Profile::Default);
+}
+
+#[test]
+fn test_tier2_maybe_either_reexports_native() {
+    run_native_test("tier2_functions/maybe_either_reexports", Profile::Default);
+}
+
+#[test]
+fn test_tier2_map_key_traversals_native() {
+    run_native_test("tier2_functions/map_key_traversals", Profile::Default);
+}
+
+#[test]
+fn test_tier2_replicate_m_list_native() {
+    run_native_test("tier2_functions/replicate_m_list", Profile::Default);
+}
+
+#[test]
+fn test_tier2_numeric_show_native() {
+    run_native_test("tier2_functions/numeric_show", Profile::Default);
+}
+
+#[test]
+fn test_tier2_printf_basic_native() {
+    run_native_test("tier2_functions/printf_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier2_enum_ranges_bounds_round_native() {
+    run_native_test("tier2_functions/enum_ranges_bounds_round", Profile::Default);
 }

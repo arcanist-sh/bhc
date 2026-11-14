@@ -59,6 +59,7 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg_lit = core::Expr::Lit(Literal::String(Symbol::intern(msg)), Ty::Error, span);
     core::Expr::App(
@@ -183,6 +184,22 @@ fn is_monad_method_name(name: &str) -> bool {
 }
 
 fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> core::Expr {
+    // Every variable occurrence records the type the checker resolved it at.
+    // Unlike `ty` below, nothing infers a width from `checked_ty`, so it can
+    // be filled without the restrictions that follow. One caveat for readers:
+    // a desugared operator (`-x` as `negate x`) shares its span with the
+    // whole expression, and the type recorded there is the result's.
+    let core = match core {
+        core::Expr::Var(mut v, s) => {
+            if matches!(v.checked_ty, Ty::Error) {
+                if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+                    v.checked_ty = resolved;
+                }
+            }
+            core::Expr::Var(v, s)
+        }
+        other => other,
+    };
     // A monad method takes the RESOLVED occurrence type. Its raw one is
     // whatever a single pass left behind — `foldl' (>>=) …` records
     // `(t606 t604) -> ((t604 -> t606 t608) -> t606 t608)`, a bare type
@@ -255,10 +272,19 @@ fn type_equality_operator(
     // type is some other expression's — `(== '\n')` came out `Text -> Text ->
     // Bool` and crashed every markdown read in `anyLine`.
     let is_text = |o: &hir::Expr| matches!(ctx.resolved_expr_ty_opt(o.span()), Some(Ty::Con(c)) if c.name.as_str() == "Text");
-    if !(is_text(a) && is_text(x)) {
+    let t = if is_text(a) && is_text(x) {
+        Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star))
+    } else if let Some(list) = ground_list_operands(ctx, a, x) {
+        // Likewise a list (`String` included) that both operands are
+        // resolved at. The operator's span is the whole expression's, so
+        // where the type recorded there is the result `Bool`, the operator
+        // kept `t -> t -> Bool` and codegen compared two pattern-bound
+        // strings by address (`TagOpen n ~== TagOpen p` in a function with a
+        // guarded clause, under the eager IO model).
+        list
+    } else {
         return e;
-    }
-    let t = Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star));
+    };
     let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
     match e {
         core::Expr::App(g, rhs, sp) => match *g {
@@ -283,6 +309,22 @@ fn type_equality_operator(
         },
         other => other,
     }
+}
+
+/// The list type both operands of an (in)equality are resolved at, when it
+/// is the same ground type on each side (`String` spelled as `[Char]`).
+fn ground_list_operands(ctx: &LowerContext, a: &hir::Expr, x: &hir::Expr) -> Option<Ty> {
+    let list_of = |o: &hir::Expr| -> Option<Ty> {
+        match ctx.resolved_expr_ty_opt(o.span())? {
+            Ty::Con(c) if c.name.as_str() == "String" => Some(Ty::List(Box::new(Ty::Con(
+                TyCon::new(Symbol::intern("Char"), Kind::Star),
+            )))),
+            t @ Ty::List(_) if !has_type_variables(&t) => Some(t),
+            _ => None,
+        }
+    };
+    let lhs = list_of(a)?;
+    (list_of(x)? == lhs).then_some(lhs)
 }
 
 fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
@@ -376,6 +418,7 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
                 name: error_name,
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let msg = core::Expr::Lit(
                 Literal::String(Symbol::intern("pattern match error")),
@@ -427,6 +470,12 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
                 let ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
                 return Ok(core::Expr::Lit(Literal::Double(*n as f64), ty, span));
             }
+            // Likewise at `Float`: `(16777216 :: Float)` in a tuple was shown
+            // as the float with the integer's bits.
+            Some("Float") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Float"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Float(*n as f64), ty, span));
+            }
             _ => {}
         }
         // At a type variable (a literal in a class-polymorphic body), keep the
@@ -461,6 +510,25 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
             name: Symbol::intern("Data.Text.pack"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
+        };
+        return Ok(core::Expr::App(
+            Box::new(core::Expr::Var(pack, span)),
+            Box::new(core_lit),
+            span,
+        ));
+    }
+
+    // `ByteString`, strict or lazy, is packed the same way: its RTS entry
+    // points read a header too. A literal at `ByteString` stayed a char list
+    // and was read as one: `BS.length ("four" :: ByteString)` was 0 and
+    // `BC.putStrLn "lit"` printed an empty line.
+    if let Some(pack) = occ.as_ref().and_then(bytestring_pack_for) {
+        let pack = Var {
+            name: Symbol::intern(pack),
+            id: VarId::new(0),
+            ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         return Ok(core::Expr::App(
             Box::new(core::Expr::Var(pack, span)),
@@ -517,6 +585,30 @@ fn dispatchable_isstring_ty(ty: &Ty) -> bool {
         Ty::App(f, _) => dispatchable_isstring_ty(f),
         // `[Char]` and bare lists are the native string form.
         _ => false,
+    }
+}
+
+/// The builtin that packs a string literal into this type, when its head is
+/// a `ByteString`: strict (`ByteString`, `Data.ByteString.ByteString`) or
+/// lazy (`LazyByteString`, as the type checker names `Data.ByteString.Lazy`'s,
+/// or that module's name spelled out).
+fn bytestring_pack_for(ty: &Ty) -> Option<&'static str> {
+    match ty {
+        Ty::Con(c) => {
+            let n = c.name.as_str();
+            if n == "LazyByteString"
+                || n.ends_with(".LazyByteString")
+                || n.ends_with(".Lazy.ByteString")
+            {
+                Some("Data.ByteString.Lazy.pack")
+            } else if n == "ByteString" || n.ends_with(".ByteString") {
+                Some("Data.ByteString.pack")
+            } else {
+                None
+            }
+        }
+        Ty::App(f, _) => bytestring_pack_for(f),
+        _ => None,
     }
 }
 
@@ -939,6 +1031,7 @@ fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core:
         name: Symbol::intern("foldr"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let body = app(
         app(app(core::Expr::Var(foldr_var, span), step), mempty),
@@ -978,6 +1071,7 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         v.name.as_str(),
         "+" | "-"
             | "*"
+            | "/"
             | "=="
             | "/="
             | "<"
@@ -1005,8 +1099,10 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
                     if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
             // Arithmetic on Double/Float: passed as a function value
             // (`foldr (+) 0 xs`) the operator has no operands to read it from.
-            let floating = matches!(v.name.as_str(), "+" | "-" | "*")
-                && matches!(&resolved, Ty::Fun(a, _)
+            let floating = matches!(
+                v.name.as_str(),
+                "+" | "-" | "*" | "/" | "negate" | "abs" | "signum"
+            ) && matches!(&resolved, Ty::Fun(a, _)
                     if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")));
             if integer || ground_list_eq || floating {
                 v.ty = resolved;
@@ -1019,9 +1115,91 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
                 // so the type found there is the RESULT (`[x * x | x <- xs]`,
                 // #51). These operators' operands share the result's type.
                 v.ty = Ty::fun(resolved.clone(), Ty::fun(resolved.clone(), resolved));
+            } else if matches!(v.name.as_str(), "negate" | "abs" | "signum")
+                && matches!(&resolved, Ty::Con(c)
+                    if matches!(c.name.as_str(), "Integer" | "Double" | "Float"))
+            {
+                // Unary minus desugars to `negate e` with the whole
+                // expression's span on `negate`, so the type found there is
+                // again the result, which is also the operand's.
+                v.ty = Ty::fun(resolved.clone(), resolved);
             }
         }
         return;
+    }
+    // A Map/Set built from a list orders its keys as machine words unless
+    // codegen knows they are strings, Text or an enumeration; a list
+    // comprehension's own type does not survive to codegen, so the occurrence
+    // carries it (`M.fromListWith (+) [(w, 1) | w <- words s]` kept every
+    // duplicate).
+    //
+    // The functions that take a key likewise: in `\m w -> M.insertWith (+) w
+    // 1 m` neither the key nor the map has a type of its own.
+    if matches!(
+        v.name.as_str(),
+        "Data.Map.fromList"
+            | "Data.Map.fromListWith"
+            | "Data.Set.fromList"
+            | "Data.Map.insert"
+            | "Data.Map.insertWith"
+            | "Data.Map.member"
+            | "Data.Map.notMember"
+            | "Data.Map.lookup"
+            | "Data.Map.findWithDefault"
+            | "Data.Map.delete"
+            | "Data.Map.adjust"
+            | "Data.Map.alter"
+            | "Data.Map.update"
+            | "Data.Map.singleton"
+            | "Data.Set.insert"
+            | "Data.Set.member"
+            | "Data.Set.notMember"
+            | "Data.Set.delete"
+            | "Data.Set.singleton"
+    ) && matches!(v.ty, Ty::Error | Ty::Var(_) | Ty::Forall(..))
+    {
+        if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(span) {
+            if !has_type_variables(&resolved) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    // List functions that compare elements for equality: codegen reads the
+    // element type off the occurrence and, for strings or a user type with a
+    // derived Eq, compares through an equality closure instead of by address
+    // (`nub ["a", "b", "a"]` kept both "a"s).
+    if matches!(
+        v.name.as_str(),
+        "nub" | "group" | "delete" | "union" | "intersect" | "elem" | "notElem" | "\\\\"
+    ) && matches!(v.ty, Ty::Error | Ty::Var(_) | Ty::Forall(..))
+    {
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| crate::context::canonical_list_spelling(&t));
+        if let Some(resolved @ Ty::Fun(..)) = resolved {
+            if !has_type_variables(&resolved) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    // `sort`/`maximum`/`minimum` over a user type: codegen calls its derived
+    // `compare` instead of comparing raw words (addresses, for a boxed value).
+    if matches!(v.name.as_str(), "sort" | "maximum" | "minimum") {
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| crate::context::canonical_list_spelling(&t));
+        if let Some(resolved @ Ty::Fun(..)) = resolved {
+            let user_elem = matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(),
+                Ty::List(e) if matches!(e.as_ref(), Ty::Con(c) if !matches!(c.name.as_str(),
+                    "Int" | "Integer" | "Double" | "Float" | "Char" | "Bool" | "Word"
+                        | "Text" | "String" | "Ordering"))));
+            if user_elem {
+                v.ty = resolved;
+                return;
+            }
+        }
     }
     if matches!(v.name.as_str(), "sum" | "product" | "maximum" | "minimum") {
         // The element type of a `sum`/`product` over `Integer` (boxed
@@ -1079,9 +1257,21 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         }
         return;
     }
+    if matches!(v.name.as_str(), "floor" | "ceiling" | "round" | "truncate") {
+        // At `Integer` the result is a bignum; codegen's rounding answers a
+        // machine word unless the occurrence says so.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(_, r)
+                if matches!(r.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
+            {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
     if !matches!(
         v.name.as_str(),
-        "fromIntegral" | "fromInteger" | "toInteger"
+        "fromIntegral" | "fromInteger" | "toInteger" | "realToFrac"
     ) {
         return;
     }
@@ -1133,6 +1323,7 @@ fn lower_function_arrow_combinator(
         name: Symbol::intern("(,)"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let pair = |a: core::Expr, b: core::Expr| app(app(var(&pair_con), a), b);
     let f = ctx.fresh_var("$arr_f", Ty::Error, span);
@@ -1171,7 +1362,36 @@ fn lower_function_arrow_combinator(
     ))
 }
 
+/// `minBound`/`maxBound` resolved at a builtin bounded type, as the literal.
+/// Codegen answers a bare `maxBound` with the program's only user `Bounded`
+/// type when there is one, so `maxBound :: Int` printed that type's last
+/// constructor.
+fn builtin_bound_literal(ctx: &LowerContext, def_ref: &DefRef) -> Option<core::Expr> {
+    let name = ctx.lookup_var(def_ref.def_id)?.name;
+    let is_max = match name.as_str() {
+        "maxBound" => true,
+        "minBound" => false,
+        _ => return None,
+    };
+    let ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
+    let Ty::Con(c) = &ty else {
+        return None;
+    };
+    let lit = match c.name.as_str() {
+        "Int" | "Int64" => Literal::Int(if is_max { i64::MAX } else { i64::MIN }),
+        "Int32" => Literal::Int(i64::from(if is_max { i32::MAX } else { i32::MIN })),
+        "Int16" => Literal::Int(i64::from(if is_max { i16::MAX } else { i16::MIN })),
+        "Int8" => Literal::Int(i64::from(if is_max { i8::MAX } else { i8::MIN })),
+        "Char" => Literal::Char(if is_max { char::MAX } else { '\0' }),
+        _ => return None,
+    };
+    Some(core::Expr::Lit(lit, ty, def_ref.span))
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
+    if let Some(bound) = builtin_bound_literal(ctx, def_ref) {
+        return Ok(bound);
+    }
     let mut expr = lower_var_inner(ctx, def_ref)?;
     // The builtin `read` is dispatched on its result type in codegen
     // (`read "3.25" :: Double`). Its own type is `String -> a`, so give the
@@ -1182,7 +1402,45 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             Ty::Fun(_, r) => matches!(**r, Ty::Var(_)),
             _ => false,
         };
-        if v.name.as_str() == "read" && generic {
+        if generic {
+            let name = v.name;
+            if let Some(reader) = generic_read(ctx, name.as_str(), def_ref.span) {
+                return Ok(reader);
+            }
+        }
+        let name = v.name;
+        if let Some(op) = bytestring_class_op(ctx, name.as_str(), def_ref.span) {
+            return Ok(op);
+        }
+        // `Data.ByteString.Char8` is the strict ByteString at `Char`: a
+        // character and a byte are both the machine word, so the function is
+        // the strict primitive of the same name. The type checker has given
+        // the occurrence its `Char` type by now.
+        if let Some(op) = v.name.as_str().strip_prefix("Data.ByteString.Char8.") {
+            if char8_is_strict_primitive(op) {
+                v.name = Symbol::intern(&format!("Data.ByteString.{op}"));
+            }
+        }
+        if v.name.as_str() == "Data.ByteString.map" {
+            return Ok(bytestring_map(ctx, def_ref.span));
+        }
+        // As a value (`mapM_ BC.putStrLn xs`, `BC.putStrLn . f`) the action
+        // builtin has no wrapper; under a lambda the call is saturated.
+        if matches!(
+            v.name.as_str(),
+            "Data.ByteString.putStr" | "Data.ByteString.putStrLn"
+        ) {
+            let name = v.name;
+            let span = def_ref.span;
+            let bytes = ctx.fresh_var("$bs_put", Ty::Error, span);
+            let call = core::Expr::App(
+                Box::new(nullary_var(name.as_str(), span)),
+                Box::new(core::Expr::Var(bytes.clone(), span)),
+                span,
+            );
+            return Ok(core::Expr::Lam(bytes, Box::new(call), span));
+        }
+        if matches!(v.name.as_str(), "read" | "reads") && generic {
             if let Some(resolved @ Ty::Fun(..)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 v.ty = resolved;
             }
@@ -1251,6 +1509,235 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
     Ok(expr)
+}
+
+/// `show`, `print`, `==` and `/=` at the strict `ByteString`.
+///
+/// A ByteString is an opaque runtime handle, and codegen picks these
+/// operations from the shape of their operands, which says nothing here:
+/// `==` compared two handles by address (always `False`) and `show` printed
+/// whatever the handle's words held. The resolved type does say, so:
+/// equality is the runtime's `Data.ByteString.eq`, and showing goes through
+/// the bytes as a `String`, which is how `bytestring` shows one.
+fn bytestring_class_op(ctx: &mut LowerContext, name: &str, span: Span) -> Option<core::Expr> {
+    if !matches!(name, "show" | "print" | "==" | "/=") {
+        return None;
+    }
+    let resolved = ctx.resolved_expr_ty_opt(span)?;
+    let Ty::Fun(operand, result) = &resolved else {
+        return None;
+    };
+    if !matches!(operand.as_ref(), Ty::Con(c) if c.name.as_str() == "ByteString") {
+        return None;
+    }
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let string_ty = Ty::List(Box::new(Ty::Con(TyCon::new(
+        Symbol::intern("Char"),
+        Kind::Star,
+    ))));
+    if matches!(name, "show" | "print") {
+        let bytes = ctx.fresh_var("$bs_shown", operand.as_ref().clone(), span);
+        let unpacked = app(
+            nullary_var("Data.ByteString.unpack", span),
+            core::Expr::Var(bytes.clone(), span),
+        );
+        // The same operation, at the string of the bytes.
+        let at_string = core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Fun(Box::new(string_ty), result.clone()),
+                checked_ty: Ty::Error,
+            },
+            span,
+        );
+        return Some(core::Expr::Lam(
+            bytes,
+            Box::new(app(at_string, unpacked)),
+            span,
+        ));
+    }
+    let lhs = ctx.fresh_var("$bs_lhs", operand.as_ref().clone(), span);
+    let rhs = ctx.fresh_var("$bs_rhs", operand.as_ref().clone(), span);
+    let mut equal = app(
+        app(
+            nullary_var("Data.ByteString.eq", span),
+            core::Expr::Var(lhs.clone(), span),
+        ),
+        core::Expr::Var(rhs.clone(), span),
+    );
+    if name == "/=" {
+        equal = app(nullary_var("not", span), equal);
+    }
+    Some(core::Expr::Lam(
+        lhs,
+        Box::new(core::Expr::Lam(rhs, Box::new(equal), span)),
+        span,
+    ))
+}
+
+/// The `Data.ByteString.Char8` functions that are a strict-ByteString
+/// primitive (or, for `map`, the rewrite below) at `Char`.
+fn char8_is_strict_primitive(op: &str) -> bool {
+    matches!(
+        op,
+        "empty"
+            | "singleton"
+            | "pack"
+            | "unpack"
+            | "null"
+            | "length"
+            | "head"
+            | "last"
+            | "tail"
+            | "init"
+            | "append"
+            | "cons"
+            | "snoc"
+            | "take"
+            | "drop"
+            | "reverse"
+            | "elem"
+            | "index"
+            | "isPrefixOf"
+            | "isSuffixOf"
+            | "readFile"
+            | "writeFile"
+            | "putStr"
+            | "putStrLn"
+            | "map"
+    )
+}
+
+/// `Data.ByteString.map` as `\\f bs -> pack (map f (unpack bs))`: the
+/// backend has no primitive for it.
+fn bytestring_map(ctx: &mut LowerContext, span: Span) -> core::Expr {
+    let f = ctx.fresh_var("$bs_map_f", Ty::Error, span);
+    let bytes = ctx.fresh_var("$bs_map_bs", Ty::Error, span);
+    let app = |g: core::Expr, a: core::Expr| core::Expr::App(Box::new(g), Box::new(a), span);
+    let unpacked = app(
+        nullary_var("Data.ByteString.unpack", span),
+        core::Expr::Var(bytes.clone(), span),
+    );
+    let mapped = app(
+        app(nullary_var("map", span), core::Expr::Var(f.clone(), span)),
+        unpacked,
+    );
+    let packed = app(nullary_var("Data.ByteString.pack", span), mapped);
+    core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(bytes, Box::new(packed), span)),
+        span,
+    )
+}
+
+/// Whether a class method's occurrence is known to be at a type other than
+/// the instance being defined: its class parameter, read off the type the
+/// checker recorded for the occurrence, has a concrete head that is not the
+/// instance type's.
+fn occurrence_is_at_another_type(
+    ctx: &LowerContext,
+    class_name: Symbol,
+    method_def_id: DefId,
+    span: Span,
+    inst_ty: &Ty,
+) -> bool {
+    let Some(inst_head) = applied_head_name(inst_ty) else {
+        return false;
+    };
+    let differs = |ty: &Ty| has_concrete_head(ty) && applied_head_name(ty) != Some(inst_head);
+    if let Some(params) = ctx.class_params_from_occurrence_any(class_name, method_def_id, span) {
+        return params.first().is_some_and(differs);
+    }
+    // A builtin class's method has no scheme to match against. For the
+    // constructor classes the container is where the result is built.
+    if !matches!(
+        class_name.as_str(),
+        "Functor" | "Applicative" | "Monad" | "Foldable" | "Traversable"
+    ) {
+        return false;
+    }
+    let Some(mut ty) = ctx.resolved_expr_ty_opt(span) else {
+        return false;
+    };
+    while let Ty::Fun(_, result) = ty {
+        ty = *result;
+    }
+    match crate::context::canonical_list_spelling(&ty) {
+        Ty::App(container, _) => differs(&container),
+        Ty::List(_) => true,
+        _ => false,
+    }
+}
+
+/// `read`, `readMaybe` or `reads` at a type the runtime's generic reader
+/// handles and codegen's own `read` does not (a data type deriving `Read`, a
+/// tuple, a nested list, `Maybe`, …): the reader applied to the type's
+/// description ([`crate::read_desc`]), as a function of the string.
+///
+/// `Int`, `Double` and `Float`, and `read` at a list of them, keep the
+/// builtin, which codegen lowers directly.
+fn generic_read(ctx: &mut LowerContext, name: &str, span: Span) -> Option<core::Expr> {
+    let bare = match name.rsplit_once('.') {
+        None => name,
+        Some(("Prelude" | "Text.Read" | "GHC.Read", op)) => op,
+        Some(_) => return None,
+    };
+    let reader = match bare {
+        "read" => "$read_generic",
+        "readMaybe" => "$readMaybe_generic",
+        "reads" => "$reads_generic",
+        _ => return None,
+    };
+    let Ty::Fun(_, result) = ctx.resolved_expr_ty_opt(span)? else {
+        return None;
+    };
+    let result = crate::context::canonical_list_spelling(&result);
+    let target = match (bare, result) {
+        ("read", target) => target,
+        ("readMaybe", Ty::App(f, target)) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe") => {
+            *target
+        }
+        ("reads", Ty::List(pair)) => match *pair {
+            Ty::Tuple(mut parts) if parts.len() == 2 => parts.swap_remove(0),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if has_type_variables(&target) {
+        return None;
+    }
+    let scalar =
+        |t: &Ty| matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Int" | "Double" | "Float"));
+    if scalar(&target) || (bare == "read" && matches!(&target, Ty::List(e) if scalar(e))) {
+        return None;
+    }
+    let description = crate::read_desc::read_description(&ctx.read_shapes, &target)?;
+    let literal = core::Expr::Lit(
+        Literal::String(Symbol::intern(&description)),
+        Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        )))),
+        span,
+    );
+    // Always a saturated call: `map read xs` passes the reader as a value,
+    // and codegen needs the description as the literal it is.
+    let text = ctx.fresh_var(
+        "$read_text",
+        Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        )))),
+        span,
+    );
+    let described = core::Expr::App(Box::new(nullary_var(reader, span)), Box::new(literal), span);
+    let call = core::Expr::App(
+        Box::new(described),
+        Box::new(core::Expr::Var(text.clone(), span)),
+        span,
+    );
+    Some(core::Expr::Lam(text, Box::new(call), span))
 }
 
 fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
@@ -1409,6 +1896,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                                     name: Symbol::intern("()"),
                                     id: VarId::new(0),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 },
                                 def_ref.span,
                             );
@@ -1643,7 +2131,19 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                 // occurrence type may keep the class param generic there, so
                 // resolve at the enclosing instance type directly.
                 if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                    if ctx.current_instance_class() == Some(class_name) {
+                    // But not when this use is at ANOTHER type: `fmap g (p s)`
+                    // inside `instance Functor Parser`, where `p s` is a
+                    // `Maybe`, is Maybe's `fmap`. Taken for the enclosing
+                    // instance's, it ran the parser's `fmap` on a `Maybe`.
+                    if ctx.current_instance_class() == Some(class_name)
+                        && !occurrence_is_at_another_type(
+                            ctx,
+                            class_name,
+                            def_ref.def_id,
+                            def_ref.span,
+                            &inst_ty,
+                        )
+                    {
                         if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                             name,
                             class_name,
@@ -1692,7 +2192,18 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                     || !in_scope_dict_matches(ctx, class_name, def_ref.span))
             {
                 if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                    if !LowerContext::is_builtin_monad_type(&inst_ty) {
+                    // Not when this occurrence is at another type: the
+                    // `fmap` of `fmap g (p s)` inside `instance Functor
+                    // Parser`, with `p s :: Maybe …`, is Maybe's (#110).
+                    if !LowerContext::is_builtin_monad_type(&inst_ty)
+                        && !occurrence_is_at_another_type(
+                            ctx,
+                            class_name,
+                            def_ref.def_id,
+                            def_ref.span,
+                            &inst_ty,
+                        )
+                    {
                         if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                             name,
                             class_name,
@@ -1789,6 +2300,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
                                         name: Symbol::intern("foldr"),
                                         id: VarId::new(0),
                                         ty: Ty::Error,
+                                        checked_ty: Ty::Error,
                                     };
                                     return Ok(core::Expr::App(
                                         Box::new(core::Expr::App(
@@ -1838,6 +2350,7 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
             name: Symbol::intern("unknown"),
             id: VarId::new(def_ref.def_id.index()),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(placeholder, def_ref.span)
     };
@@ -3354,11 +3867,13 @@ fn lower_value_arg(
                 name: Symbol::intern("[]"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let cons_var = Var {
                 name: Symbol::intern(":"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let mut result = core::Expr::Var(nil_var, *list_span);
             for elem in elems.iter().rev() {
@@ -4587,6 +5102,7 @@ fn traversal_ops(
                         name: Symbol::intern(name),
                         id: VarId::new(0),
                         ty,
+                        checked_ty: Ty::Error,
                     },
                     span,
                 )
@@ -5163,6 +5679,7 @@ fn nullary_var(name: &str, span: Span) -> core::Expr {
             name: Symbol::intern(name),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         },
         span,
     )
@@ -5390,6 +5907,7 @@ fn lower_lift_a2_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Op
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty,
+                checked_ty: Ty::Error,
             },
             span,
         )
@@ -5664,6 +6182,45 @@ fn try_lower_monadic_traversal(
         },
         _ => return Ok(None),
     };
+    // `replicateM n xs` in the list monad is `sequence (replicate n xs)`:
+    // every combination. The traversal below runs actions, and at a list it
+    // produced nothing (`print (replicateM 2 "ab")` printed no line).
+    if args.len() == 2
+        && ctx
+            .lookup_var(head_ref.def_id)
+            .is_some_and(|v| v.name.as_str() == "replicateM")
+        && matches!(
+            ctx.resolved_expr_ty_opt(args[1].span())
+                .map(|t| crate::context::canonical_list_spelling(&t)),
+            Some(Ty::List(_))
+        )
+    {
+        let n = lower_expr(ctx, args[0])?;
+        let xs = lower_expr(ctx, args[1])?;
+        let app =
+            |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+        let replicated = app(app(nullary_var("replicate", span), n), xs);
+        // Typed `[[a]] -> [[a]]`, which codegen reads as the list monad's
+        // `sequence` (the cartesian product); untyped it is IO's.
+        let elem = match ctx
+            .resolved_expr_ty_opt(args[1].span())
+            .map(|t| crate::context::canonical_list_spelling(&t))
+        {
+            Some(Ty::List(e)) => *e,
+            _ => Ty::Error,
+        };
+        let lists = Ty::List(Box::new(Ty::List(Box::new(elem))));
+        let sequence = core::Expr::Var(
+            Var {
+                name: Symbol::intern("sequence"),
+                id: VarId::new(0),
+                ty: Ty::fun(lists.clone(), lists),
+                checked_ty: Ty::Error,
+            },
+            span,
+        );
+        return Ok(Some(app(sequence, replicated)));
+    }
     lower_monadic_traversal_spine(ctx, head_ref, args, span)
 }
 
@@ -5853,6 +6410,8 @@ fn lower_foldable_consumer(
         ("sum" | "product" | "length" | "null" | "maximum" | "minimum" | "toList", 1) => 0,
         ("elem" | "notElem" | "any" | "all" | "mapM_" | "traverse_", 2) => 1,
         ("forM_" | "for_", 2) => 0,
+        ("foldl" | "foldl'", 3) => 2,
+        ("foldMap", 2) => 1,
         _ => return Ok(None),
     };
     let Some(container_ty) = call_arg_ty(ctx, head_ref, args, container_pos) else {
@@ -6211,6 +6770,7 @@ fn lower_monadic_traversal_spine_inner(
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty: Ty::Fun(Box::new(Ty::Error), Box::new(monad_ty.clone())),
+                checked_ty: Ty::Error,
             },
             span,
         )
@@ -6365,8 +6925,19 @@ fn lower_monadic_traversal_spine_inner(
                 None => lowered,
             }
         }
-        (None, Some(v)) if foldable_cty.is_none() => core::Expr::Var(v.clone(), span),
-        (None, Some(_)) => return Ok(None),
+        (None, Some(v)) => {
+            let param = core::Expr::Var(v.clone(), span);
+            match &foldable_cty {
+                // Point-free over another `Foldable` (`mapM_ print =<< m` at
+                // a `Tree`): the parameter is the container, folded through
+                // its list. Given up on, the builtin walked it as a list.
+                Some(cty) => match foldable_list(ctx, cty, param, span) {
+                    Some(list) => list,
+                    None => return Ok(None),
+                },
+                None => param,
+            }
+        }
         (None, None) => return Ok(None),
     };
     let fn_core = match fn_expr {
@@ -6460,6 +7031,7 @@ fn lower_monadic_traversal_spine_inner(
             name: Symbol::intern("foldr"),
             id: VarId::new(0),
             ty: foldr_ty,
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -6727,13 +7299,241 @@ fn try_lower_text_group_by(
     Ok(None)
 }
 
+/// One piece of a `printf` format string.
+enum PrintfPiece {
+    /// Literal text (with `%%` already turned into `%`).
+    Text(String),
+    /// A conversion: `-` flag, `0` flag, width, precision, conversion char.
+    Spec {
+        left: bool,
+        zero: bool,
+        width: Option<usize>,
+        precision: Option<usize>,
+        conv: char,
+    },
+}
+
+/// Parse a `printf` format, or `None` for one this lowering does not handle.
+fn parse_printf_format(fmt: &str) -> Option<Vec<PrintfPiece>> {
+    let mut pieces = Vec::new();
+    let mut text = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            text.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            text.push('%');
+            continue;
+        }
+        let (mut left, mut zero) = (false, false);
+        while let Some(&f) = chars.peek() {
+            match f {
+                '-' => left = true,
+                '0' => zero = true,
+                _ => break,
+            }
+            chars.next();
+        }
+        let mut width = String::new();
+        while let Some(&d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+            width.push(d);
+            chars.next();
+        }
+        let mut precision = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut p = String::new();
+            while let Some(&d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+                p.push(d);
+                chars.next();
+            }
+            precision = Some(p.parse().unwrap_or(0));
+        }
+        let conv = chars.next()?;
+        if !matches!(conv, 'd' | 'i' | 's' | 'c' | 'f' | 'x' | 'v') {
+            return None;
+        }
+        if !text.is_empty() {
+            pieces.push(PrintfPiece::Text(std::mem::take(&mut text)));
+        }
+        pieces.push(PrintfPiece::Spec {
+            left,
+            zero,
+            width: width.parse().ok(),
+            precision,
+            conv,
+        });
+    }
+    if !text.is_empty() {
+        pieces.push(PrintfPiece::Text(text));
+    }
+    Some(pieces)
+}
+
+/// `printf "<literal>" a1 … an` (Text.Printf, which bhc only stubbed) as the
+/// formatted string, wrapped in `putStr` when the call is resolved at `IO`.
+/// The format is parsed here; each argument becomes a `String` by its
+/// conversion and type: `%d` a typed `show`, `%s` the string itself, `%c`
+/// the character, `%f` fixed-point (`%.2f`), `%x` hexadecimal, with width
+/// and the `-`/`0` flags. A format or argument this does not cover leaves the
+/// stub in place.
+fn try_lower_printf(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let mut args: Vec<&hir::Expr> = vec![x];
+    let mut head = f;
+    while let Expr::App(g, a, _) = head {
+        args.push(a.as_ref());
+        head = g.as_ref();
+    }
+    args.reverse();
+    let Expr::Var(dr) = head else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(name.as_str(), "printf" | "Text.Printf.printf") {
+        return Ok(None);
+    }
+    let Some((fmt_expr, values)) = args.split_first() else {
+        return Ok(None);
+    };
+    let Expr::Lit(hir::Lit::String(fmt), _) = fmt_expr else {
+        return Ok(None);
+    };
+    let Some(pieces) = parse_printf_format(fmt.as_str()) else {
+        return Ok(None);
+    };
+    let specs = pieces
+        .iter()
+        .filter(|p| matches!(p, PrintfPiece::Spec { .. }))
+        .count();
+    if specs != values.len() {
+        return Ok(None);
+    }
+    // The call's own span can carry an enclosing statement's type (a `do`
+    // statement shares it with its `>>`); `printf`'s type at its head, with
+    // one arrow per argument applied, is the result.
+    let result_ty = ctx.resolved_expr_ty_opt(dr.span).and_then(|mut t| {
+        for _ in 0..args.len() {
+            match t {
+                Ty::Fun(_, r) => t = *r,
+                _ => return None,
+            }
+        }
+        Some(t)
+    });
+    let to_io = match result_ty.map(|t| crate::context::canonical_list_spelling(&t)) {
+        Some(Ty::App(m, _)) if matches!(m.as_ref(), Ty::Con(c) if c.name.as_str() == "IO") => true,
+        Some(Ty::List(e)) if matches!(e.as_ref(), Ty::Con(c) if c.name.as_str() == "Char") => false,
+        Some(Ty::Con(c)) if c.name.as_str() == "String" => false,
+        _ => return Ok(None),
+    };
+    let char_ty = Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star));
+    let string_ty = Ty::List(Box::new(char_ty));
+    let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let lit_str = |s: &str| {
+        core::Expr::Lit(
+            Literal::String(Symbol::intern(s)),
+            Ty::List(Box::new(Ty::Con(TyCon::new(
+                Symbol::intern("Char"),
+                Kind::Star,
+            )))),
+            span,
+        )
+    };
+    let lit_int = |n: i64| core::Expr::Lit(Literal::Int(n), int_ty.clone(), span);
+    let mut parts: Vec<core::Expr> = Vec::new();
+    let mut values = values.iter();
+    for piece in &pieces {
+        match piece {
+            PrintfPiece::Text(t) => parts.push(lit_str(t)),
+            PrintfPiece::Spec {
+                left,
+                zero,
+                width,
+                precision,
+                conv,
+            } => {
+                let Some(value) = values.next() else {
+                    return Ok(None);
+                };
+                let value_ty = ctx
+                    .resolved_expr_ty_opt(value.span())
+                    .map(|t| crate::context::canonical_list_spelling(&t));
+                let is_string = matches!(&value_ty, Some(Ty::List(e))
+                    if matches!(e.as_ref(), Ty::Con(c) if c.name.as_str() == "Char"));
+                let lowered = lower_expr(ctx, value)?;
+                let formatted = match conv {
+                    's' | 'v' if is_string => lowered,
+                    'c' => app(app(nullary_var("replicate", span), lit_int(1)), lowered),
+                    'f' => app(
+                        app(
+                            nullary_var("$printf_fixed", span),
+                            lit_int(precision.unwrap_or(6) as i64),
+                        ),
+                        lowered,
+                    ),
+                    'x' => app(app(nullary_var("showHex", span), lowered), lit_str("")),
+                    _ => {
+                        let Some(ty) = value_ty.filter(|t| !has_type_variables(t)) else {
+                            return Ok(None);
+                        };
+                        let show = core::Expr::Var(
+                            Var {
+                                name: Symbol::intern("show"),
+                                id: VarId::new(0),
+                                ty: Ty::fun(ty, string_ty.clone()),
+                                checked_ty: Ty::Error,
+                            },
+                            span,
+                        );
+                        app(show, lowered)
+                    }
+                };
+                let formatted = match width {
+                    Some(w) => app(
+                        app(
+                            app(
+                                app(nullary_var("$printf_pad", span), lit_int(*w as i64)),
+                                lit_int(i64::from(*left)),
+                            ),
+                            lit_int(i64::from(*zero)),
+                        ),
+                        formatted,
+                    ),
+                    None => formatted,
+                };
+                parts.push(formatted);
+            }
+        }
+    }
+    let mut text = parts.pop().unwrap_or_else(|| lit_str(""));
+    while let Some(prev) = parts.pop() {
+        text = app(app(nullary_var("++", span), prev), text);
+    }
+    Ok(Some(if to_io {
+        app(nullary_var("putStr", span), text)
+    } else {
+        text
+    }))
+}
+
 /// `xs \\ ys` (Data.List; codegen has no implementation and stubbed — pandoc's
 /// HTML writer takes header classes out of a section's with it) as
-/// `filter (\x -> not (any (\y -> x == y) ys)) xs`. The `==` carries the
-/// element type from the occurrence, so `Text` and tuples compare by contents.
-/// Unlike the real `(\\)`, which removes one occurrence of `x` per `y`, every
-/// occurrence is removed: the two differ only when `xs` repeats an element of
-/// `ys`.
+/// `foldl (\acc y -> deleteBy (\a b -> a == b) y acc) xs ys`: each `y` removes
+/// the first equal element, as the real `(\\)` does. The `==` carries the
+/// element type from the occurrence, so `Text`, strings, tuples and derived-Eq
+/// types compare by contents. (A `filter` removed every occurrence.)
 fn try_lower_list_difference(
     ctx: &mut LowerContext,
     f: &hir::Expr,
@@ -6765,26 +7565,46 @@ fn try_lower_list_difference(
         |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
     let a = ctx.fresh_var("diff_x", elem_ty.clone(), span);
     let b = ctx.fresh_var("diff_y", elem_ty.clone(), span);
+    let acc = ctx.fresh_var("diff_acc", Ty::List(Box::new(elem_ty.clone())), span);
+    let y = ctx.fresh_var("diff_del", elem_ty.clone(), span);
     let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
     let eq = core::Expr::Var(
         Var {
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
     let same = core::Expr::Lam(
-        b.clone(),
-        Box::new(app(
-            app(eq, core::Expr::Var(a.clone(), span)),
-            core::Expr::Var(b, span),
+        a.clone(),
+        Box::new(core::Expr::Lam(
+            b.clone(),
+            Box::new(app(
+                app(eq, core::Expr::Var(a, span)),
+                core::Expr::Var(b, span),
+            )),
+            span,
         )),
         span,
     );
-    let found = app(app(nullary_var("any", span), same), ys);
-    let keep = core::Expr::Lam(a, Box::new(app(nullary_var("not", span), found)), span);
-    Ok(Some(app(app(nullary_var("filter", span), keep), xs)))
+    let delete_one = app(
+        app(
+            app(nullary_var("deleteBy", span), same),
+            core::Expr::Var(y.clone(), span),
+        ),
+        core::Expr::Var(acc.clone(), span),
+    );
+    let step = core::Expr::Lam(
+        acc,
+        Box::new(core::Expr::Lam(y, Box::new(delete_one), span)),
+        span,
+    );
+    Ok(Some(app(
+        app(app(nullary_var("foldl", span), step), xs),
+        ys,
+    )))
 }
 
 /// `elem v xs` / `notElem v xs` as `any (\y -> y == v) xs`, with `==` typed
@@ -6860,6 +7680,7 @@ fn try_lower_structural_elem(
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -6950,6 +7771,7 @@ fn try_lower_structural_lookup(
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(key_ty.clone(), Ty::fun(key_ty, bool_ty)),
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -7392,6 +8214,9 @@ fn lower_app(
         return Ok(result);
     }
     if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_printf(ctx, f, x, span)? {
         return Ok(result);
     }
     if let Some(result) = try_lower_text_group_by(ctx, f, x, span)? {
@@ -8529,6 +9354,7 @@ fn lower_app(
                                             name: Symbol::intern("foldr"),
                                             id: VarId::new(0),
                                             ty: Ty::Error,
+                                            checked_ty: Ty::Error,
                                         };
                                         resolved = Some(core::Expr::App(
                                             Box::new(core::Expr::App(
@@ -8977,6 +9803,7 @@ fn lower_con(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             name: Symbol::intern("Con"),
             id: VarId::new(def_ref.def_id.index()),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         Ok(core::Expr::Var(placeholder, def_ref.span))
     }
@@ -9054,6 +9881,7 @@ fn lower_lambda(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 });
                 binders.push(var);
             }
@@ -9101,6 +9929,7 @@ fn register_pattern_vars(
                 name: *name,
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var.clone());
             vars.push((*def_id, var));
@@ -9110,6 +9939,7 @@ fn register_pattern_vars(
                 name: *name,
                 id: VarId::new(def_id.index()),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var.clone());
             vars.push((*def_id, var));
@@ -9399,6 +10229,7 @@ fn lower_let_bindings(
                 name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             if matches!(var.ty, Ty::Error) {
                 if let Some(t) = local_binding_ty(ctx, b, def_id) {
@@ -9632,6 +10463,7 @@ fn lower_single_let_binding(
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             if matches!(var.ty, Ty::Error) {
                 if let Some(t) = local_binding_ty(ctx, binding, *def_id) {
@@ -9744,7 +10576,10 @@ fn lower_case(
 
     // Complex case: some alternatives have nested sub-patterns.
     // Bind the scrutinee to a variable so fallthrough can re-case on it.
-    let scrut_var = ctx.fresh_var("scrut", Ty::Error, span);
+    let scrut_var = ctx.fresh_var("scrut", Ty::Error, span).with_checked_ty(
+        ctx.resolved_expr_ty_opt(scrutinee.span())
+            .unwrap_or(Ty::Error),
+    );
 
     // A local multi-clause function cases on the tuple of its parameters;
     // their types let a nested literal sub-pattern compare as `Text`.
@@ -10126,6 +10961,7 @@ fn lower_tuple(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> Lower
             name: Symbol::intern("()"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         return Ok(core::Expr::Var(unit_var, span));
     }
@@ -10136,6 +10972,7 @@ fn lower_tuple(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> Lower
         name: tuple_name,
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     let mut result = core::Expr::Var(tuple_var, span);
@@ -10155,11 +10992,13 @@ fn lower_list(ctx: &mut LowerContext, elems: &[hir::Expr], span: Span) -> LowerR
         name: Symbol::intern("[]"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let cons_var = Var {
         name: Symbol::intern(":"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
 
     let mut result = core::Expr::Var(nil_var, span);
@@ -10293,6 +11132,7 @@ fn lower_field_access(
             name: field,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
 
         Ok(core::Expr::App(
@@ -10385,6 +11225,7 @@ fn lower_record_update(
             name: con_name,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let mut result = core::Expr::Var(con_var, span);
 
@@ -10441,6 +11282,7 @@ fn make_pattern_error(span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
         Literal::String(Symbol::intern(&format!(

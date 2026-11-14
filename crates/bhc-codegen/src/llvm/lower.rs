@@ -519,6 +519,11 @@ pub struct Lowering<'ctx, 'm> {
     /// block in `IO`. The operator's own type can: `>>=` is a `Ty::Fun`, and
     /// those reach Core.
     current_builtin_ty: Ty,
+    /// The arity a builtin expects of a function argument it is about to
+    /// lower, keyed by the address of the argument's expression. `lower_expr`
+    /// adapts the closure it produces for such an expression; see
+    /// [`Self::closure_of_arity`].
+    expected_fn_arity: FxHashMap<usize, u32>,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     overloaded_strings: bool,
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
@@ -536,6 +541,19 @@ pub struct Lowering<'ctx, 'm> {
     /// infinite `block()` -> `yamlMetaBlock'()` -> `block()` call cycle
     /// (stack overflow). Non-recursive CAF references keep the eager call.
     recursive_caf_ids: FxHashSet<VarId>,
+    /// The public, memoizing function of each memoized CAF, by its binder.
+    /// While its body is lowered, `functions` maps the binder to the private
+    /// body function; a self-reference thunk must call the public one, so it
+    /// reaches the value being built instead of building another.
+    caf_public: FxHashMap<VarId, FunctionValue<'ctx>>,
+    /// How many thunk bodies (`lower_lazy`) enclose the code being lowered.
+    /// A recursive CAF referenced inside one is called, not delayed: the
+    /// thunk already broke the recursion, and the caller wants the value.
+    lazy_depth: usize,
+    /// The top-level CAFs that are memoized (`is_memoizable_caf`), known
+    /// before any body is lowered, so a reference can test whether one is
+    /// computed yet.
+    memo_caf_ids: FxHashSet<VarId>,
     /// The top-level binding whose body is being lowered. An argument that
     /// refers back to it is a recursive knot and is passed lazily through a
     /// closure call (see `lower_closure_call`).
@@ -625,10 +643,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            caf_public: FxHashMap::default(),
+            lazy_depth: 0,
+            memo_caf_ids: FxHashSet::default(),
             current_top_fn: None,
             current_top_is_derived: false,
             lazy_force_result: false,
@@ -688,10 +710,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             builtin_arg_counter: 0,
             current_builtin_ty: Ty::Error,
+            expected_fn_arity: FxHashMap::default(),
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            caf_public: FxHashMap::default(),
+            lazy_depth: 0,
+            memo_caf_ids: FxHashSet::default(),
             current_top_fn: None,
             current_top_is_derived: false,
             lazy_force_result: false,
@@ -1690,6 +1716,73 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_return(Some(&null))
             .map_err(|e| CodegenError::Internal(format!("exn ret: {:?}", e)))?;
+        self.builder().position_at_end(cont_block);
+        Ok(())
+    }
+
+    /// Emit a preemption point at a function entry: if the RTS's timer asked
+    /// for one (`bhc_preempt_requested`), call `bhc_preempt`, which gives the
+    /// baton away once the slice is over. Pure recursion has no IO step, so
+    /// this is what lets other threads run while it goes on (#75). Without
+    /// threads the flag is never set, and this is one load and a branch.
+    fn emit_preempt_check(&mut self) -> CodegenResult<()> {
+        let i8_type = self.llvm_context().i8_type();
+        let llvm_module = self.module.llvm_module();
+        let flag = match llvm_module.get_global("bhc_preempt_requested") {
+            Some(g) => g,
+            None => {
+                let g = llvm_module.add_global(i8_type, None, "bhc_preempt_requested");
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            }
+        };
+        let preempt_fn = match self.module.get_function("bhc_preempt") {
+            Some(f) => f,
+            None => {
+                let fn_type = self.llvm_context().void_type().fn_type(&[], false);
+                self.module.add_function("bhc_preempt", fn_type)
+            }
+        };
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("preempt check: no function".to_string()))?;
+        let requested = self
+            .builder()
+            .build_load(i8_type, flag.as_pointer_value(), "preempt_requested")
+            .map_err(|e| CodegenError::Internal(format!("preempt load: {:?}", e)))?;
+        if let Some(load) = requested.into_int_value().as_instruction() {
+            load.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic)
+                .map_err(|e| CodegenError::Internal(format!("preempt ordering: {e}")))?;
+            load.set_alignment(1)
+                .map_err(|e| CodegenError::Internal(format!("preempt align: {e}")))?;
+        }
+        let is_requested = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                requested.into_int_value(),
+                i8_type.const_zero(),
+                "preempt_is_requested",
+            )
+            .map_err(|e| CodegenError::Internal(format!("preempt cmp: {:?}", e)))?;
+        let yield_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "preempt");
+        let cont_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "preempt_cont");
+        self.builder()
+            .build_conditional_branch(is_requested, yield_block, cont_block)
+            .map_err(|e| CodegenError::Internal(format!("preempt br: {:?}", e)))?;
+        self.builder().position_at_end(yield_block);
+        self.builder()
+            .build_call(preempt_fn, &[], "")
+            .map_err(|e| CodegenError::Internal(format!("preempt call: {:?}", e)))?;
+        self.builder()
+            .build_unconditional_branch(cont_block)
+            .map_err(|e| CodegenError::Internal(format!("preempt br2: {:?}", e)))?;
         self.builder().position_at_end(cont_block);
         Ok(())
     }
@@ -5665,12 +5758,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let unboxed = match param_ty {
                 FfiType::Int64 | FfiType::Int32 | FfiType::Int8 => {
                     // Unbox: ptr_to_int
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox int failed: {e:?}"))
-                        })?;
+                    let int_val = self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}"))?;
                     match param_ty {
                         FfiType::Int32 => {
                             let truncated = self
@@ -5703,12 +5791,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 FfiType::Double => {
                     // Unbox: ptr -> i64 -> f64 (bitcast)
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox double failed: {e:?}"))
-                        })?;
+                    let int_val =
+                        self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}_bits"))?;
                     let f64_val = self
                         .builder()
                         .build_bit_cast(
@@ -5723,12 +5807,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 FfiType::Float => {
                     // Unbox: ptr -> i64 -> f64 -> f32 (truncate)
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("FFI unbox float failed: {e:?}"))
-                        })?;
+                    let int_val =
+                        self.scalar_from_word(boxed_arg, &format!("unbox_arg_{i}_bits"))?;
                     let f64_val = self
                         .builder()
                         .build_bit_cast(
@@ -5783,9 +5863,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     ret_val
                 };
-                self.builder()
-                    .build_int_to_ptr(i64_val, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box int failed: {e:?}")))?
+                self.word_from_scalar(i64_val, "box_ret")?
             }
             FfiType::Double => {
                 let ret_val = c_call
@@ -5805,9 +5883,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("FFI box double bitcast failed: {e:?}"))
                     })?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box double failed: {e:?}")))?
+                self.word_from_scalar(bits, "box_ret")?
             }
             FfiType::Float => {
                 let ret_val = c_call
@@ -5833,9 +5909,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("FFI box float bitcast failed: {e:?}"))
                     })?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, ptr_type, "box_ret")
-                    .map_err(|e| CodegenError::Internal(format!("FFI box float failed: {e:?}")))?
+                self.word_from_scalar(bits, "box_ret")?
             }
             FfiType::Ptr => {
                 let ret_val = c_call
@@ -6026,9 +6100,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => Ok(p),
             BasicValueEnum::IntValue(i) => {
                 // Box the integer: cast to pointer
-                self.builder()
-                    .build_int_to_ptr(i, self.type_mapper().ptr_type(), "box_int")
-                    .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+                self.word_from_scalar(i, "box_int")
             }
             BasicValueEnum::FloatValue(f) => {
                 // Box the float: ensure f64, cast bits to i64, then to pointer
@@ -6046,9 +6118,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_bit_cast(f64_val, self.type_mapper().i64_type(), "float_bits")
                     .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
                     .into_int_value();
-                self.builder()
-                    .build_int_to_ptr(bits, self.type_mapper().ptr_type(), "box_float")
-                    .map_err(|e| CodegenError::Internal(format!("failed to box float: {:?}", e)))
+                self.word_from_scalar(bits, "box_float")
             }
             _ => Err(CodegenError::Unsupported(
                 "cannot box this value type".to_string(),
@@ -6075,12 +6145,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match (value, target_type) {
             // Pointer to integer: unbox (ptr_to_int)
             (BasicValueEnum::PointerValue(p), inkwell::types::BasicTypeEnum::IntType(int_ty)) => {
-                let int_val = self
-                    .builder()
-                    .build_ptr_to_int(p, int_ty, "coerce_ptr_to_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce ptr to int: {:?}", e))
-                    })?;
+                let int_val = self.scalar_from_word_as(p, int_ty, "coerce_ptr_to_int")?;
                 Ok(int_val.into())
             }
             // Integer to pointer: box (int_to_ptr)
@@ -6101,12 +6166,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     i
                 };
-                let ptr_val = self
-                    .builder()
-                    .build_int_to_ptr(i64_val, tm.ptr_type(), "coerce_int_to_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce int to ptr: {:?}", e))
-                    })?;
+                let ptr_val = self.word_from_scalar(i64_val, "coerce_int_to_ptr")?;
                 Ok(ptr_val.into())
             }
             // Pointer to float: unbox (ptr_to_int then bit_cast)
@@ -6114,12 +6174,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 BasicValueEnum::PointerValue(p),
                 inkwell::types::BasicTypeEnum::FloatType(float_ty),
             ) => {
-                let bits = self
-                    .builder()
-                    .build_ptr_to_int(p, tm.i64_type(), "coerce_ptr_to_bits")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce ptr to bits: {:?}", e))
-                    })?;
+                let bits = self.scalar_from_word(p, "coerce_ptr_to_bits")?;
                 // For f32, truncate to i32 first, then bit_cast
                 let float_val = if float_ty == tm.f32_type() {
                     let bits32 = self
@@ -6161,12 +6216,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("failed to cast float to bits: {:?}", e))
                     })?
                     .into_int_value();
-                let ptr_val = self
-                    .builder()
-                    .build_int_to_ptr(bits, tm.ptr_type(), "coerce_float_to_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to coerce float to ptr: {:?}", e))
-                    })?;
+                let ptr_val = self.word_from_scalar(bits, "coerce_float_to_ptr")?;
                 Ok(ptr_val.into())
             }
             // Integer width conversion
@@ -6498,12 +6548,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 CodegenError::Internal("extract_bool_tag: no current function".to_string())
             })?;
 
-        let raw_int = self
-            .builder()
-            .build_ptr_to_int(bool_ptr, i64_type, "bool_raw")
-            .map_err(|e| {
-                CodegenError::Internal(format!("extract_bool_tag: ptr_to_int: {:?}", e))
-            })?;
+        let raw_int = self.word_bits(bool_ptr, "bool_raw")?;
 
         // If raw value <= 1, it's a tagged-int-as-pointer (0=False, 1=True)
         // If raw value > 1, it's a heap pointer to a Bool ADT struct
@@ -6542,12 +6587,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // 0/1 immediate as a struct.
         self.builder().position_at_end(adt_block);
         let forced_ptr = self.build_force(bool_ptr.into())?.into_pointer_value();
-        let forced_raw = self
-            .builder()
-            .build_ptr_to_int(forced_ptr, i64_type, "forced_raw")
-            .map_err(|e| {
-                CodegenError::Internal(format!("extract_bool_tag: ptr_to_int: {:?}", e))
-            })?;
+        let forced_raw = self.word_bits(forced_ptr, "forced_raw")?;
         let forced_is_tagged = self
             .builder()
             .build_int_compare(
@@ -6670,12 +6710,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .build_load(i64_type, raw, "tail_tag")
                 .map_err(|e| CodegenError::Internal(format!("load tail tag: {:?}", e)))?
                 .into_int_value();
+            // Not evaluated yet: a thunk (-1), or a blackhole (-2), a thunk
+            // being evaluated, such as the tail of `nats = 0 : map (+ 1) nats`
+            // that this very `map` is producing. Forcing a blackhole here is a
+            // `<<loop>>`; deferring it is what GHC's laziness does. Tag + 2 is
+            // below 2 (unsigned) for exactly those two.
+            let shifted = self
+                .builder()
+                .build_int_add(tag, i64_type.const_int(2, false), "tail_tag_shifted")
+                .map_err(|e| CodegenError::Internal(format!("shift tail tag: {:?}", e)))?;
             let is_thunk = self
                 .builder()
                 .build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    tag,
-                    i64_type.const_int(-1i64 as u64, true),
+                    inkwell::IntPredicate::ULT,
+                    shifted,
+                    i64_type.const_int(2, false),
                     "tail_is_thunk",
                 )
                 .map_err(|e| CodegenError::Internal(format!("compare tail tag: {:?}", e)))?;
@@ -6788,6 +6837,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$lazy_resume_arg"),
                 id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             self.env.insert(var.id, val);
             args.push(Expr::Var(var, span));
@@ -6915,8 +6965,221 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         None
     }
 
+    /// The function arguments of a builtin, as `(argument index, the number
+    /// of arguments the builtin's code applies it to at once)`.
+    ///
+    /// These builtins, or the runtime functions they call, jump to the
+    /// function's code with that many arguments. A function of another
+    /// arity (`\a -> add a` where two are expected) has to be adapted first.
+    fn builtin_function_args(name: &str) -> &'static [(usize, u32)] {
+        match name {
+            "foldr" | "foldl" | "foldl'" | "foldr1" | "foldl1" | "zipWith" | "scanl" | "scanr"
+            | "scanl1" | "scanr1" | "sortBy" | "groupBy" | "nubBy" | "maximumBy" | "minimumBy"
+            | "deleteBy" | "unionBy" | "intersectBy" | "flip" | "uncurry" | "foldM" | "foldM_"
+            | "zipWithM" | "zipWithM_" | "mapAccumL" | "mapAccumR" | "on" => &[(0, 2)],
+            "zipWith3" => &[(0, 3)],
+            "Data.Map.insertWith"
+            | "Data.Map.unionWith"
+            | "Data.Map.fromListWith"
+            | "Data.Map.intersectionWith"
+            | "Data.Map.differenceWith"
+            | "Data.Map.foldr"
+            | "Data.Map.foldl"
+            | "Data.Map.mapWithKey"
+            | "Data.Map.filterWithKey"
+            | "Data.Map.mapMaybeWithKey"
+            | "Data.IntMap.insertWith"
+            | "Data.IntMap.unionWith"
+            | "Data.IntMap.foldr"
+            | "Data.IntMap.mapWithKey"
+            | "Data.Set.foldr"
+            | "Data.Set.foldl"
+            | "Data.IntSet.foldr" => &[(0, 2)],
+            "Data.Map.foldrWithKey"
+            | "Data.Map.foldlWithKey"
+            | "Data.Map.foldlWithKey'"
+            | "Data.Map.unionWithKey"
+            | "Data.IntMap.foldlWithKey"
+            | "Data.IntMap.foldlWithKey'" => &[(0, 3)],
+            _ => &[],
+        }
+    }
+
     /// Lower a builtin function application.
     fn lower_builtin(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Say what arity the builtin expects of its function arguments, for
+        // `lower_expr` to adapt them as it lowers them.
+        let mut expected: Vec<usize> = Vec::new();
+        for &(index, arity) in Self::builtin_function_args(name) {
+            if let Some(arg) = args.get(index) {
+                let key = *arg as *const Expr as usize;
+                if self.expected_fn_arity.insert(key, arity).is_none() {
+                    expected.push(key);
+                }
+            }
+        }
+        let result = self.lower_builtin_dispatch(name, args);
+        for key in expected {
+            self.expected_fn_arity.remove(&key);
+        }
+        result
+    }
+
+    /// A closure that takes exactly `arity` arguments at once and behaves as
+    /// `function` does.
+    ///
+    /// A builtin that jumps to its function's code with `arity` arguments is
+    /// only right when the function takes that many. `\a -> add a` takes one
+    /// and returns a function; called with two, the second is dropped and the
+    /// partial application comes back as the result. When the closure's
+    /// recorded arity is something else, this wraps it in a closure of the
+    /// expected arity whose code applies it through `apply_closure_values`.
+    ///
+    /// A recorded arity of 0 means unknown, and an object that is not a
+    /// closure (a thunk for one) is not looked into: both pass through.
+    fn closure_of_arity(
+        &mut self,
+        function: PointerValue<'ctx>,
+        arity: u32,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("arity adapter: {step}: {e:?}"))
+        };
+        let Some(start_bb) = self.builder().get_insert_block() else {
+            return Ok(function);
+        };
+        let Some(current_fn) = start_bb.get_parent() else {
+            return Ok(function);
+        };
+
+        // The adapter's code: `\env a1 .. an -> env[0] a1 .. an`, applied by
+        // the wrapped function's own arity.
+        let name = format!("__bhc_arity_adapter_{arity}");
+        let adapter = match self.module.llvm_module().get_function(&name) {
+            Some(existing) => existing,
+            None => {
+                let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    vec![ptr_type.into()];
+                for _ in 0..arity {
+                    params.push(ptr_type.into());
+                }
+                let adapter = self.module.llvm_module().add_function(
+                    &name,
+                    ptr_type.fn_type(&params, false),
+                    Some(inkwell::module::Linkage::Internal),
+                );
+                let entry = self.llvm_ctx.append_basic_block(adapter, "entry");
+                self.builder().position_at_end(entry);
+                let env = adapter
+                    .get_nth_param(0)
+                    .ok_or_else(|| CodegenError::Internal("arity adapter: no env".to_string()))?
+                    .into_pointer_value();
+                let wrapped = self.extract_closure_env_elem(env, 1, 0)?;
+                let mut call_args = Vec::with_capacity(arity as usize);
+                for index in 1..=arity {
+                    let param = adapter.get_nth_param(index).ok_or_else(|| {
+                        CodegenError::Internal("arity adapter: missing parameter".to_string())
+                    })?;
+                    call_args.push(param.into_pointer_value());
+                }
+                let result = self
+                    .apply_closure_values(wrapped, &call_args, false)?
+                    .ok_or_else(|| CodegenError::Internal("arity adapter: void".to_string()))?;
+                let result = self.value_to_ptr(result)?;
+                self.builder()
+                    .build_return(Some(&result))
+                    .map_err(|e| internal("return", &e))?;
+                self.builder().position_at_end(start_bb);
+                adapter
+            }
+        };
+
+        let check_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_check");
+        let adapt_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_adapt");
+        let done_bb = self.llvm_ctx.append_basic_block(current_fn, "arity_done");
+
+        // Only a closure has an arity word.
+        let kind_slot = self
+            .builder()
+            .build_struct_gep(self.closure_type(0), function, 0, "kind_slot")
+            .map_err(|e| internal("kind gep", &e))?;
+        let kind = self
+            .builder()
+            .build_load(i64_type, kind_slot, "fn_kind")
+            .map_err(|e| internal("kind load", &e))?
+            .into_int_value();
+        let is_closure = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                kind,
+                i64_type.const_int(bhc_rts_alloc::object::CLOSURE as u64, true),
+                "fn_is_closure",
+            )
+            .map_err(|e| internal("kind compare", &e))?;
+        self.builder()
+            .build_conditional_branch(is_closure, check_bb, done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(check_bb);
+        let recorded = self.load_closure_arity(function)?;
+        let matches = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                recorded,
+                i64_type.const_int(u64::from(arity), false),
+                "fn_arity_matches",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let unknown = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                recorded,
+                i64_type.const_zero(),
+                "fn_arity_unknown",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let as_is = self
+            .builder()
+            .build_or(matches, unknown, "fn_arity_ok")
+            .map_err(|e| internal("arity or", &e))?;
+        self.builder()
+            .build_conditional_branch(as_is, done_bb, adapt_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(adapt_bb);
+        let adapted = self.alloc_closure_with_arity(
+            adapter.as_global_value().as_pointer_value(),
+            &[(VarId::new(900_001), function.into())],
+            arity,
+        )?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(done_bb);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "fn_of_arity")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[
+            (&function, start_bb),
+            (&function, check_bb),
+            (&adapted, adapt_bb),
+        ]);
+        Ok(result.as_basic_value().into_pointer_value())
+    }
+
+    /// The builtins, by name.
+    fn lower_builtin_dispatch(
         &mut self,
         name: &str,
         args: &[&Expr],
@@ -7001,6 +7264,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "bracket_" => self.lower_builtin_bracket_(args[0], args[1], args[2]),
             "evaluate" => self.lower_builtin_evaluate(args[0]),
+            "unsafePerformIO" | "unsafeDupablePerformIO" => {
+                // Under the closure IO model the argument is an action to
+                // run; under the eager model evaluating it ran it already.
+                if crate::io_closure_mode() {
+                    self.lower_io_run(args[0])
+                } else {
+                    self.lower_expr(args[0])
+                }
+            }
+            "trace" => {
+                // The message goes out before the value is evaluated, as in
+                // GHC, so a trace inside a computation shows when it starts.
+                self.emit_trace_message(args[0])?;
+                self.lower_expr(args[1])
+            }
+            "traceIO" => {
+                self.emit_trace_message(args[0])?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+            }
             "<$" => self.lower_builtin_replace(args[0], args[1]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
@@ -7035,6 +7317,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromException" => self.lower_builtin_from_exception(args[0]),
             "displayException" => self.lower_builtin_display_exception(args[0]),
             "userError" => self.lower_builtin_user_error(args[0]),
+            "isDoesNotExistError" => self.lower_builtin_io_error_pred(args[0], 0),
+            "isAlreadyExistsError" => self.lower_builtin_io_error_pred(args[0], 1),
+            "isPermissionError" => self.lower_builtin_io_error_pred(args[0], 2),
+            "isUserError" => self.lower_builtin_io_error_pred(args[0], 3),
+            "isEOFError" => self.lower_builtin_io_error_pred(args[0], 4),
+            "isFullError" => self.lower_builtin_io_error_pred(args[0], 5),
+            "isAlreadyInUseError" => self.lower_builtin_io_error_pred(args[0], 6),
+            "isIllegalOperation" => self.lower_builtin_io_error_pred(args[0], 7),
             "ErrorCall" => self.lower_builtin_error_call(args[0]),
             "ioError" => self.lower_builtin_throw(args[0]),
 
@@ -7194,6 +7484,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         name: Symbol::intern(n),
                         id,
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     }
                 };
                 let bind = synth(">>=");
@@ -7379,6 +7670,118 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "acos" => self.lower_builtin_math_unary(args[0], 1000020, "acos"),
             "atan" => self.lower_builtin_math_unary(args[0], 1000021, "atan"),
             "atan2" => self.lower_builtin_math_binary(args[0], args[1], 1000022, "atan2"),
+            "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let r = self.call_double_rts(&format!("bhc_{name}_double"), &[x])?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            // `x ** y`, and `x ^^ n` as the same power with the exponent
+            // converted: both were stubs that aborted.
+            "**" | "^^" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let y = if name == "^^" {
+                    let n = self
+                        .lower_expr(args[1])?
+                        .ok_or_else(|| CodegenError::Internal("^^: no exponent".to_string()))?;
+                    let n = self.coerce_to_int(n)?;
+                    self.builder()
+                        .build_signed_int_to_float(n, self.type_mapper().f64_type(), "exponent")
+                        .map_err(|e| CodegenError::Internal(format!("^^: {e:?}")))?
+                } else {
+                    self.lower_f64_operand(args[1], name)?
+                };
+                let r = self.call_double_rts("bhc_pow_double", &[x, y])?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            // logBase b x = log x / log b
+            "logBase" => {
+                let b = self.lower_f64_operand(args[0], name)?;
+                let x = self.lower_f64_operand(args[1], name)?;
+                let log_x = self.call_double_rts("bhc_log_double", &[x])?;
+                let log_b = self.call_double_rts("bhc_log_double", &[b])?;
+                let r = self
+                    .builder()
+                    .build_float_div(log_x, log_b, "log_base")
+                    .map_err(|e| CodegenError::Internal(format!("logBase: {e:?}")))?;
+                Ok(Some(self.f64_to_ptr(r)?.into()))
+            }
+            "isNaN" | "isInfinite" => {
+                let x = self.lower_f64_operand(args[0], name)?;
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("{name}: {e:?}"))
+                };
+                let flag = if name == "isNaN" {
+                    self.builder()
+                        .build_float_compare(inkwell::FloatPredicate::UNO, x, x, "is_nan")
+                        .map_err(err)?
+                } else {
+                    let pos = self
+                        .builder()
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OEQ,
+                            x,
+                            f64_ty.const_float(f64::INFINITY),
+                            "is_pos_inf",
+                        )
+                        .map_err(err)?;
+                    let neg = self
+                        .builder()
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OEQ,
+                            x,
+                            f64_ty.const_float(f64::NEG_INFINITY),
+                            "is_neg_inf",
+                        )
+                        .map_err(err)?;
+                    self.builder().build_or(pos, neg, "is_inf").map_err(err)?
+                };
+                let tag = self
+                    .builder()
+                    .build_int_z_extend(flag, self.type_mapper().i64_type(), "flag")
+                    .map_err(err)?;
+                self.allocate_bool_adt(tag, name)
+            }
+            // `realToFrac`, by the types it was resolved at: a machine integer
+            // is converted, a `Double` or `Float` (both carried as a double)
+            // passes through, narrowed to single precision when the result is
+            // a `Float`. It was a stub that aborted.
+            "realToFrac" => {
+                let (from_integral, to_float) = match &self.current_builtin_ty {
+                    Ty::Fun(a, r) => (
+                        self.is_int_type(a),
+                        self.is_float_type(r) && !self.is_double_type(r),
+                    ),
+                    _ => (false, false),
+                };
+                let v = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("realToFrac: no value".to_string()))?;
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("realToFrac: {e:?}"))
+                };
+                let mut d = if from_integral {
+                    let i = self.coerce_to_int(v)?;
+                    self.builder()
+                        .build_signed_int_to_float(i, f64_ty, "real_to_frac")
+                        .map_err(err)?
+                } else {
+                    let v = self.coerce_float_operand(args[0], v)?;
+                    self.coerce_to_f64(v.into())?
+                };
+                if to_float {
+                    let narrow = self
+                        .builder()
+                        .build_float_trunc(d, self.type_mapper().f32_type(), "to_single")
+                        .map_err(err)?;
+                    d = self
+                        .builder()
+                        .build_float_ext(narrow, f64_ty, "single_as_double")
+                        .map_err(err)?;
+                }
+                Ok(Some(d.into()))
+            }
             "ceiling" => self.lower_builtin_float_to_int(args[0], 1000023, "ceiling"),
             "floor" => self.lower_builtin_float_to_int(args[0], 1000024, "floor"),
             "round" => self.lower_builtin_float_to_int(args[0], 1000025, "round"),
@@ -7398,6 +7801,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "fromIntegral" | "fromInteger" if self.is_integer_to_floating() => {
                 self.lower_integer_to_floating(args[0])
+            }
+            // A machine integer to Double/Float converts here. Lowered as the
+            // identity, it only converted when a float operator saw the
+            // `fromIntegral` itself; bound first (`where x = fromIntegral k`,
+            // then `x / 4`), the integer's bits were read as a double.
+            "fromIntegral" if self.is_machine_int_to_floating() => {
+                let v = self.lower_expr(args[0])?.ok_or_else(|| {
+                    CodegenError::Internal("fromIntegral: no argument value".to_string())
+                })?;
+                let i = self.coerce_to_int(v)?;
+                let f = self
+                    .builder()
+                    .build_signed_int_to_float(i, self.type_mapper().f64_type(), "int_to_double")
+                    .map_err(|e| CodegenError::Internal(format!("fromIntegral: {e:?}")))?;
+                Ok(Some(f.into()))
             }
             "fromIntegral" | "toInteger" if self.is_machine_int_to_integer() => {
                 let v = self.lower_expr(args[0])?.ok_or_else(|| {
@@ -7470,15 +7888,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "divMod" => self.lower_builtin_divmod(args[0], args[1]),
             "quotRem" => self.lower_builtin_quotrem(args[0], args[1]),
 
-            // Concurrency (closure IO model; rts/bhc-rts/src/concurrent.rs)
+            // Concurrency (rts/bhc-rts/src/concurrent.rs)
             "forkIO" | "forkOS" | "myThreadId" | "killThread" | "threadDelay" | "newEmptyMVar"
             | "newMVar" | "takeMVar" | "readMVar" | "putMVar" | "tryTakeMVar" | "tryPutMVar"
             | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar" | "newChan" | "readChan"
-            | "writeChan" | "throwTo"
-                if crate::io_closure_mode() =>
-            {
-                self.lower_builtin_concurrency(name, args)
-            }
+            | "writeChan" | "throwTo" => self.lower_builtin_concurrency(name, args),
 
             // IORef operations
             "newIORef" => self.lower_builtin_new_ioref(args[0]),
@@ -7624,6 +8038,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "mapM_" => self.lower_builtin_mapm_(args[0], args[1]),
             "forM" => self.lower_builtin_mapm(args[1], args[0]),
             "forM_" => self.lower_builtin_mapm_(args[1], args[0]),
+            // Typed `[[a]] -> [[a]]`: the list monad's `sequence`, every
+            // combination of one element from each list.
+            "sequence"
+                if matches!(&self.current_builtin_ty, Ty::Fun(a, r)
+                    if matches!(a.as_ref(), Ty::List(e) if matches!(e.as_ref(), Ty::List(_)))
+                        && matches!(r.as_ref(), Ty::List(e) if matches!(e.as_ref(), Ty::List(_)))) =>
+            {
+                let lists = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("sequence: no list".to_string()))?;
+                let lists = self.value_to_ptr(lists)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_list_sequence") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_list_sequence",
+                        ptr_type.fn_type(&[ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[lists.into()], "list_sequence")
+                    .map_err(|e| CodegenError::Internal(format!("sequence: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
             "sequence" => self.lower_builtin_sequence(args[0]),
             "sequence_" => self.lower_builtin_sequence_(args[0]),
             "traverse" => self.lower_builtin_traverse(args[0], args[1]),
@@ -7741,7 +8181,205 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "sortBy" => self.lower_builtin_sort_by(args[0], args[1]),
             "group" => self.lower_builtin_group(args[0]),
             "delete" => self.lower_builtin_delete(args[0], args[1]),
+            // Numeric: `showFFloat digits x s`, `showHex n s`, `showOct n s`
+            // (they were stubs that aborted).
+            "showFFloat" | "Numeric.showFFloat" => {
+                let digits = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no digits".to_string()))?;
+                let digits = self.value_to_ptr(digits)?;
+                let x = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no value".to_string()))?;
+                let x = self.coerce_float_operand(args[1], x)?;
+                let x = self.coerce_to_f64(x.into())?;
+                let suffix = self
+                    .lower_expr(args[2])?
+                    .ok_or_else(|| CodegenError::Internal("showFFloat: no suffix".to_string()))?;
+                let suffix = self.value_to_ptr(suffix)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f64_type = self.type_mapper().f64_type();
+                let f = match self.module.get_function("bhc_show_ffloat") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_show_ffloat",
+                        ptr_type
+                            .fn_type(&[ptr_type.into(), f64_type.into(), ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[digits.into(), x.into(), suffix.into()], "show_ffloat")
+                    .map_err(|e| CodegenError::Internal(format!("showFFloat: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            // printf's desugaring (hir-to-core): `%.Nf` and field widths.
+            "$printf_fixed" => {
+                let digits = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("printf: no precision".to_string()))?;
+                let digits = self.coerce_to_int(digits)?;
+                let x = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("printf: no value".to_string()))?;
+                let x = self.coerce_float_operand(args[1], x)?;
+                let x = self.coerce_to_f64(x.into())?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_printf_fixed") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_printf_fixed",
+                        ptr_type.fn_type(
+                            &[
+                                self.type_mapper().i64_type().into(),
+                                self.type_mapper().f64_type().into(),
+                            ],
+                            false,
+                        ),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(f, &[digits.into(), x.into()], "printf_fixed")
+                    .map_err(|e| CodegenError::Internal(format!("printf fixed: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            // `read`/`readMaybe`/`reads` at a described type (hir-to-core's
+            // `read_desc`): the runtime parses against the description.
+            "$read_generic" | "$readMaybe_generic" | "$reads_generic" => {
+                let Expr::Lit(Literal::String(description), _, _) = args[0] else {
+                    return Err(CodegenError::Internal(
+                        "read: the type description is not a literal".to_string(),
+                    ));
+                };
+                let mode = match name {
+                    "$readMaybe_generic" => 1,
+                    "$reads_generic" => 2,
+                    _ => 0,
+                };
+                let text = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+                let text = self.value_to_ptr(text)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let reader = match self.module.get_function("bhc_read_generic") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_read_generic",
+                        ptr_type
+                            .fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false),
+                    ),
+                };
+                let description = self
+                    .builder()
+                    .build_global_string_ptr(description.as_str(), "read_description")
+                    .map_err(|e| CodegenError::Internal(format!("read description: {e:?}")))?
+                    .as_pointer_value();
+                Ok(self
+                    .builder()
+                    .build_call(
+                        reader,
+                        &[
+                            description.into(),
+                            text.into(),
+                            i64_type.const_int(mode, false).into(),
+                        ],
+                        "read_generic",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("read generic: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            "$printf_pad" => {
+                let i64_type = self.type_mapper().i64_type();
+                let mut ints = Vec::new();
+                for a in &args[..3] {
+                    let v = self.lower_expr(a)?.ok_or_else(|| {
+                        CodegenError::Internal("printf pad: no value".to_string())
+                    })?;
+                    ints.push(self.coerce_to_int(v)?);
+                }
+                let text = self
+                    .lower_expr(args[3])?
+                    .ok_or_else(|| CodegenError::Internal("printf pad: no text".to_string()))?;
+                let text = self.value_to_ptr(text)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let f = match self.module.get_function("bhc_printf_pad") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_printf_pad",
+                        ptr_type.fn_type(
+                            &[
+                                i64_type.into(),
+                                i64_type.into(),
+                                i64_type.into(),
+                                ptr_type.into(),
+                            ],
+                            false,
+                        ),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(
+                        f,
+                        &[ints[0].into(), ints[1].into(), ints[2].into(), text.into()],
+                        "printf_pad",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("printf pad: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
+            "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
+                let radix = if name.ends_with("showOct") { 8 } else { 16 };
+                let n = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("showHex: no value".to_string()))?;
+                let n = self.coerce_to_int(n)?;
+                let suffix = self
+                    .lower_expr(args[1])?
+                    .ok_or_else(|| CodegenError::Internal("showHex: no suffix".to_string()))?;
+                let suffix = self.value_to_ptr(suffix)?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let f = match self.module.get_function("bhc_show_radix") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_show_radix",
+                        ptr_type
+                            .fn_type(&[i64_type.into(), i64_type.into(), ptr_type.into()], false),
+                    ),
+                };
+                Ok(self
+                    .builder()
+                    .build_call(
+                        f,
+                        &[
+                            n.into(),
+                            i64_type.const_int(radix, false).into(),
+                            suffix.into(),
+                        ],
+                        "show_radix",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("showHex: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic())
+            }
             "union" => self.lower_builtin_union(args[0], args[1]),
+            // `xs \\ ys` at boxed elements (strings, derived Eq): the RTS
+            // difference under an equality closure. Other element types keep
+            // the generic lowering.
+            "\\\\" if self.element_eq_closure_available() => {
+                let eq = self.element_eq_closure()?.ok_or_else(|| {
+                    CodegenError::Internal("list difference: no equality".to_string())
+                })?;
+                let r =
+                    self.call_list_by("bhc_list_difference_by", eq, &[args[0], args[1]], false)?;
+                Ok(Some(r))
+            }
             "intersect" => self.lower_builtin_intersect(args[0], args[1]),
             "sortOn" => self.lower_builtin_sort_on(args[0], args[1]),
             "nubBy" => self.lower_builtin_nub_by(args[0], args[1]),
@@ -8370,6 +9008,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000422, "bs_read_file")
             }
             "Data.ByteString.writeFile" => self.lower_builtin_bs_write_file(args[0], args[1]),
+            // The bytes as they are, to stdout; `putStrLn` adds a newline.
+            "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => {
+                let bytes = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("bs putStr: no value".to_string()))?;
+                let bytes = self.value_to_ptr(bytes)?;
+                let bytes = self.build_force(bytes.into())?;
+                let ptr_type = self.type_mapper().ptr_type();
+                let i64_type = self.type_mapper().i64_type();
+                let put = match self.module.get_function("bhc_bs_put") {
+                    Some(f) => f,
+                    None => self.module.add_function(
+                        "bhc_bs_put",
+                        self.llvm_ctx
+                            .void_type()
+                            .fn_type(&[ptr_type.into(), i64_type.into()], false),
+                    ),
+                };
+                let newline = u64::from(name == "Data.ByteString.putStrLn");
+                self.builder()
+                    .build_call(
+                        put,
+                        &[bytes.into(), i64_type.const_int(newline, false).into()],
+                        "",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("bs putStr: {e:?}")))?;
+                Ok(None)
+            }
 
             // ByteArray operations (used by Data.ByteString internals)
             "Data.ByteString.bhc_bytearray_malloc" => {
@@ -10932,10 +11598,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(fill_body);
         let head = self.extract_adt_field(fill_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head, tm.i64_type(), "l2c_char")
-            .map_err(|e| CodegenError::Internal(format!("l2c ptr2int: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head, "l2c_char")?;
         let char_i8 = self
             .builder()
             .build_int_truncate(char_val, tm.i8_type(), "l2c_i8")
@@ -11309,10 +11972,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let head_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let head_val = self.scalar_from_word(head_ptr, "head_val")?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
@@ -11337,14 +11997,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Exit: return accumulator (boxed as pointer)
         self.builder().position_at_end(loop_exit);
-        let result = self
-            .builder()
-            .build_int_to_ptr(
-                acc_phi.as_basic_value().into_int_value(),
-                tm.ptr_type(),
-                "result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        let result = self.word_from_scalar(acc_phi.as_basic_value().into_int_value(), "result")?;
         Ok(Some(result.into()))
     }
 
@@ -11422,10 +12075,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let head_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let head_val = self.scalar_from_word(head_ptr, "head_val")?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
         let new_acc = self
@@ -11450,14 +12100,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Exit: return accumulator (boxed as pointer)
         self.builder().position_at_end(loop_exit);
-        let result = self
-            .builder()
-            .build_int_to_ptr(
-                acc_phi.as_basic_value().into_int_value(),
-                tm.ptr_type(),
-                "result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        let result = self.word_from_scalar(acc_phi.as_basic_value().into_int_value(), "result")?;
         Ok(Some(result.into()))
     }
 
@@ -11899,6 +12542,108 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// foldl f z (x:xs) = foldl f (f z x) xs
     ///
     /// Iterative implementation: accumulates from left to right
+    /// Apply a fold's function to its two arguments.
+    ///
+    /// The function need not take both at once: `\k -> M.insert k k` takes
+    /// one and returns a function of the other, and calling its code with
+    /// two arguments dropped the second. A closure whose recorded arity is 2
+    /// (or 0, unknown) is called directly, as before; any other goes through
+    /// `apply_closure_values`, which splits the application by arity.
+    fn call_fold_function(
+        &mut self,
+        func_ptr: PointerValue<'ctx>,
+        first: PointerValue<'ctx>,
+        second: PointerValue<'ctx>,
+        what: &str,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("{what}: {step}: {e:?}"))
+        };
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: no current function")))?;
+        let direct_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_direct");
+        let split_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_split");
+        let done_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "fold_call_done");
+
+        let arity = self.load_closure_arity(func_ptr)?;
+        let takes_two = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                arity,
+                i64_type.const_int(2, false),
+                "fold_fn_takes_two",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let unknown = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                arity,
+                i64_type.const_zero(),
+                "fold_fn_arity_unknown",
+            )
+            .map_err(|e| internal("arity compare", &e))?;
+        let direct = self
+            .builder()
+            .build_or(takes_two, unknown, "fold_call_is_direct")
+            .map_err(|e| internal("arity or", &e))?;
+        self.builder()
+            .build_conditional_branch(direct, direct_bb, split_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(direct_bb);
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let direct_result = self
+            .builder()
+            .build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &[func_ptr.into(), first.into(), second.into()],
+                "fold_result",
+            )
+            .map_err(|e| internal("call", &e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: function returned void")))?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(split_bb);
+        let split_result = self
+            .apply_closure_values(func_ptr, &[first, second], false)?
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: function returned void")))?;
+        let split_result = self.value_to_ptr(split_result)?;
+        let split_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: no insert block")))?;
+        self.builder()
+            .build_unconditional_branch(done_bb)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(done_bb);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "fold_call_result")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[(&direct_result, direct_bb), (&split_result, split_end)]);
+        Ok(result.as_basic_value())
+    }
+
     fn lower_builtin_foldl(
         &mut self,
         func_expr: &Expr,
@@ -11988,34 +12733,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        // Call f acc head - function takes (closure_ptr, acc, head) and returns new acc
-        // The closure stores the function pointer which expects all args at once
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-        let new_acc = self
+        // Apply f to the accumulator and the element.
+        let new_acc = self.call_fold_function(
+            func_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            head_ptr,
+            "foldl",
+        )?;
+        // The application ends in a block of its own.
+        let loop_body_end = self
             .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[
-                    func_ptr.into(),
-                    acc_phi.as_basic_value().into(),
-                    head_ptr.into(),
-                ],
-                "foldl_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("foldl: function returned void".to_string()))?;
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldl: no insert block".to_string()))?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body_end)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body_end)]);
 
         // Exit: return accumulator
         self.builder().position_at_end(loop_exit);
@@ -12197,36 +12934,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        // Call f head acc - function takes (closure_ptr, elem, acc) and returns new acc
-        // Note: for foldr, the function signature is (a -> b -> b), so elem comes first, then acc
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-        let new_acc = self
+        // Apply f to the element and the accumulator.
+        let new_acc = self.call_fold_function(
+            func_ptr,
+            head_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            "foldr",
+        )?;
+        // The application ends in a block of its own.
+        let fold_body_end = self
             .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[
-                    func_ptr.into(),
-                    head_ptr.into(),
-                    acc_phi.as_basic_value().into(),
-                ],
-                "foldr_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("foldr: function returned void".to_string()))?;
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldr: no insert block".to_string()))?;
 
         self.builder()
             .build_unconditional_branch(fold_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
         // Add phi incoming values
-        acc_phi.add_incoming(&[(&init_ptr, rev_exit), (&new_acc, fold_body)]);
+        acc_phi.add_incoming(&[(&init_ptr, rev_exit), (&new_acc, fold_body_end)]);
         list_phi.add_incoming(&[
             (&rev_acc.as_basic_value(), rev_exit),
-            (&tail_ptr, fold_body),
+            (&tail_ptr, fold_body_end),
         ]);
 
         // Exit: return accumulator
@@ -14275,10 +15004,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("maybe: f returned void".to_string()))?;
         let call_as_ptr = match call_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "call_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "call_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "maybe: f returned unexpected type".to_string(),
@@ -14940,10 +15666,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("either: f returned void".to_string()))?;
         let left_as_ptr = match left_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "left_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "left_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "either: f returned unexpected type".to_string(),
@@ -14972,10 +15695,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("either: g returned void".to_string()))?;
         let right_as_ptr = match right_result {
             BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "right_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
+            BasicValueEnum::IntValue(i) => self.word_from_scalar(i, "right_as_ptr")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "either: g returned unexpected type".to_string(),
@@ -15917,6 +16637,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 value_monad.is_none()
             }
             "return" | "pure" | "forever" => self.value_monad_of_ty(head_ty).is_none(),
+            // `foldM` at `Maybe` or `Either` is a value, computed where it
+            // stands (`lower_fold_m_short_circuit`); the monad is read off
+            // its function's type, `b -> a -> m b`.
+            "foldM" => !matches!(
+                match head_ty {
+                    Ty::Fun(function, _) => self.value_monad_of_ty(function),
+                    _ => None,
+                },
+                Some(ValueMonad::Maybe | ValueMonad::Either)
+            ),
             // `try` also names Parsec's, which is not an IO action.
             "try" => Self::try_result_in_io(head_ty).is_some(),
             _ => crate::is_io_primitive(name),
@@ -16685,6 +17415,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(forced))
     }
 
+    /// Write the `String` `message_expr` to stderr, for `Debug.Trace`.
+    fn emit_trace_message(&mut self, message_expr: &Expr) -> CodegenResult<()> {
+        let message = self
+            .lower_expr(message_expr)?
+            .ok_or_else(|| CodegenError::Internal("trace: no message".to_string()))?;
+        let message = self.value_to_ptr(message)?;
+        let cstr = self.char_list_to_cstring(message)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let trace_fn = match self.module.get_function("bhc_trace_message") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_trace_message",
+                self.llvm_ctx.void_type().fn_type(&[ptr_type.into()], false),
+            ),
+        };
+        self.builder()
+            .build_call(trace_fn, &[cstr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("trace: {e:?}")))?;
+        Ok(())
+    }
+
     /// Whether `expr` evaluates to a heap object or a thunk of one, by its type.
     fn is_known_heap_expr(&self, expr: &Expr) -> bool {
         match expr.ty() {
@@ -16710,11 +17461,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("fmap"),
             id: VarId::new(usize::MAX - 41),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let ignored = Var {
             name: Symbol::intern("_replaced"),
             id: VarId::new(usize::MAX - 42),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let constant = Expr::Lam(ignored, Box::new(value.clone()), span);
         let applied = Expr::App(
@@ -17077,12 +17830,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let fd_int = match fd_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "fd_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("queryTerminal ptr_to_int: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "fd_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "queryTerminal expects an Fd".to_string(),
@@ -17335,10 +18083,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Extract head (char) at field 0
         let head_ptr = self.extract_adt_field(node_ptr, 2, 0)?;
         // The char was stored via int_to_ptr, so convert back to int
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "char_val")
-            .map_err(|e| CodegenError::Internal(format!("failed to get char: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head_ptr, "char_val")?;
         // Truncate to i32 for bhc_print_char
         let char_i32 = self
             .builder()
@@ -17374,9 +18119,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => i,
             BasicValueEnum::PointerValue(p) => {
                 // Might be a boxed char - unbox it
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_char")
-                    .map_err(|e| CodegenError::Internal(format!("failed to unbox char: {:?}", e)))?
+                self.scalar_from_word(p, "unbox_char")?
             }
             _ => {
                 return Err(CodegenError::TypeError(
@@ -17418,6 +18161,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("displayException"),
                 id: VarId::new(usize::MAX - 43),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             let text = Expr::App(
                 Box::new(Expr::Var(display, bhc_span::Span::default())),
@@ -17513,6 +18257,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("show"),
                     id: VarId::new(usize::MAX - 31),
                     ty: Ty::fun(string_ty.clone(), string_ty),
+                    checked_ty: Ty::Error,
                 };
                 let shown = Expr::App(
                     Box::new(Expr::Var(show_var, span)),
@@ -17532,6 +18277,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("show"),
                 id: VarId::new(usize::MAX - 31),
                 ty: Ty::fun(expr_ty.clone(), string_ty),
+                checked_ty: Ty::Error,
             };
             let shown = Expr::App(
                 Box::new(Expr::Var(show_var, span)),
@@ -17758,12 +18504,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // For type variables from closures, we assume int since that's the most common case.
                     // This is safe because boxed ints use int_to_ptr which stores the value in the
                     // pointer bits, not as an actual memory reference.
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_int")?;
 
                     let print_fn = self.functions.get(&VarId::new(1000000)).ok_or_else(|| {
                         CodegenError::Internal("bhc_print_int_ln not declared".to_string())
@@ -17778,12 +18519,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Boxed float/double - unbox and print as double. The
                     // structural `expr_returns_double` check catches results
                     // whose type is erased to `Error` (e.g. `sqrt x`, `abs d`).
-                    let bits = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                        })?;
+                    let bits = self.scalar_from_word(p, "unbox_float_bits")?;
                     let float_val = self
                         .builder()
                         .build_bit_cast(bits, self.type_mapper().f64_type(), "to_double")
@@ -18168,6 +18904,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(name),
                     id: VarId::new(id),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -18176,11 +18913,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$either_left"),
             id: VarId::new(usize::MAX - 40),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let right_payload = Var {
             name: Symbol::intern("$either_right"),
             id: VarId::new(usize::MAX - 41),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         // The function as a closure VALUE, applied inside the case: applying
         // the expression itself there would make `(+)` a one-argument
@@ -18192,6 +18931,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$either_fn"),
             id: VarId::new(usize::MAX - 44),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let saved_fn = self.env.insert(func_var.id, func_val);
         let func_expr = &Expr::Var(func_var.clone(), span);
@@ -18262,6 +19002,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(name),
             id: VarId::new(id),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let con_expr = |name: &str, id: usize| Expr::Var(var(name, id), span);
         // The failing alternative rebuilds `Nothing` / `Left e`.
@@ -18544,11 +19285,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
         if let Some(c) = container {
+            // A lambda parameter's type can still hold unsolved variables
+            // (`Map t1 t2`), which say nothing about the key.
             if let Some(kt) = self.container_key_ty(&c.ty()) {
-                return self.key_kind_of_ty(kt);
+                if !matches!(kt, Ty::Var(_) | Ty::Error) {
+                    return self.key_kind_of_ty(kt);
+                }
             }
         }
-        0
+        self.builtin_ty_key_kind()
+    }
+
+    /// The key kind named by the type of the container builtin being lowered
+    /// (`insertWith :: (v -> v -> v) -> String -> v -> Map String v -> …`),
+    /// for a key and a container that say nothing themselves: lambda
+    /// parameters, as in `foldl' (\m w -> M.insertWith (+) w 1 m) M.empty`,
+    /// where every word became a key of its own. 0 when the type names no
+    /// container, or containers whose keys differ in kind (`mapKeys`).
+    fn builtin_ty_key_kind(&self) -> u64 {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        let mut kind = None;
+        loop {
+            let (part, rest) = match t {
+                Ty::Fun(a, r) => (a.as_ref(), Some(r.as_ref())),
+                other => (other, None),
+            };
+            if let Some(kt) = self.container_key_ty(part) {
+                let k = self.key_kind_of_ty(kt);
+                if kind.is_some_and(|seen| seen != k) {
+                    return 0;
+                }
+                kind = Some(k);
+            }
+            match rest {
+                Some(r) => t = r,
+                None => break,
+            }
+        }
+        kind.unwrap_or(0)
     }
 
     /// The key kind for a list of key/value pairs (`Data.Map.fromList`) or of
@@ -18573,6 +19350,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if kind != 0 {
                 return kind;
             }
+        }
+        // The builtin's stamped type names the list's element type when the
+        // list's own does not (a comprehension).
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(elem) = param.as_ref() {
+                let kind = match (pair, elem.as_ref()) {
+                    (true, Ty::Tuple(ts)) if !ts.is_empty() => self.key_kind_of_ty(&ts[0]),
+                    (false, e) => self.key_kind_of_ty(e),
+                    _ => 0,
+                };
+                if kind != 0 {
+                    return kind;
+                }
+                break;
+            }
+            fn_ty = rest;
         }
         // A list literal's own type is usually erased by the time Core reaches
         // codegen, but its first element is right there: `M.fromList [("a",1)]`
@@ -19630,11 +20427,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$readln_line"),
             id: VarId::new(usize::MAX - 33),
             ty: string_ty.clone(),
+            checked_ty: Ty::Error,
         };
         let read_var = Var {
             name: Symbol::intern("read"),
             id: VarId::new(usize::MAX - 34),
             ty: Ty::fun(string_ty, result_ty),
+            checked_ty: Ty::Error,
         };
         let call = Expr::App(
             Box::new(Expr::Var(read_var, span)),
@@ -19678,6 +20477,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let action_result = self
             .lower_expr(action_expr)?
             .ok_or_else(|| CodegenError::Internal(">>=: action has no value".to_string()))?;
+        // An exception it threw, or one thrown to this thread (#75), skips
+        // the rest, as under the closure model.
+        self.emit_io_exn_guard()?;
 
         // Lower the function
         let func_val = self
@@ -19734,6 +20536,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
         // Execute the first action (result is discarded)
         let _action1_result = self.lower_expr(action1_expr)?;
+        self.emit_io_exn_guard()?;
 
         // Execute the second action and return its result
         self.lower_expr(action2_expr)
@@ -26972,6 +27775,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.builtin_at_integer(expr) {
             return self.call_integer_rts(1000608, &[expr], "integer_negate");
         }
+        if self.builtin_at_floating(expr) {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
+            let f = self.coerce_to_f64(val)?;
+            let neg = self
+                .builder()
+                .build_float_neg(f, "fneg")
+                .map_err(|e| CodegenError::Internal(format!("negate fneg failed: {:?}", e)))?;
+            return Ok(Some(self.f64_to_ptr(neg)?.into()));
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
@@ -26997,7 +27811,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Double dispatch: a `Double` value is a boxed f64, so integer abs on its
         // bits would corrupt it (clearing the sign of `-2.5`'s bit pattern gives
         // 1.75). Use floating-point abs instead.
-        if self.expr_returns_double(expr) {
+        if self.builtin_at_floating(expr) {
             let val = self
                 .lower_expr(expr)?
                 .ok_or_else(|| CodegenError::Internal("abs: no value".to_string()))?;
@@ -27049,6 +27863,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.builtin_at_integer(expr) {
             return self.call_integer_rts(1000610, &[expr], "integer_signum");
         }
+        if self.builtin_at_floating(expr) {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("signum: no value".to_string()))?;
+            let f = self.coerce_to_f64(val)?;
+            let f64_ty = self.type_mapper().f64_type();
+            let zero = f64_ty.const_float(0.0);
+            let is_pos = self
+                .builder()
+                .build_float_compare(inkwell::FloatPredicate::OGT, f, zero, "is_pos")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?;
+            let is_neg = self
+                .builder()
+                .build_float_compare(inkwell::FloatPredicate::OLT, f, zero, "is_neg")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?;
+            // Zero and NaN are returned as they are, as GHC does.
+            let step1 = self
+                .builder()
+                .build_select(is_pos, f64_ty.const_float(1.0), f, "fsignum_step1")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?
+                .into_float_value();
+            let result = self
+                .builder()
+                .build_select(is_neg, f64_ty.const_float(-1.0), step1, "fsignum")
+                .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?
+                .into_float_value();
+            return Ok(Some(self.f64_to_ptr(result)?.into()));
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("signum: no value".to_string()))?;
@@ -27076,6 +27918,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("signum failed: {:?}", e)))?
             .into_int_value();
         Ok(Some(self.int_to_ptr(result)?.into()))
+    }
+
+    /// A numeric operand as an `f64`.
+    fn lower_f64_operand(
+        &mut self,
+        expr: &Expr,
+        name: &str,
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{name}: no value")))?;
+        let val = self.coerce_float_operand(expr, val)?;
+        self.coerce_to_f64(val.into())
+    }
+
+    /// Call a runtime function of doubles to a double (`bhc_sinh_double`,
+    /// `bhc_pow_double`), declaring it on first use.
+    fn call_double_rts(
+        &mut self,
+        symbol: &str,
+        args: &[inkwell::values::FloatValue<'ctx>],
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let f64_ty = self.type_mapper().f64_type();
+        let function = match self.module.get_function(symbol) {
+            Some(f) => f,
+            None => {
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    args.iter().map(|_| f64_ty.into()).collect();
+                self.module
+                    .add_function(symbol, f64_ty.fn_type(&params, false))
+            }
+        };
+        let call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            args.iter().map(|a| (*a).into()).collect();
+        self.builder()
+            .build_call(function, &call_args, "math")
+            .map_err(|e| CodegenError::Internal(format!("{symbol} call failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .map(BasicValueEnum::into_float_value)
+            .ok_or_else(|| CodegenError::Internal(format!("{symbol}: returned void")))
     }
 
     /// Lower a unary math function (sqrt, exp, log, sin, cos, etc.)
@@ -27144,6 +28027,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no value", name)))?;
         let f64_val = self.coerce_to_f64(val)?;
+        // At `Integer` the result is a bignum, not the machine word: handed
+        // on raw it was dereferenced (`floor 2.7 :: Integer` crashed), and
+        // the machine rounding saturates at 64 bits.
+        let to_integer =
+            matches!(&self.current_builtin_ty, Ty::Fun(_, r) if self.is_integer_type(r));
+        if to_integer {
+            let mode = match name {
+                "floor" => 0,
+                "ceiling" => 1,
+                "round" => 2,
+                _ => 3,
+            };
+            let ptr_type = self.type_mapper().ptr_type();
+            let i64_type = self.type_mapper().i64_type();
+            let f64_type = self.type_mapper().f64_type();
+            let to_integer_fn = match self.module.get_function("bhc_double_to_integer") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_double_to_integer",
+                    ptr_type.fn_type(&[f64_type.into(), i64_type.into()], false),
+                ),
+            };
+            return Ok(self
+                .builder()
+                .build_call(
+                    to_integer_fn,
+                    &[f64_val.into(), i64_type.const_int(mode, false).into()],
+                    name,
+                )
+                .map_err(|e| CodegenError::Internal(format!("{name} call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic());
+        }
         let rts_fn = self
             .functions
             .get(&VarId::new(rts_id))
@@ -27354,6 +28270,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Whether this builtin occurrence works at `Integer` (boxed BigInts):
     /// its stamped argument type says so, or its first argument's type does.
+    /// The `Float` in a value word, as an `f32`.
+    ///
+    /// A `Float` is computed in double precision and stored as those 64
+    /// bits, like a `Double`. Read as the low 32 bits of the word it was
+    /// `0.0`: a `Float` returned from a function, or taken from a constructor
+    /// field through one, lost its value (#156). A word whose upper half is
+    /// clear cannot be such a double unless it is zero, so that one is raw
+    /// `f32` bits (a `Float` that came from C).
+    fn float_from_word_bits(
+        &self,
+        bits: inkwell::values::IntValue<'ctx>,
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let tm = self.type_mapper();
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("failed to read a Float from a word: {e:?}"))
+        };
+        let low = self
+            .builder()
+            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
+            .map_err(err)?;
+        let from_f32 = self
+            .builder()
+            .build_bit_cast(low, tm.f32_type(), "float_from_f32_bits")
+            .map_err(err)?
+            .into_float_value();
+        let as_f64 = self
+            .builder()
+            .build_bit_cast(bits, tm.f64_type(), "float_as_f64")
+            .map_err(err)?
+            .into_float_value();
+        let from_f64 = self
+            .builder()
+            .build_float_trunc(as_f64, tm.f32_type(), "float_from_f64")
+            .map_err(err)?;
+        let high = self
+            .builder()
+            .build_right_shift(bits, tm.i64_type().const_int(32, false), false, "float_hi")
+            .map_err(err)?;
+        let is_f32_bits = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                high,
+                tm.i64_type().const_zero(),
+                "float_is_f32_bits",
+            )
+            .map_err(err)?;
+        Ok(self
+            .builder()
+            .build_select(is_f32_bits, from_f32, from_f64, "float_value")
+            .map_err(err)?
+            .into_float_value())
+    }
+
+    /// Whether the unary numeric builtin being lowered acts on a `Double` or
+    /// `Float`: by its resolved occurrence type, or by the argument's shape.
+    /// A double travels as its bits in a word, so integer arithmetic on it
+    /// gives another double's bits (`negate 1.5` was `-3.0`).
+    fn builtin_at_floating(&self, first_arg: &Expr) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _)
+            if self.is_double_type(a) || self.is_float_type(a))
+            || self.expr_returns_double(first_arg)
+    }
+
     fn builtin_at_integer(&self, first_arg: &Expr) -> bool {
         matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_integer_type(a))
             || self.is_integer_type(&first_arg.ty())
@@ -27404,6 +28384,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .map_err(|e| CodegenError::Internal(format!("odd: xor: {:?}", e)))?
         };
         self.allocate_bool_adt(tag, if want_even { "even" } else { "odd" })
+    }
+
+    /// A `System.IO.Error` predicate (`isDoesNotExistError`, …): whether the
+    /// `IOException` is of the runtime's kind number `kind`
+    /// (`bhc_io_error_is`).
+    fn lower_builtin_io_error_pred(
+        &mut self,
+        error_expr: &Expr,
+        kind: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let error = self
+            .lower_expr(error_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO error predicate: no value".to_string()))?;
+        let error = self.value_to_ptr(error)?;
+        let error = self.build_force(error.into())?;
+        let is_fn = match self.module.llvm_module().get_function("bhc_io_error_is") {
+            Some(f) => f,
+            None => self.module.llvm_module().add_function(
+                "bhc_io_error_is",
+                i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+                None,
+            ),
+        };
+        let flag = self
+            .builder()
+            .build_call(
+                is_fn,
+                &[error.into(), i64_type.const_int(kind, false).into()],
+                "io_error_is",
+            )
+            .map_err(|e| CodegenError::Internal(format!("IO error predicate call: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("IO error predicate: void".to_string()))?
+            .into_int_value();
+        self.allocate_bool_adt(flag, "io_error_is")
     }
 
     /// Allocate a Bool ADT with dynamic tag (0=False, 1=True).
@@ -28164,6 +29182,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.value_to_ptr(value)
     }
 
+    /// Lower a value an MVar or Chan stores. GHC's are lazy in their
+    /// contents, so an argument that is still a computation becomes a thunk,
+    /// run by the thread that first reads it rather than the one storing it.
+    /// Returns the value and whether it is such a thunk; the RTS has a `_lazy`
+    /// entry point for each store that records it, because nothing in a word
+    /// tells a thunk from an unboxed scalar.
+    fn lower_concurrency_stored_value(
+        &mut self,
+        expr: &Expr,
+    ) -> CodegenResult<(PointerValue<'ctx>, bool)> {
+        if matches!(
+            Self::peel_expr(expr),
+            Expr::App(..) | Expr::Case(..) | Expr::Let(..)
+        ) {
+            if let Some(thunk) = self.lower_lazy(expr)? {
+                return Ok((self.value_to_ptr(thunk)?, true));
+            }
+        }
+        Ok((self.lower_concurrency_value(expr)?, false))
+    }
+
+    /// `symbol`, or its `_lazy` variant when the stored value is a thunk.
+    fn lazy_store_symbol(symbol: &str, lazy: bool) -> String {
+        if lazy {
+            format!("{symbol}_lazy")
+        } else {
+            symbol.to_string()
+        }
+    }
+
     /// Run `f value`, for a function `f :: a -> IO b` passed to `withMVar` and
     /// friends.
     fn run_applied_action(
@@ -28181,11 +29229,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("MVar apply: returned void".to_string()))?;
+        // Under the eager IO model, applying `f` ran the action already, and
+        // the call returned its result.
+        if !crate::io_closure_mode() {
+            return Ok(action);
+        }
         self.run_io_action(action)
     }
 
-    /// Lower a `Control.Concurrent` builtin in run mode, under the closure IO
-    /// model. See `rts/bhc-rts/src/concurrent.rs` for what the calls do (#38).
+    /// Lower a `Control.Concurrent` builtin in run mode. See
+    /// `rts/bhc-rts/src/concurrent.rs` for what the calls do (#38, #75).
     fn lower_builtin_concurrency(
         &mut self,
         name: &str,
@@ -28193,7 +29246,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let result = match name {
             "forkIO" | "forkOS" => {
-                let action = self.lower_concurrency_value(args[0])?;
+                // Under the eager IO model, lowering the argument would run the
+                // action here, before the fork: defer it into a closure the new
+                // thread calls, as `catch` does with its action.
+                let action = if crate::io_closure_mode() {
+                    self.lower_concurrency_value(args[0])?
+                } else {
+                    self.wrap_io_as_thunk(args[0])?
+                };
                 self.call_concurrency_rts("bhc_fork_io", &[action], true)?
             }
             "myThreadId" => self.call_concurrency_rts("bhc_my_thread_id", &[], true)?,
@@ -28219,8 +29279,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "newEmptyMVar" => self.call_concurrency_rts("bhc_new_empty_mvar", &[], true)?,
             "newMVar" => {
-                let value = self.lower_concurrency_value(args[0])?;
-                self.call_concurrency_rts("bhc_new_mvar", &[value], true)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[0])?;
+                let symbol = Self::lazy_store_symbol("bhc_new_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[value], true)?
             }
             "takeMVar" | "readMVar" | "tryTakeMVar" | "readChan" => {
                 let symbol = match name {
@@ -28239,19 +29300,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     "bhc_write_chan"
                 };
                 let handle = self.lower_concurrency_handle(args[0])?;
-                let value = self.lower_concurrency_value(args[1])?;
-                self.call_concurrency_rts(symbol, &[handle, value], false)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[1])?;
+                let symbol = Self::lazy_store_symbol(symbol, lazy);
+                self.call_concurrency_rts(&symbol, &[handle, value], false)?
             }
             "tryPutMVar" => {
                 let mvar = self.lower_concurrency_handle(args[0])?;
-                let value = self.lower_concurrency_value(args[1])?;
-                self.call_concurrency_rts("bhc_try_put_mvar", &[mvar, value], true)?
+                let (value, lazy) = self.lower_concurrency_stored_value(args[1])?;
+                let symbol = Self::lazy_store_symbol("bhc_try_put_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[mvar, value], true)?
             }
             "swapMVar" => {
                 let mvar = self.lower_concurrency_handle(args[0])?;
-                let new = self.lower_concurrency_value(args[1])?;
+                let (new, lazy) = self.lower_concurrency_stored_value(args[1])?;
                 let old = self.call_concurrency_rts("bhc_take_mvar", &[mvar], true)?;
-                self.call_concurrency_rts("bhc_put_mvar", &[mvar, new], false)?;
+                let symbol = Self::lazy_store_symbol("bhc_put_mvar", lazy);
+                self.call_concurrency_rts(&symbol, &[mvar, new], false)?;
                 old
             }
             "newChan" => self.call_concurrency_rts("bhc_new_chan", &[], true)?,
@@ -30073,6 +31137,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Lit(Literal::Integer(_), _, _) => {
                 Some((ShowCoerce::Integer, 1000618, "show_integer"))
             }
+            // A fractional literal typed `Float` shows as one: as a Double,
+            // `(1.0e-3 :: Float)` in a tuple printed `1.0000000474974513e-3`.
+            Expr::Lit(Literal::Float(_) | Literal::Double(_), ty, _)
+                if self.is_float_type(ty) && !self.is_double_type(ty) =>
+            {
+                Some((ShowCoerce::Float, 1000090, "show_float"))
+            }
             // Float/Double literal
             Expr::Lit(Literal::Float(_), _, _) | Expr::Lit(Literal::Double(_), _, _) => {
                 Some((ShowCoerce::Double, 1000073, "show_double"))
@@ -30118,6 +31189,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // them by the argument too — otherwise a `Double` argument would
                 // be misrendered as `Int`.
                 if let Expr::Var(fv, _) = f.as_ref() {
+                    // A conversion resolved at `-> Float` shows as a Float
+                    // (`realToFrac (0.1 :: Double) :: Float` is `0.1`).
+                    if matches!(fv.name.as_str(), "realToFrac" | "fromIntegral")
+                        && matches!(&fv.ty, Ty::Fun(_, r)
+                            if self.is_float_type(r) && !self.is_double_type(r))
+                    {
+                        return Some((ShowCoerce::Float, 1000090, "show_float"));
+                    }
                     if matches!(
                         fv.name.as_str(),
                         "force" | "id" | "to" | "abs" | "negate" | "signum" | "recip"
@@ -30429,6 +31508,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if let Some(desc) = self.try_build_container_show_desc(&expr.ty()) {
             return desc;
         }
+        // An exception inside a container (`Left e` from `try`) is an RTS
+        // exception object; described as nothing in particular, it was shown
+        // as its address.
+        if Self::is_exception_object_ty(&expr.ty()) {
+            return self.create_show_desc_global(20, None, None);
+        }
         // First determine the coerce type
         let coerce = if let Some((c, _, _)) = self.infer_show_from_expr(expr) {
             c
@@ -30684,6 +31769,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$elem"),
                 id: VarId::new(0),
                 ty,
+                checked_ty: Ty::Error,
             },
             bhc_span::Span::default(),
         )
@@ -30992,19 +32078,63 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             ShowCoerce::Float => {
-                let int_val = self.coerce_to_int(val)?;
-                let truncated = self
-                    .builder()
-                    .build_int_truncate(int_val, self.llvm_context().i32_type(), "trunc32")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("{}: truncate failed: {:?}", label, e))
-                    })?;
-                let f32_val = self
-                    .builder()
-                    .build_bit_cast(truncated, self.type_mapper().f32_type(), "to_f32")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e))
-                    })?;
+                // A `Float` usually reaches here as an f64 (literals and the
+                // Floating builtins compute in double precision): narrow it.
+                // Raw bits are an f32's when the upper half is zero (an f64
+                // with a zero upper half is a denormal below 1e-300), an
+                // f64's otherwise. Reading every value as f32 bits printed
+                // `show (3.0 :: Float)` as "0".
+                let f32_ty = self.type_mapper().f32_type();
+                let f64_ty = self.type_mapper().f64_type();
+                let err = |e: inkwell::builder::BuilderError| {
+                    CodegenError::Internal(format!("{label}: float coerce failed: {e:?}"))
+                };
+                let f32_val = match val {
+                    BasicValueEnum::FloatValue(f) if f.get_type() == f32_ty => f,
+                    BasicValueEnum::FloatValue(f) => self
+                        .builder()
+                        .build_float_trunc(f, f32_ty, "f64_to_f32")
+                        .map_err(err)?,
+                    other => {
+                        let i64_ty = self.type_mapper().i64_type();
+                        let bits = self.coerce_to_int(other)?;
+                        let high = self
+                            .builder()
+                            .build_right_shift(bits, i64_ty.const_int(32, false), false, "hi")
+                            .map_err(err)?;
+                        let is_f32_bits = self
+                            .builder()
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                high,
+                                i64_ty.const_zero(),
+                                "is_f32_bits",
+                            )
+                            .map_err(err)?;
+                        let low = self
+                            .builder()
+                            .build_int_truncate(bits, self.llvm_context().i32_type(), "lo")
+                            .map_err(err)?;
+                        let as_f32 = self
+                            .builder()
+                            .build_bit_cast(low, f32_ty, "as_f32")
+                            .map_err(err)?
+                            .into_float_value();
+                        let as_f64 = self
+                            .builder()
+                            .build_bit_cast(bits, f64_ty, "as_f64")
+                            .map_err(err)?
+                            .into_float_value();
+                        let narrowed = self
+                            .builder()
+                            .build_float_trunc(as_f64, f32_ty, "narrowed")
+                            .map_err(err)?;
+                        self.builder()
+                            .build_select(is_f32_bits, as_f32, narrowed, "float_val")
+                            .map_err(err)?
+                            .into_float_value()
+                    }
+                };
                 f32_val.into()
             }
             ShowCoerce::Char => {
@@ -32019,6 +33149,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(name),
                     id: VarId::new(id),
                     ty: Ty::fun(Ty::Error, Ty::fun(Ty::Error, applicative_ty.clone())),
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -32030,6 +33161,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern(name),
                 id: VarId::new(next_id),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             }
         };
         let ty_con = bhc_types::TyCon::new(Symbol::intern(type_name), bhc_types::Kind::Star);
@@ -32064,6 +33196,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern(con_name),
                     id: fresh("$tcon").id,
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             );
@@ -32076,6 +33209,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         name: Symbol::intern(if either { "Right" } else { "Just" }),
                         id: fresh("$twrap").id,
                         ty: Ty::Error,
+                        checked_ty: Ty::Error,
                     },
                     span,
                 );
@@ -32253,7 +33387,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let _ = self.lower_io_run(action_expr)?;
             self.emit_io_exn_guard()?;
         } else {
+            // Under the eager model too, a throw is the way out (#75).
             let _ = self.lower_expr(action_expr)?;
+            self.emit_io_exn_guard()?;
         }
         self.builder()
             .build_unconditional_branch(loop_block)
@@ -32436,6 +33572,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         init_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // At `Maybe` or `Either` the function's result is not the next
+        // accumulator but a value that may end the fold.
+        // The monad is read off the function's type, `b -> a -> m b`:
+        // `foldM`'s own result type can be an unresolved variable.
+        let function_ty = match &self.current_builtin_ty {
+            Ty::Fun(function, _) => function.as_ref().clone(),
+            _ => func_expr.ty(),
+        };
+        if matches!(
+            self.value_monad_of_ty(&function_ty)
+                .or_else(|| self.value_monad_of_ty(&self.current_builtin_ty)),
+            Some(ValueMonad::Maybe | ValueMonad::Either)
+        ) {
+            return self.lower_fold_m_short_circuit(func_expr, init_expr, list_expr);
+        }
         let func_val = self
             .lower_expr(func_expr)?
             .ok_or_else(|| CodegenError::Internal("foldM: no function".to_string()))?;
@@ -32550,6 +33701,139 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(acc_phi.as_basic_value()))
     }
 
+    /// `foldM f z xs` at `Maybe` or `Either`.
+    ///
+    /// `f acc x` gives `Nothing`/`Left e`, which is the result of the whole
+    /// fold, or `Just acc'`/`Right acc'`, whose field is the next
+    /// accumulator; when the list ends the accumulator is wrapped again. The
+    /// loop written for `IO` took the wrapped value as the accumulator, so
+    /// the fold's result was whatever `f` last returned, read as a number.
+    ///
+    /// In both monads the constructor that ends the fold has tag 0 and the
+    /// one that continues has tag 1 and one field.
+    fn lower_fold_m_short_circuit(
+        &mut self,
+        func_expr: &Expr,
+        init_expr: &Expr,
+        list_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("foldM: {step}: {e:?}"))
+        };
+        let func_val = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no function".to_string()))?;
+        let func_ptr = self.value_to_ptr(func_val)?;
+        let init_val = self
+            .lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no init".to_string()))?;
+        let init_ptr = self.value_to_ptr(init_val)?;
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("foldM: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldM: no current block".to_string()))?;
+        let current_fn = entry_block
+            .get_parent()
+            .ok_or_else(|| CodegenError::Internal("foldM: no current function".to_string()))?;
+        let header = self.llvm_ctx.append_basic_block(current_fn, "foldm_header");
+        let body = self.llvm_ctx.append_basic_block(current_fn, "foldm_body");
+        let next = self.llvm_ctx.append_basic_block(current_fn, "foldm_next");
+        let finish = self.llvm_ctx.append_basic_block(current_fn, "foldm_finish");
+        let exit = self.llvm_ctx.append_basic_block(current_fn, "foldm_exit");
+
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(header);
+        let acc_phi = self
+            .builder()
+            .build_phi(ptr_type, "foldm_acc")
+            .map_err(|e| internal("phi", &e))?;
+        let list_phi = self
+            .builder()
+            .build_phi(ptr_type, "foldm_list")
+            .map_err(|e| internal("phi", &e))?;
+        // The rest of the list may be a thunk.
+        let list = self
+            .build_force(list_phi.as_basic_value())?
+            .into_pointer_value();
+        let list_tag = self.extract_adt_tag(list)?;
+        let is_empty = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                list_tag,
+                i64_type.const_zero(),
+                "foldm_done",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        self.builder()
+            .build_conditional_branch(is_empty, finish, body)
+            .map_err(|e| internal("branch", &e))?;
+
+        // Apply f; a `Nothing`/`Left` is the result.
+        self.builder().position_at_end(body);
+        let head_ptr = self.extract_adt_field(list, 2, 0)?;
+        let tail_ptr = self.extract_list_tail(list)?;
+        let step = self.call_fold_function(
+            func_ptr,
+            acc_phi.as_basic_value().into_pointer_value(),
+            head_ptr,
+            "foldM",
+        )?;
+        let step = self.build_force(step)?.into_pointer_value();
+        let step_tag = self.extract_adt_tag(step)?;
+        let stops = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                step_tag,
+                i64_type.const_zero(),
+                "foldm_stops",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("foldM: no insert block".to_string()))?;
+        self.builder()
+            .build_conditional_branch(stops, exit, next)
+            .map_err(|e| internal("branch", &e))?;
+
+        // Otherwise its field is the next accumulator.
+        self.builder().position_at_end(next);
+        let next_acc = self.extract_adt_field(step, 1, 0)?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| internal("branch", &e))?;
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&next_acc, next)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, next)]);
+
+        // The list ended: `Just acc` / `Right acc`.
+        self.builder().position_at_end(finish);
+        let wrapped = self.alloc_adt(1, 1)?;
+        self.store_adt_field(wrapped, 1, 0, acc_phi.as_basic_value())?;
+        self.builder()
+            .build_unconditional_branch(exit)
+            .map_err(|e| internal("branch", &e))?;
+
+        self.builder().position_at_end(exit);
+        let result = self
+            .builder()
+            .build_phi(ptr_type, "foldm_result")
+            .map_err(|e| internal("phi", &e))?;
+        result.add_incoming(&[(&step, body_end), (&wrapped, finish)]);
+        Ok(Some(result.as_basic_value()))
+    }
+
     /// Lower `foldM_ f acc list` — monadic left fold, discards result.
     fn lower_builtin_fold_m_(
         &mut self,
@@ -32573,12 +33857,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Coerce count to i64
         let count_i64 = match count_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "count_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("replicateM: ptr_to_int failed: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "count_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "replicateM: count must be Int".to_string(),
@@ -32681,12 +33960,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("replicateM_: no count".to_string()))?;
         let count_i64 = match count_val {
             BasicValueEnum::IntValue(i) => i,
-            BasicValueEnum::PointerValue(p) => self
-                .builder()
-                .build_ptr_to_int(p, self.type_mapper().i64_type(), "count_int")
-                .map_err(|e| {
-                    CodegenError::Internal(format!("replicateM_: ptr_to_int failed: {:?}", e))
-                })?,
+            BasicValueEnum::PointerValue(p) => self.scalar_from_word(p, "count_int")?,
             _ => {
                 return Err(CodegenError::TypeError(
                     "replicateM_: count must be Int".to_string(),
@@ -33809,10 +35083,94 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `enumFrom` - [n..] (infinite list, capped at 10000 elements as fallback).
+    /// `[x ..]`, `[x, y ..]` and `[x, y .. z]` at an enumeration with a
+    /// derived `Enum` (every constructor nullary): the constructors whose tags
+    /// step from `x`'s, up to the last constructor (or down to the first) when
+    /// no end is given. The integer paths these took otherwise produced an
+    /// empty list, `[x]`, or a crash. `None` when the type is not such an
+    /// enumeration.
+    fn lower_user_enum_range(
+        &mut self,
+        from_expr: &Expr,
+        then_expr: Option<&Expr>,
+        to_expr: Option<&Expr>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let Some(type_name) = self.infer_adt_type_from_expr(from_expr) else {
+            return Ok(None);
+        };
+        if !self.derived_from_enum_fns.contains_key(&type_name) {
+            return Ok(None);
+        }
+        let metas: Vec<&ConstructorMeta> = self
+            .constructor_metadata
+            .values()
+            .filter(|m| m.type_name.as_deref() == Some(type_name.as_str()))
+            .collect();
+        if metas.is_empty() || metas.iter().any(|m| m.arity != 0) {
+            return Ok(None);
+        }
+        let last_tag = metas.iter().map(|m| m.tag).max().unwrap_or(0);
+        let i64_ty = self.type_mapper().i64_type();
+        let tag_of = |this: &mut Self, e: &Expr| -> CodegenResult<IntValue<'ctx>> {
+            let v = this
+                .lower_expr(e)?
+                .ok_or_else(|| CodegenError::Internal("enum range: no value".to_string()))?;
+            this.call_derived_from_enum(&type_name, v)
+        };
+        let from = tag_of(self, from_expr)?;
+        let (then, has_then) = match then_expr {
+            Some(e) => (tag_of(self, e)?, i64_ty.const_int(1, false)),
+            None => (from, i64_ty.const_zero()),
+        };
+        let to = match to_expr {
+            Some(e) => tag_of(self, e)?,
+            None => {
+                // No end: the last constructor going up, the first going down.
+                let last = i64_ty.const_int(u64::from(last_tag), false);
+                if then_expr.is_none() {
+                    last
+                } else {
+                    let down = self
+                        .builder()
+                        .build_int_compare(inkwell::IntPredicate::SLT, then, from, "enum_down")
+                        .map_err(|e| CodegenError::Internal(format!("enum range: {e:?}")))?;
+                    self.builder()
+                        .build_select(down, i64_ty.const_zero(), last, "enum_end")
+                        .map_err(|e| CodegenError::Internal(format!("enum range: {e:?}")))?
+                        .into_int_value()
+                }
+            }
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let f = match self.module.get_function("bhc_enum_ctor_range") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_enum_ctor_range",
+                ptr_type.fn_type(
+                    &[i64_ty.into(), i64_ty.into(), i64_ty.into(), i64_ty.into()],
+                    false,
+                ),
+            ),
+        };
+        Ok(self
+            .builder()
+            .build_call(
+                f,
+                &[from.into(), then.into(), has_then.into(), to.into()],
+                "enum_range",
+            )
+            .map_err(|e| CodegenError::Internal(format!("enum range call: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
+    }
+
     fn lower_builtin_enum_from(
         &mut self,
         from_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, None, None)? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(1000505, &[from_expr], "enum_from_integer");
         }
@@ -33847,6 +35205,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         from_expr: &Expr,
         then_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, Some(then_expr), None)? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(
                 1000506,
@@ -33877,6 +35238,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         then_expr: &Expr,
         to_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(list) = self.lower_user_enum_range(from_expr, Some(then_expr), Some(to_expr))? {
+            return Ok(Some(list));
+        }
         if self.builtin_at_integer(from_expr) {
             return self.call_integer_rts(
                 1000508,
@@ -34372,10 +35736,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero value)
         // Comparison operators return tagged-int-as-pointer, so use ptr_to_int
-        let pred_bool = self
-            .builder()
-            .build_ptr_to_int(pred_result.into_pointer_value(), tm.i64_type(), "pred_bool")
-            .map_err(|e| CodegenError::Internal(format!("until: ptr_to_int: {:?}", e)))?;
+        let pred_bool = self.scalar_from_word(pred_result.into_pointer_value(), "pred_bool")?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -34589,10 +35950,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // verification.)
         let head =
             self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let char_val = self
-            .builder()
-            .build_ptr_to_int(head, tm.i64_type(), "char_val")
-            .map_err(|e| CodegenError::Internal(format!("iprint: char ptr_to_int: {:?}", e)))?;
+        let char_val = self.scalar_from_word(head, "char_val")?;
         let char_i32 = self
             .builder()
             .build_int_truncate(char_val, tm.i32_type(), "char_i32")
@@ -35344,6 +36702,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            return self.lower_list_extreme_by(cmp, list_expr, 1);
+        }
         if self.list_builtin_at_integer() {
             return self.lower_integer_list_extreme(list_expr, true);
         }
@@ -35355,10 +36716,193 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            return self.lower_list_extreme_by(cmp, list_expr, 0);
+        }
         if self.list_builtin_at_integer() {
             return self.lower_integer_list_extreme(list_expr, false);
         }
         self.lower_builtin_max_min_impl(list_expr, inkwell::IntPredicate::SLT, "minimum")
+    }
+
+    /// For `sort`/`maximum`/`minimum` stamped at a list of a user type with a
+    /// derived `Ord`, a closure over its `$derived_compare_T` (the RTS calls
+    /// `code(closure, a, b)`, which is that function's `(env, lhs, rhs)`).
+    /// These builtins otherwise compare raw words, which for a boxed value is
+    /// its address: `sort [Hi, Lo, Mid]` came back in allocation order.
+    fn derived_ord_list_comparator(&mut self) -> CodegenResult<Option<PointerValue<'ctx>>> {
+        let elem = match &self.current_builtin_ty {
+            Ty::Fun(a, _) => match a.as_ref() {
+                Ty::List(e) => e.as_ref().clone(),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let Ty::Con(con) = elem else {
+            return Ok(None);
+        };
+        let Some(cmp_fn) = self
+            .derived_compare_fns
+            .get(con.name.as_str())
+            .and_then(|id| self.functions.get(id))
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let closure = self.alloc_closure(cmp_fn.as_global_value().as_pointer_value(), &[])?;
+        Ok(Some(closure))
+    }
+
+    /// An equality closure for the elements of the list this builtin is
+    /// stamped at (hir-to-core records the type), when they are boxed values
+    /// whose machine words do not decide equality: `[Char]` (the RTS's
+    /// string closure) or a user type with a derived `Eq` (a closure over
+    /// `$derived_eq_T`). `nub`, `group`, `elem`, … compared those by address.
+    fn element_eq_closure(&mut self) -> CodegenResult<Option<PointerValue<'ctx>>> {
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        // The LAST list parameter: `delete :: a -> [a] -> [a]` at `String`
+        // has a list as its first parameter too.
+        let mut elem = None;
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(e) = param.as_ref() {
+                elem = Some(e.as_ref().clone());
+            }
+            fn_ty = rest;
+        }
+        let Some(elem) = elem else {
+            return Ok(None);
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        if self.is_string_type(&elem) {
+            let f = match self.module.get_function("bhc_string_eq_closure") {
+                Some(f) => f,
+                None => self
+                    .module
+                    .add_function("bhc_string_eq_closure", ptr_type.fn_type(&[], false)),
+            };
+            let closure = self
+                .builder()
+                .build_call(f, &[], "string_eq")
+                .map_err(|e| CodegenError::Internal(format!("string eq closure: {e:?}")))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("string eq closure: void".to_string()))?;
+            return Ok(Some(closure.into_pointer_value()));
+        }
+        let Ty::Con(con) = &elem else {
+            return Ok(None);
+        };
+        let Some(eq_fn) = self
+            .derived_eq_fns
+            .get(con.name.as_str())
+            .and_then(|id| self.functions.get(id))
+            .copied()
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.code_closure(eq_fn)?))
+    }
+
+    /// Whether [`Self::element_eq_closure`] would give a closure, without
+    /// emitting one.
+    fn element_eq_closure_available(&self) -> bool {
+        let mut fn_ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        let mut available = false;
+        while let Ty::Fun(param, rest) = fn_ty {
+            if let Ty::List(e) = param.as_ref() {
+                available = self.is_string_type(e)
+                    || matches!(e.as_ref(), Ty::Con(c) if self.derived_eq_fns.contains_key(c.name.as_str()));
+            }
+            fn_ty = rest;
+        }
+        available
+    }
+
+    /// A closure capturing nothing whose code is `f`, a top-level function
+    /// taking `(env, a, b)`, for the RTS `*_by` list functions.
+    fn code_closure(&mut self, f: FunctionValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        self.alloc_closure(f.as_global_value().as_pointer_value(), &[])
+    }
+
+    /// Call an RTS `*_by` list function: `name(eq_closure, args…)`, every
+    /// argument a pointer, returning `ret` (a pointer, or an i64 flag).
+    fn call_list_by(
+        &mut self,
+        name: &str,
+        eq: PointerValue<'ctx>,
+        args: &[&Expr],
+        returns_flag: bool,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let mut vals: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = vec![eq.into()];
+        for a in args {
+            let v = self
+                .lower_expr(a)?
+                .ok_or_else(|| CodegenError::Internal(format!("{name}: argument has no value")))?;
+            vals.push(self.value_to_ptr(v)?.into());
+        }
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+            vals.iter().map(|_| ptr_type.into()).collect();
+        let f = match self.module.get_function(name) {
+            Some(f) => f,
+            None => {
+                let ty = if returns_flag {
+                    i64_type.fn_type(&params, false)
+                } else {
+                    ptr_type.fn_type(&params, false)
+                };
+                self.module.add_function(name, ty)
+            }
+        };
+        self.builder()
+            .build_call(f, &vals, name)
+            .map_err(|e| CodegenError::Internal(format!("{name} call failed: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{name}: returned void")))
+    }
+
+    /// `maximum`/`minimum` under a comparison closure (`bhc_list_extreme_by`).
+    fn lower_list_extreme_by(
+        &mut self,
+        cmp: PointerValue<'ctx>,
+        list_expr: &Expr,
+        want_max: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("extreme: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let f = match self.module.get_function("bhc_list_extreme_by") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_list_extreme_by",
+                ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false),
+            ),
+        };
+        Ok(self
+            .builder()
+            .build_call(
+                f,
+                &[
+                    cmp.into(),
+                    list_ptr.into(),
+                    i64_type.const_int(want_max, false).into(),
+                ],
+                "extreme_by",
+            )
+            .map_err(|e| CodegenError::Internal(format!("extreme call: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
     }
 
     /// Whether this list builtin's stamped argument is `[Integer]`.
@@ -35478,18 +37022,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let cur_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(cur_head, i64_type, "head_int")
-            .map_err(|e| CodegenError::Internal(format!("{}: p2i: {:?}", label, e)))?;
-        let best_int = self
-            .builder()
-            .build_ptr_to_int(
-                best_phi.as_basic_value().into_pointer_value(),
-                i64_type,
-                "best_int",
-            )
-            .map_err(|e| CodegenError::Internal(format!("{}: p2i: {:?}", label, e)))?;
+        let head_int = self.scalar_from_word(cur_head, "head_int")?;
+        let best_int =
+            self.scalar_from_word(best_phi.as_basic_value().into_pointer_value(), "best_int")?;
         let is_better = self
             .builder()
             .build_int_compare(cmp_pred, head_int, best_int, "is_better")
@@ -35562,10 +37097,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let not_found_block = self.llvm_ctx.append_basic_block(current_fn, "ei_not_found");
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "ei_merge");
 
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, i64_type, "val_int")
-            .map_err(|e| CodegenError::Internal(format!("elemIndex: p2i: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -35600,10 +37132,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(loop_body);
         let head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head, i64_type, "head_int")
-            .map_err(|e| CodegenError::Internal(format!("elemIndex: p2i: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head, "head_int")?;
         let is_equal = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_eq")
@@ -35911,14 +37440,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let p_int = self
-            .builder()
-            .build_ptr_to_int(p_head, i64_type, "p_int")
-            .map_err(|e| CodegenError::Internal(format!("isPrefixOf: p2i: {:?}", e)))?;
-        let l_int = self
-            .builder()
-            .build_ptr_to_int(l_head, i64_type, "l_int")
-            .map_err(|e| CodegenError::Internal(format!("isPrefixOf: p2i: {:?}", e)))?;
+        let p_int = self.scalar_from_word(p_head, "p_int")?;
+        let l_int = self.scalar_from_word(l_head, "l_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, p_int, l_int, "heads_eq")
@@ -36072,14 +37595,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let l_tail = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let p_int = self
-            .builder()
-            .build_ptr_to_int(p_head, i64_type, "p_int")
-            .map_err(|e| CodegenError::Internal(format!("isSuffixOf: p2i: {:?}", e)))?;
-        let l_int = self
-            .builder()
-            .build_ptr_to_int(l_head, i64_type, "l_int")
-            .map_err(|e| CodegenError::Internal(format!("isSuffixOf: p2i: {:?}", e)))?;
+        let p_int = self.scalar_from_word(p_head, "p_int")?;
+        let l_int = self.scalar_from_word(l_head, "l_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, p_int, l_int, "heads_eq")
@@ -36273,14 +37790,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let h_head = self.extract_adt_field(h_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let h_tail = self.extract_list_tail(h_phi.as_basic_value().into_pointer_value())?;
 
-        let n_int = self
-            .builder()
-            .build_ptr_to_int(n_head, i64_type, "n_int")
-            .map_err(|e| CodegenError::Internal(format!("isInfixOf: p2i: {:?}", e)))?;
-        let h_int = self
-            .builder()
-            .build_ptr_to_int(h_head, i64_type, "h_int")
-            .map_err(|e| CodegenError::Internal(format!("isInfixOf: p2i: {:?}", e)))?;
+        let n_int = self.scalar_from_word(n_head, "n_int")?;
+        let h_int = self.scalar_from_word(h_head, "h_int")?;
         let heads_eq = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, n_int, h_int, "heads_eq")
@@ -36704,6 +38215,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let flag = self
+                .call_list_by("bhc_list_elem_by", eq, &[val_expr, list_expr], true)?
+                .into_int_value();
+            return Ok(Some(self.int_to_ptr(flag)?.into()));
+        }
         // Lower the value to search for
         let val_val = self
             .lower_expr(val_expr)?
@@ -36740,10 +38257,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "elem_merge");
 
         // Convert search value to i64 for comparison
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, i64_ty, "val_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -36797,10 +38311,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 )
                 .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
         } else {
-            let head_int = self
-                .builder()
-                .build_ptr_to_int(head_ptr, i64_ty, "head_int")
-                .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+            let head_int = self.scalar_from_word(head_ptr, "head_int")?;
             self.builder()
                 .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
                 .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
@@ -36959,6 +38470,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let flag = self
+                .call_list_by("bhc_list_elem_by", eq, &[val_expr, list_expr], true)?
+                .into_int_value();
+            let flag = self
+                .builder()
+                .build_xor(
+                    flag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "not_elem",
+                )
+                .map_err(|e| CodegenError::Internal(format!("notElem: {e:?}")))?;
+            return Ok(Some(self.int_to_ptr(flag)?.into()));
+        }
         // Lower the value to search for
         let val_val = self
             .lower_expr(val_expr)?
@@ -37005,10 +38530,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .append_basic_block(current_fn, "notelem_merge");
 
         // Convert search value to i64 for comparison
-        let val_int = self
-            .builder()
-            .build_ptr_to_int(val_ptr, tm.i64_type(), "val_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let val_int = self.scalar_from_word(val_ptr, "val_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -37042,10 +38564,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head_ptr, "head_int")?;
         let is_equal = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
@@ -37113,6 +38632,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(base),
             id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let var = |v: &Var| Expr::Var(v.clone(), span);
         let app = |f: Expr, a: Expr| Expr::App(Box::new(f), Box::new(a), span);
@@ -37122,6 +38642,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern(":"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             app(
                 app(Expr::Var(cons_var, span), h),
@@ -37186,6 +38707,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("error"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 let empty = app(
                     Expr::Var(error_var, span),
@@ -38343,10 +39865,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let merge_block = self.llvm_ctx.append_basic_block(current_fn, "lookup_merge");
 
         // Convert search key to i64 for comparison
-        let key_int = self
-            .builder()
-            .build_ptr_to_int(key_ptr, tm.i64_type(), "key_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let key_int = self.scalar_from_word(key_ptr, "key_int")?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
@@ -38385,10 +39904,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let pair_val = self.extract_adt_field(head_ptr, 2, 1)?;
 
         // Compare pair key with search key
-        let pair_key_int = self
-            .builder()
-            .build_ptr_to_int(pair_key, tm.i64_type(), "pair_key_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let pair_key_int = self.scalar_from_word(pair_key, "pair_key_int")?;
         let is_match = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, pair_key_int, key_int, "is_match")
@@ -38956,6 +40472,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_nub_by", eq, &[list_expr], false)?;
+            return Ok(Some(r));
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("nub: no list".to_string()))?;
@@ -38979,6 +40499,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(cmp) = self.derived_ord_list_comparator()? {
+            let list_val = self
+                .lower_expr(list_expr)?
+                .ok_or_else(|| CodegenError::Internal("sort: no list".to_string()))?;
+            let list_ptr = self.value_to_ptr(list_val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000171)).ok_or_else(|| {
+                CodegenError::Internal("bhc_list_sort_by not declared".to_string())
+            })?;
+            return Ok(self
+                .builder()
+                .build_call(rts_fn, &[cmp.into(), list_ptr.into()], "sort_derived")
+                .map_err(|e| CodegenError::Internal(format!("sort call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic());
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("sort: no list".to_string()))?;
@@ -39030,6 +40565,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_group_by", eq, &[list_expr], false)?;
+            return Ok(Some(r));
+        }
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("group: no list".to_string()))?;
@@ -39383,6 +40922,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_delete_by", eq, &[val_expr, list_expr], false)?;
+            return Ok(Some(r));
+        }
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("delete: no value".to_string()))?;
@@ -39450,10 +40993,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let tail_ptr = self.extract_list_tail(list_phi.as_basic_value().into_pointer_value())?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let head_int = self.scalar_from_word(head_ptr, "head_int")?;
         let is_match = self
             .builder()
             .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_match")
@@ -39562,6 +41102,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by("bhc_list_union_by", eq, &[list1_expr, list2_expr], false)?;
+            return Ok(Some(r));
+        }
         // `union xs ys = xs ++ filter (\y -> not (elem y xs)) (nub ys)`: the
         // elements of `ys` not already in `xs`, without duplicates. This was
         // a plain append, so `union [1,2] [2,3]` kept the second `2`.
@@ -39576,6 +41120,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: bhc_intern::Symbol::intern(name),
             id: VarId::new(id),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         // Ids from the top of the range: bound only while this body is
         // lowered, and never produced by the front end.
@@ -39621,6 +41166,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_expr: &Expr,
         list2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(eq) = self.element_eq_closure()? {
+            let r = self.call_list_by(
+                "bhc_list_intersect_by",
+                eq,
+                &[list1_expr, list2_expr],
+                false,
+            )?;
+            return Ok(Some(r));
+        }
         let list1_val = self
             .lower_expr(list1_expr)?
             .ok_or_else(|| CodegenError::Internal("intersect: list1 has no value".to_string()))?;
@@ -39716,10 +41270,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let x_tail = self.extract_list_tail(xs_phi.as_basic_value().into_pointer_value())?;
 
         // Convert x_head to int for comparison (works for Int values)
-        let x_int = self
-            .builder()
-            .build_ptr_to_int(x_head, tm.i64_type(), "x_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let x_int = self.scalar_from_word(x_head, "x_int")?;
 
         self.builder()
             .build_unconditional_branch(inner_header)
@@ -39750,10 +41301,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(inner_body);
         let y_head = self.extract_adt_field(ys_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let y_tail = self.extract_list_tail(ys_phi.as_basic_value().into_pointer_value())?;
-        let y_int = self
-            .builder()
-            .build_ptr_to_int(y_head, tm.i64_type(), "y_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+        let y_int = self.scalar_from_word(y_head, "y_int")?;
 
         let eq = self
             .builder()
@@ -40823,10 +42371,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("read: returned void".to_string()))?;
         // Convert i64 to int-as-pointer
         let i64_val = result.into_int_value();
-        let ptr_val = self
-            .builder()
-            .build_int_to_ptr(i64_val, self.type_mapper().ptr_type(), "read_as_ptr")
-            .map_err(|e| CodegenError::Internal(format!("read int_to_ptr: {:?}", e)))?;
+        let ptr_val = self.word_from_scalar(i64_val, "read_as_ptr")?;
         Ok(Some(ptr_val.into()))
     }
 
@@ -40919,10 +42464,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // char_check: extract head char and compare
                 self.builder().position_at_end(char_check);
                 let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
-                let char_val = self
-                    .builder()
-                    .build_ptr_to_int(head_ptr, i64_type, "char_val")
-                    .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+                let char_val = self.scalar_from_word(head_ptr, "char_val")?;
                 let expected = i64_type.const_int(*ch as u64, false);
                 let chars_eq = self
                     .builder()
@@ -41023,6 +42565,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         str_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(names) = self.reads_enum_constructor_names() {
+            let str_val = self
+                .lower_expr(str_expr)?
+                .ok_or_else(|| CodegenError::Internal("reads: no string".to_string()))?;
+            let str_ptr = self.value_to_ptr(str_val)?;
+            let ptr_type = self.type_mapper().ptr_type();
+            let reads_enum = match self.module.get_function("bhc_reads_enum") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_reads_enum",
+                    ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            let names_ptr = self
+                .builder()
+                .build_global_string_ptr(&names.join("\n"), "reads_enum_names")
+                .map_err(|e| CodegenError::Internal(format!("reads names: {e:?}")))?
+                .as_pointer_value();
+            let result = self
+                .builder()
+                .build_call(
+                    reads_enum,
+                    &[str_ptr.into(), names_ptr.into()],
+                    "reads_enum",
+                )
+                .map_err(|e| CodegenError::Internal(format!("reads call failed: {e:?}")))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("reads: returned void".to_string()))?;
+            return Ok(Some(result));
+        }
         let str_val = self
             .lower_expr(str_expr)?
             .ok_or_else(|| CodegenError::Internal("reads: no string".to_string()))?;
@@ -41041,7 +42614,59 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
-    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.
+    /// The constructor names, in tag order, when this `reads` is at an
+    /// enumeration (every constructor nullary): its instantiated type is
+    /// `String -> [(T, String)]`. `None` otherwise, and `reads` reads an Int.
+    fn reads_enum_constructor_names(&self) -> Option<Vec<String>> {
+        let mut ty = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = ty {
+            ty = body;
+        }
+        let Ty::Fun(_, result) = ty else {
+            return None;
+        };
+        let elem = match result.as_ref() {
+            Ty::List(elem) => elem.as_ref(),
+            Ty::App(f, elem) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                elem.as_ref()
+            }
+            _ => return None,
+        };
+        let Ty::Tuple(parts) = elem else {
+            return None;
+        };
+        let Some(Ty::Con(target)) = parts.first() else {
+            return None;
+        };
+        let target = target.name.as_str();
+        let mut cons: Vec<(u32, &str)> = self
+            .constructor_metadata
+            .iter()
+            .filter(|(_, m)| m.type_name.as_deref() == Some(target))
+            // Keys also come qualified and disambiguated (`Color::Red#0`).
+            .map(|(n, m)| {
+                let bare = n.rsplit("::").next().unwrap_or(n);
+                (m.tag, bare.split('#').next().unwrap_or(bare))
+            })
+            .collect();
+        if cons.is_empty()
+            || self
+                .constructor_metadata
+                .values()
+                .any(|m| m.type_name.as_deref() == Some(target) && m.arity != 0)
+        {
+            return None;
+        }
+        cons.sort_unstable();
+        cons.dedup_by_key(|c| c.0);
+        // Tags must be 0..n, so a name's position is its tag.
+        if cons.iter().enumerate().any(|(i, c)| c.0 as usize != i) {
+            return None;
+        }
+        Some(cons.into_iter().map(|(_, n)| n.to_string()).collect())
+    }
+
+    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.    /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.
     /// 3-list parallel iteration, build 3-tuples.
     fn lower_builtin_zip3(
         &mut self,
@@ -42316,7 +43941,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero tag)
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -42357,7 +43989,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -42918,7 +44550,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -42956,7 +44595,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -43555,7 +45194,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if predicate returned True (non-zero tag)
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
+        // Reading the tag can branch (a comparison answers a tagged word,
+        // `even` a Bool object), so the loop's phi comes from wherever that
+        // left the builder, not from the block the loop body began in.
+        let pred_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -43596,7 +45242,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
         merge_phi.add_incoming(&[
             (&inserted, loop_insert),
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), pred_block),
         ]);
 
         let new_idx = self
@@ -46182,7 +47828,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
         let pred_ptr = self.value_to_ptr(pred_result)?;
-        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let pred_tag = self.extract_bool_tag(pred_ptr)?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -49558,6 +51204,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 && matches!(r.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")))
     }
 
+    /// Whether this `fromIntegral` is resolved at a machine integer (`Int`,
+    /// `Word`, the sized ones) to `Double`/`Float`.
+    fn is_machine_int_to_floating(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        matches!(t, Ty::Fun(a, r)
+            if matches!(a.as_ref(), Ty::Con(c) if matches!(c.name.as_str(),
+                "Int" | "Word" | "Int8" | "Int16" | "Int32" | "Int64"
+                    | "Word8" | "Word16" | "Word32" | "Word64"))
+                && matches!(r.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")))
+    }
+
     /// An `Integer` as a double: read back through `bhc_integer_to_i64`,
     /// then `sitofp` (a bignum beyond 64 bits loses its high part). Without
     /// this the bignum's pointer was converted.
@@ -49954,10 +51614,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // Closures are represented as heap-allocated structs:
     //
     //   struct Closure {
+    //       i64 kind;          // bhc_rts_alloc::object::CLOSURE
     //       ptr fn_ptr;        // Pointer to the lifted function
-    //       i64 env_size;      // Number of captured variables
+    //       i64 arity;         // Parameters the function takes; 0 = unknown
     //       ptr env[];         // Array of captured variable pointers
     //   }
+    //
+    // The layout is stated in `bhc_rts_alloc::object`, which the runtime
+    // reads closures through; `closure_type` must agree with it.
     //
     // When a lambda captures free variables, we:
     // 1. Compute the free variables
@@ -50082,7 +51746,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Get the LLVM struct type for a closure with the given environment size.
     ///
-    /// Closure layout: { ptr fn_ptr, i64 env_size, [env_size x ptr] env }
+    /// Closure layout: { i64 kind, ptr fn_ptr, i64 arity, [env_size x ptr] env }
     fn closure_type(&self, env_size: u32) -> inkwell::types::StructType<'ctx> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -50091,9 +51755,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Create array type for environment
         let env_type = ptr_type.array_type(env_size);
 
-        // Struct: { ptr fn_ptr, i64 env_size, [env_size x ptr] env }
-        self.llvm_ctx
-            .struct_type(&[ptr_type.into(), i64_type.into(), env_type.into()], false)
+        // Struct: { i64 kind, ptr fn_ptr, i64 arity, [env_size x ptr] env }
+        self.llvm_ctx.struct_type(
+            &[
+                i64_type.into(),
+                ptr_type.into(),
+                i64_type.into(),
+                env_type.into(),
+            ],
+            false,
+        )
     }
 
     /// Allocate a closure with the given function pointer and captured variables.
@@ -50125,8 +51796,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let env_size = captured_vars.len() as u32;
         let closure_ty = self.closure_type(env_size);
 
-        // Calculate size: sizeof(ptr) + sizeof(i64) + env_size * sizeof(ptr)
-        let size = 8 + 8 + (env_size as u64) * 8;
+        let size = bhc_rts_alloc::object::closure_size(env_size as usize) as u64;
 
         // Call bhc_alloc
         let alloc_fn = self
@@ -50145,21 +51815,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let closure_ptr = raw_ptr.into_pointer_value();
 
-        // Store function pointer at offset 0
+        // Word 0 says the object is a closure
+        let kind_slot = self
+            .builder()
+            .build_struct_gep(closure_ty, closure_ptr, 0, "kind_slot")
+            .map_err(|e| CodegenError::Internal(format!("failed to get kind slot: {:?}", e)))?;
+        let kind_val = tm
+            .i64_type()
+            .const_int(bhc_rts_alloc::object::CLOSURE as u64, true);
+        self.builder()
+            .build_store(kind_slot, kind_val)
+            .map_err(|e| CodegenError::Internal(format!("failed to store kind: {:?}", e)))?;
+
+        // Store function pointer at offset 1
         let fn_ptr_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 0, "fn_ptr_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 1, "fn_ptr_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get fn_ptr slot: {:?}", e)))?;
 
         self.builder()
             .build_store(fn_ptr_slot, fn_ptr)
             .map_err(|e| CodegenError::Internal(format!("failed to store fn_ptr: {:?}", e)))?;
 
-        // Store the physical arity at offset 1 (the env size is known statically
-        // at every use site, so this word carries arity instead — see doc above).
+        // Store the physical arity at offset 2 (the env size is known statically
+        // at every use site, so no word carries it — see doc above).
         let arity_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 2, "arity_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get arity slot: {:?}", e)))?;
 
         let arity_val = tm.i64_type().const_int(arity as u64, false);
@@ -50171,7 +51853,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if env_size > 0 {
             let env_slot = self
                 .builder()
-                .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
                 .map_err(|e| CodegenError::Internal(format!("failed to get env slot: {:?}", e)))?;
 
             for (i, (_var_id, val)) in captured_vars.iter().enumerate() {
@@ -50211,7 +51893,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let fn_ptr_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 0, "fn_ptr_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 1, "fn_ptr_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get fn_ptr slot: {:?}", e)))?;
 
         let fn_ptr = self
@@ -50222,11 +51904,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(fn_ptr.into_pointer_value())
     }
 
-    /// Load a closure's code pointer and refuse to jump to a null one.
+    /// Load a closure's code pointer, refusing an object that is not a closure.
     ///
-    /// A transformer's bind calls its action through word 0, so a value that
-    /// is not a closure jumps to whatever that word holds — usually address 0,
-    /// and a bare SIGSEGV two frames deep. `bhc_bad_action` names the object
+    /// A transformer's bind calls its action through the code word, so a
+    /// value that is not a closure jumps to whatever that word holds, and a
+    /// bare SIGSEGV two frames deep. `bhc_bad_action` names the object
     /// instead, and backtraces through the generated code when
     /// `RUST_BACKTRACE` asks.
     fn checked_closure_fn_ptr(
@@ -50255,47 +51937,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
         let bad_bb = self.llvm_ctx.append_basic_block(current_fn, "action_bad");
         let ok_bb = self.llvm_ctx.append_basic_block(current_fn, "action_ok");
-        let is_null = self
-            .builder()
-            .build_is_null(fn_ptr, "action_fn_null")
-            .map_err(|e| CodegenError::Internal(format!("action null check: {:?}", e)))?;
-        // Also trip on the BhcText header signature: a `Text` object's word 0 is
-        // `self + HEADER_SIZE` (24), a data pointer into itself, not a code
-        // address. When a `Text` (or a thunk that forces to one) is mistakenly
-        // called as a closure, its word 0 is loaded as the fn-ptr and the jump
-        // lands `self + 24` in the heap → `udf`. `readMarkdown` dies exactly
-        // this way (a `Text` in `parserBind`'s continuation slot); routing it to
-        // `bhc_bad_action` names the object and the call site instead.
+        // Word 0 of a closure says so. Anything else called as one (a `Text`
+        // in a continuation slot, a constructor, a null code pointer in an
+        // object that was never a closure) used to be told apart by guessing
+        // from the code word; `bhc_bad_action` names the object and the call
+        // site instead of jumping through it.
         let tm = self.type_mapper();
-        let fn_as_int = self
+        let kind_slot = self
             .builder()
-            .build_ptr_to_int(fn_ptr, tm.i64_type(), "fn_as_int")
-            .map_err(|e| CodegenError::Internal(format!("action fn ptr_to_int: {:?}", e)))?;
-        let obj_as_int = self
+            .build_struct_gep(self.closure_type(0), closure_ptr, 0, "kind_slot")
+            .map_err(|e| CodegenError::Internal(format!("action kind gep: {:?}", e)))?;
+        let kind = self
             .builder()
-            .build_ptr_to_int(closure_ptr, tm.i64_type(), "obj_as_int")
-            .map_err(|e| CodegenError::Internal(format!("action obj ptr_to_int: {:?}", e)))?;
-        let obj_plus_hdr = self
-            .builder()
-            .build_int_add(
-                obj_as_int,
-                tm.i64_type().const_int(24, false),
-                "obj_plus_hdr",
-            )
-            .map_err(|e| CodegenError::Internal(format!("action add: {:?}", e)))?;
-        let is_text = self
-            .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                fn_as_int,
-                obj_plus_hdr,
-                "fn_is_text",
-            )
-            .map_err(|e| CodegenError::Internal(format!("action text cmp: {:?}", e)))?;
+            .build_load(tm.i64_type(), kind_slot, "action_kind")
+            .map_err(|e| CodegenError::Internal(format!("action kind load: {:?}", e)))?
+            .into_int_value();
         let is_bad = self
             .builder()
-            .build_or(is_null, is_text, "action_bad_fn")
-            .map_err(|e| CodegenError::Internal(format!("action or: {:?}", e)))?;
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                kind,
+                tm.i64_type()
+                    .const_int(bhc_rts_alloc::object::CLOSURE as u64, true),
+                "action_not_closure",
+            )
+            .map_err(|e| CodegenError::Internal(format!("action kind cmp: {:?}", e)))?;
         self.builder()
             .build_conditional_branch(is_bad, bad_bb, ok_bb)
             .map_err(|e| CodegenError::Internal(format!("action null br: {:?}", e)))?;
@@ -50323,7 +51989,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let env_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to get env slot: {:?}", e)))?;
 
         let elem_ptr = unsafe {
@@ -50433,6 +52099,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// The type of `expr`. Core leaves most application nodes untyped
+    /// (`Ty::Error`); for a call of a variable, the type is then the
+    /// function's own codomain once every arrow is applied. Dictionary
+    /// arguments have no arrow of their own, so they only make the call look
+    /// over-saturated, which is fine. A partial application stays untyped.
+    fn call_result_ty(expr: &Expr) -> Ty {
+        let ty = expr.ty();
+        if !matches!(ty, Ty::Error) {
+            return ty;
+        }
+        let mut value_args = 0usize;
+        let mut head = Self::peel_expr(expr);
+        loop {
+            match head {
+                Expr::App(f, arg, _) => {
+                    if !matches!(arg.as_ref(), Expr::Type(..)) {
+                        value_args += 1;
+                    }
+                    head = Self::peel_expr(f);
+                }
+                Expr::TyApp(f, _, _) => head = Self::peel_expr(f),
+                _ => break,
+            }
+        }
+        let Expr::Var(v, _) = head else {
+            return Ty::Error;
+        };
+        let mut fn_ty = &v.ty;
+        while let Ty::Forall(_, body) = fn_ty {
+            fn_ty = body;
+        }
+        let mut arrows = 0usize;
+        while let Ty::Fun(_, result) = fn_ty {
+            arrows += 1;
+            fn_ty = result;
+        }
+        if arrows == 0 || value_args < arrows {
+            return Ty::Error;
+        }
+        fn_ty.clone()
+    }
+
+    /// Whether a value of type `ty` may be a raw scalar that a thunk cannot
+    /// stand in for: a bare type variable (#64), and under the eager IO model
+    /// a type headed by one, `m a`, whose value at `IO` is the result (#65).
+    fn knot_type_is_opaque(ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(_) => true,
+            Ty::App(..) if !crate::io_closure_mode() => {
+                let mut head = ty;
+                while let Ty::App(f, _) = head {
+                    head = f;
+                }
+                matches!(head, Ty::Var(_))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether evaluating `expr` may call the variable `id`: `id` heads an
     /// application outside any lambda. A reference to `id` as a plain value
     /// (`(,) $instance_query_Inline 0`, the dictionary an instance method
@@ -50460,6 +52185,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Case(scrut, alts, _, _) => {
                 Self::expr_calls_var(scrut, id)
                     || alts.iter().any(|alt| Self::expr_calls_var(&alt.rhs, id))
+            }
+        }
+    }
+
+    /// Whether `expr` refers to any variable in `ids`, anywhere in it, top-level
+    /// ones included (`free_vars` leaves those out).
+    fn expr_mentions_any(expr: &Expr, ids: &FxHashSet<VarId>) -> bool {
+        match expr {
+            Expr::Var(v, _) => ids.contains(&v.id),
+            Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
+            Expr::App(f, a, _) => {
+                Self::expr_mentions_any(f, ids) || Self::expr_mentions_any(a, ids)
+            }
+            Expr::Lam(_, body, _) | Expr::TyLam(_, body, _) => Self::expr_mentions_any(body, ids),
+            Expr::TyApp(e, _, _) | Expr::Cast(e, _, _) | Expr::Tick(_, e, _) | Expr::Lazy(e, _) => {
+                Self::expr_mentions_any(e, ids)
+            }
+            Expr::Let(bind, body, _) => {
+                let in_rhs = match bind.as_ref() {
+                    Bind::NonRec(_, rhs) => Self::expr_mentions_any(rhs, ids),
+                    Bind::Rec(bs) => bs.iter().any(|(_, rhs)| Self::expr_mentions_any(rhs, ids)),
+                };
+                in_rhs || Self::expr_mentions_any(body, ids)
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                Self::expr_mentions_any(scrut, ids)
+                    || alts
+                        .iter()
+                        .any(|alt| Self::expr_mentions_any(&alt.rhs, ids))
             }
         }
     }
@@ -50774,6 +52528,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // First pass: declare all top-level functions
         for bind in &core_module.bindings {
             self.declare_binding(bind)?;
+        }
+
+        // Which CAFs are memoized: a reference made before a CAF's own body
+        // is lowered needs to know.
+        for bind in &core_module.bindings {
+            let vars: Vec<&Var> = match bind {
+                Bind::NonRec(var, _) => vec![var],
+                Bind::Rec(pairs) => pairs.iter().map(|(var, _)| var).collect(),
+            };
+            for var in vars {
+                if let Some(function) = self.functions.get(&var.id).copied() {
+                    if Self::is_memoizable_caf(var, function) {
+                        self.memo_caf_ids.insert(var.id);
+                    }
+                }
+            }
         }
 
         // Second pass: define all functions
@@ -51352,9 +53122,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Case(_, alts, _, _) => {
                 for alt in alts {
                     if let AltCon::DataCon(con) = &alt.con {
+                        // Only the type's own constructors. A method body
+                        // also matches on other types' (`Just`/`Nothing` in a
+                        // parser's `fmap`); tagged as this type's, every
+                        // later `fmap g (Just x)` in the module was sent to
+                        // this instance (#110).
+                        let own = con.ty_con.name.as_str();
+                        let own = own.rsplit('.').next().unwrap_or(own);
+                        let wanted = type_name.rsplit('.').next().unwrap_or(type_name);
                         let con_name = con.name.as_str().to_string();
-                        if let Some(meta) = self.constructor_metadata.get_mut(&con_name) {
-                            meta.type_name = Some(type_name.to_string());
+                        if own == wanted {
+                            if let Some(meta) = self.constructor_metadata.get_mut(&con_name) {
+                                meta.type_name = Some(type_name.to_string());
+                            }
                         }
                     }
                     self.tag_constructors_with_type(&alt.rhs, type_name);
@@ -51737,14 +53517,276 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_binding(&mut self, bind: &Bind) -> CodegenResult<()> {
         match bind {
             Bind::NonRec(var, expr) => {
-                self.lower_function_def(var, expr)?;
+                self.lower_top_level_def(var, expr)?;
             }
             Bind::Rec(bindings) => {
                 for (var, expr) in bindings {
-                    self.lower_function_def(var, expr)?;
+                    self.lower_top_level_def(var, expr)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Lower a top-level definition, memoizing it if it is a CAF that may be.
+    fn lower_top_level_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
+        match self.functions.get(&var.id).copied() {
+            Some(public) if self.memo_caf_ids.contains(&var.id) => {
+                self.lower_memoized_caf(var, expr, public)
+            }
+            _ => self.lower_function_def(var, expr),
+        }
+    }
+
+    /// Whether the top-level binding `var`, declared as `function`, is a CAF
+    /// whose value can be computed once and shared, as GHC shares a CAF:
+    /// nullary, with a known type that is not, and holds no, IO action. Under
+    /// the eager IO model calling an IO CAF performs its effects, so caching
+    /// one would drop them; a type headed by a type variable may be IO. `main`
+    /// runs once anyway.
+    fn is_memoizable_caf(var: &Var, function: FunctionValue<'ctx>) -> bool {
+        fn mentions_io(ty: &Ty) -> bool {
+            match ty {
+                Ty::Con(c) => c.name.as_str() == "IO",
+                Ty::App(f, a) | Ty::Fun(f, a) => mentions_io(f) || mentions_io(a),
+                Ty::List(e) => mentions_io(e),
+                Ty::Tuple(es) => es.iter().any(mentions_io),
+                Ty::Forall(_, body) => mentions_io(body),
+                _ => false,
+            }
+        }
+        fn headed_by_var(ty: &Ty) -> bool {
+            match ty {
+                Ty::Var(_) => true,
+                Ty::App(f, _) => headed_by_var(f),
+                Ty::Forall(_, body) => headed_by_var(body),
+                _ => false,
+            }
+        }
+        let name = var.name.as_str();
+        function.count_params() == 1
+            && function.get_type().get_return_type().is_some()
+            && !matches!(var.ty, Ty::Error)
+            && !mentions_io(&var.ty)
+            && !headed_by_var(&var.ty)
+            && name != "main"
+            && !name.ends_with(".main")
+            && std::env::var_os("BHC_NO_CAF_MEMO").is_none()
+    }
+
+    /// A reference to the memoized CAF `public` whose `done` flag says whether
+    /// it is computed: its value if so, a thunk that computes it if not.
+    fn lower_caf_ref_if_done(
+        &mut self,
+        public: FunctionValue<'ctx>,
+        done: inkwell::values::GlobalValue<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("CAF reference: {e:?}"))
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let i8_type = self.llvm_context().i8_type();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no function".to_string()))?;
+        let ready = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_ready");
+        let pending = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_pending");
+        let merge = self
+            .llvm_context()
+            .append_basic_block(current_fn, "caf_ref");
+        let flag = self
+            .builder()
+            .build_load(i8_type, done.as_pointer_value(), "caf_is_done")
+            .map_err(err)?
+            .into_int_value();
+        let is_done = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                flag,
+                i8_type.const_zero(),
+                "done",
+            )
+            .map_err(err)?;
+        self.builder()
+            .build_conditional_branch(is_done, ready, pending)
+            .map_err(err)?;
+
+        self.builder().position_at_end(ready);
+        let value = self
+            .builder()
+            .build_call(public, &[ptr_type.const_null().into()], "caf_value")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: void".to_string()))?;
+        let value = self.value_to_ptr(value)?;
+        let ready_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(err)?;
+
+        self.builder().position_at_end(pending);
+        let fn_ptr = public.as_global_value().as_pointer_value();
+        let thunk = self.alloc_thunk(fn_ptr, &[])?;
+        let pending_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("CAF reference: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(err)?;
+
+        self.builder().position_at_end(merge);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "caf_ref_value")
+            .map_err(err)?;
+        phi.add_incoming(&[(&value, ready_end), (&thunk, pending_end)]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// The flag a memoized CAF sets once its value is cached, by the CAF's
+    /// symbol; created by whichever needs it first, its wrapper or a reference
+    /// made in another CAF's body.
+    fn caf_done_global(&self, symbol: &str) -> inkwell::values::GlobalValue<'ctx> {
+        let name = format!("{symbol}$caf_done");
+        let llvm_module = self.module.llvm_module();
+        if let Some(existing) = llvm_module.get_global(&name) {
+            return existing;
+        }
+        let i8_type = self.llvm_context().i8_type();
+        let done = llvm_module.add_global(i8_type, None, &name);
+        done.set_linkage(inkwell::module::Linkage::Internal);
+        done.set_initializer(&i8_type.const_zero());
+        done
+    }
+
+    /// Lower the CAF `var` so its value is computed once: the body goes into
+    /// a private `<name>$caf` function, and `public` (what every reference
+    /// calls, in this module or another) returns the cached value after the
+    /// first call. A call that leaves an exception pending caches nothing, so
+    /// a CAF that throws throws again where it is used next.
+    ///
+    /// Two threads may both compute it, if one is preempted in the middle;
+    /// they store the same value.
+    fn lower_memoized_caf(
+        &mut self,
+        var: &Var,
+        expr: &Expr,
+        public: FunctionValue<'ctx>,
+    ) -> CodegenResult<()> {
+        let symbol = self.mangle_name(var.name.as_str());
+        let body_fn = self
+            .module
+            .add_function(&format!("{symbol}$caf"), public.get_type());
+        body_fn.set_linkage(inkwell::module::Linkage::Internal);
+        self.caf_public.insert(var.id, public);
+        self.functions.insert(var.id, body_fn);
+        let lowered = self.lower_function_def(var, expr);
+        self.functions.insert(var.id, public);
+        lowered?;
+
+        let ret_ty = public
+            .get_type()
+            .get_return_type()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void".to_string()))?;
+        let i8_type = self.llvm_context().i8_type();
+        let llvm_module = self.module.llvm_module();
+        let cache = llvm_module.add_global(ret_ty, None, &format!("{symbol}$caf_value"));
+        cache.set_linkage(inkwell::module::Linkage::Internal);
+        cache.set_initializer(&ret_ty.const_zero());
+        let done = self.caf_done_global(&symbol);
+        let pending_fn = match self.module.get_function("bhc_exception_is_pending") {
+            Some(f) => f,
+            None => self.module.add_function(
+                "bhc_exception_is_pending",
+                self.type_mapper().i64_type().fn_type(&[], false),
+            ),
+        };
+
+        let ctx = self.llvm_context();
+        let entry = ctx.append_basic_block(public, "entry");
+        let hit = ctx.append_basic_block(public, "caf_hit");
+        let miss = ctx.append_basic_block(public, "caf_miss");
+        let store = ctx.append_basic_block(public, "caf_store");
+        let skip = ctx.append_basic_block(public, "caf_skip");
+        let err = |e: inkwell::builder::BuilderError| {
+            CodegenError::Internal(format!("memoized CAF: {e:?}"))
+        };
+        let builder = self.builder();
+        builder.position_at_end(entry);
+        let flag = builder
+            .build_load(i8_type, done.as_pointer_value(), "caf_done")
+            .map_err(err)?
+            .into_int_value();
+        let is_done = builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                flag,
+                i8_type.const_zero(),
+                "is_done",
+            )
+            .map_err(err)?;
+        builder
+            .build_conditional_branch(is_done, hit, miss)
+            .map_err(err)?;
+
+        builder.position_at_end(hit);
+        let cached = builder
+            .build_load(ret_ty, cache.as_pointer_value(), "caf_cached")
+            .map_err(err)?;
+        builder.build_return(Some(&cached)).map_err(err)?;
+
+        builder.position_at_end(miss);
+        let env = public
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: no env".to_string()))?;
+        let value = builder
+            .build_call(body_fn, &[env.into()], "caf_value")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void body".to_string()))?;
+        let pending = builder
+            .build_call(pending_fn, &[], "caf_exn")
+            .map_err(err)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("memoized CAF: void probe".to_string()))?
+            .into_int_value();
+        let threw = builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                pending,
+                self.type_mapper().i64_type().const_zero(),
+                "caf_threw",
+            )
+            .map_err(err)?;
+        builder
+            .build_conditional_branch(threw, skip, store)
+            .map_err(err)?;
+
+        builder.position_at_end(store);
+        builder
+            .build_store(cache.as_pointer_value(), value)
+            .map_err(err)?;
+        builder
+            .build_store(done.as_pointer_value(), i8_type.const_int(1, false))
+            .map_err(err)?;
+        builder.build_return(Some(&value)).map_err(err)?;
+
+        builder.position_at_end(skip);
+        builder.build_return(Some(&value)).map_err(err)?;
         Ok(())
     }
 
@@ -51878,6 +53920,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a Core expression to LLVM IR.
     fn lower_expr(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = self.lower_expr_unadapted(expr)?;
+        // A function argument of a builtin that applies it to a fixed number
+        // of arguments at once: make it a closure of that arity.
+        if !self.expected_fn_arity.is_empty() {
+            let key = expr as *const Expr as usize;
+            if let (Some(&arity), Some(BasicValueEnum::PointerValue(function))) =
+                (self.expected_fn_arity.get(&key), result)
+            {
+                return Ok(Some(self.closure_of_arity(function, arity)?.into()));
+            }
+        }
+        Ok(result)
+    }
+
+    /// [`Self::lower_expr`] without the arity adaptation.
+    fn lower_expr_unadapted(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         match expr {
             Expr::Lit(lit, ty, _span) => self.lower_literal(lit, ty).map(Some),
 
@@ -51932,16 +53990,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // `block` — the eager call chain never terminates.
                         // Wrap the CAF fn as a lazy thunk instead; the apply
                         // path and bhc_force evaluate it on first USE.
-                        if self.recursive_caf_ids.contains(&var.id) {
-                            let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                        //
+                        // Only inside a recursive CAF, where the eager call
+                        // could recurse: from anywhere else (`main = print
+                        // (take 3 ones)` for `ones = 1 : ones`) the call ends,
+                        // and its caller wants the value, not a thunk that a
+                        // list builtin would read as a cons cell.
+                        //
+                        // Inside a thunk, once a memoized CAF is computed, it
+                        // is called: `tail fibs` in the lazy tail of `fibs = 0
+                        // : 1 : zipWith (+) fibs (tail fibs)` runs once `fibs`
+                        // is built, and `tail` reads the cons it returns. A
+                        // thunk forced while the CAF is still being built (a
+                        // parser knot) gets a thunk, as before.
+                        if self.recursive_caf_ids.contains(&var.id)
+                            && self
+                                .current_top_fn
+                                .is_some_and(|f| self.recursive_caf_ids.contains(&f))
+                        {
+                            let target = self.caf_public.get(&var.id).copied().unwrap_or(*fn_val);
+                            if self.lazy_depth > 0 && self.memo_caf_ids.contains(&var.id) {
+                                let symbol = self.mangle_name(var.name.as_str());
+                                let done = self.caf_done_global(&symbol);
+                                return self.lower_caf_ref_if_done(target, done).map(Some);
+                            }
+                            let fn_ptr = target.as_global_value().as_pointer_value();
                             let thunk_ptr = self.alloc_thunk(fn_ptr, &[])?;
                             return Ok(Some(thunk_ptr.into()));
                         }
-                        // CAF - call the function with null env to get its value
+                        // CAF - call the function with null env to get its value.
+                        // Inside its own body, the public, memoizing function:
+                        // the private body would build another copy of the
+                        // value (`nats` read from its own lazy tail).
+                        let target = self.caf_public.get(&var.id).copied().unwrap_or(*fn_val);
                         let null_env = self.type_mapper().ptr_type().const_null();
                         let call_result = self
                             .builder()
-                            .build_call(*fn_val, &[null_env.into()], "caf_result")
+                            .build_call(target, &[null_env.into()], "caf_result")
                             .map_err(|e| {
                                 CodegenError::Internal(format!("failed to call CAF: {:?}", e))
                             })?;
@@ -52035,6 +54120,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         self.lower_builtin(name, &[])
                     } else if let Some(lam) = Self::typed_show_lambda(name, var)
                         .or_else(|| Self::typed_arith_lambda(name, var))
+                        .or_else(|| Self::typed_conversion_lambda(name, var))
+                        .or_else(|| Self::saturating_eta(name, var, arity))
                     {
                         // `map show xs`: a generic wrapper closure has no
                         // argument type and showed every element as an Int.
@@ -52433,7 +54520,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Lower the inner expression (this produces the actual computation)
-        let mut result = self.lower_expr(inner)?;
+        self.lazy_depth += 1;
+        let lowered = self.lower_expr(inner);
+        self.lazy_depth -= 1;
+        let mut result = lowered?;
         // A heap result may itself be a thunk (a lazily passed argument the
         // callee returned as is); evaluate through it when asked to.
         if force_result {
@@ -52643,7 +54733,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// or `Float` (`foldr (+) 0 xs`): a generic wrapper closure has no operand
     /// types and did machine-int arithmetic on bignums and doubles.
     fn typed_arith_lambda(name: &str, var: &Var) -> Option<Expr> {
-        if !matches!(name, "+" | "-" | "*") {
+        if !matches!(name, "+" | "-" | "*" | "/") {
             return None;
         }
         let Ty::Fun(a, _) = &var.ty else {
@@ -52655,11 +54745,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$arith_x"),
             id: VarId::new(usize::MAX - 35),
             ty: elem.clone(),
+            checked_ty: Ty::Error,
         };
         let y = Var {
             name: Symbol::intern("$arith_y"),
             id: VarId::new(usize::MAX - 36),
             ty: elem,
+            checked_ty: Ty::Error,
         };
         let body = Expr::App(
             Box::new(Expr::App(
@@ -52700,12 +54792,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern(op),
             id: VarId::new(usize::MAX - 37),
             ty: Ty::fun(elem.clone(), Ty::fun(elem.clone(), elem.clone())),
+            checked_ty: Ty::Error,
         };
         let lam = Self::typed_arith_lambda(op, &op_var)?;
         let foldl = Var {
             name: Symbol::intern("foldl"),
             id: VarId::new(usize::MAX - 38),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let call = Expr::App(
             Box::new(Expr::App(
@@ -52721,6 +54815,95 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             span,
         );
         Some(call)
+    }
+
+    /// A numeric conversion passed as a value (`map fromIntegral xs`),
+    /// eta-expanded with its resolved argument type so the saturated path
+    /// converts. The generic wrapper closure has no types and returned its
+    /// argument unchanged, so an `Int` was read back as a `Double`'s bits.
+    fn typed_conversion_lambda(name: &str, var: &Var) -> Option<Expr> {
+        if !matches!(name, "fromIntegral" | "fromInteger" | "toInteger") {
+            return None;
+        }
+        let Ty::Fun(arg_ty, result_ty) = &var.ty else {
+            return None;
+        };
+        if !matches!(arg_ty.as_ref(), Ty::Con(_)) || !matches!(result_ty.as_ref(), Ty::Con(_)) {
+            return None;
+        }
+        let span = bhc_span::Span::default();
+        let x = Var {
+            name: Symbol::intern("$conv_arg"),
+            id: VarId::new(usize::MAX - 39),
+            ty: arg_ty.as_ref().clone(),
+            checked_ty: Ty::Error,
+        };
+        let body = Expr::App(
+            Box::new(Expr::Var(var.clone(), span)),
+            Box::new(Expr::Var(x.clone(), span)),
+            span,
+        );
+        Some(Expr::Lam(x, Box::new(body), span))
+    }
+
+    /// `\\x.. -> f x..` for a builtin that is only lowered from a saturated
+    /// call: the numeric functions below have no generic wrapper (which
+    /// would see untyped values anyway), so as a value (`map sinh xs`,
+    /// `zipWith (**) xs ys`, `map floor xs :: [Integer]`) they aborted as
+    /// stubs or answered a raw machine word.
+    fn saturating_eta(name: &str, var: &Var, arity: u32) -> Option<Expr> {
+        let applies = matches!(
+            name,
+            "sinh"
+                | "cosh"
+                | "tanh"
+                | "asinh"
+                | "acosh"
+                | "atanh"
+                | "**"
+                | "^^"
+                | "logBase"
+                | "isNaN"
+                | "isInfinite"
+                | "realToFrac"
+        ) || (matches!(name, "floor" | "ceiling" | "round" | "truncate")
+            && matches!(var.ty, Ty::Fun(..)));
+        if !applies {
+            return None;
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(usize::MAX - 4_000_000);
+        let span = bhc_span::Span::default();
+        let mut param_ty = Some(&var.ty);
+        let params: Vec<Var> = (0..arity)
+            .map(|_| {
+                let ty = match param_ty {
+                    Some(Ty::Fun(a, r)) => {
+                        param_ty = Some(r.as_ref());
+                        a.as_ref().clone()
+                    }
+                    _ => {
+                        param_ty = None;
+                        Ty::Error
+                    }
+                };
+                Var {
+                    name: Symbol::intern("$sat_arg"),
+                    id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
+                    ty,
+                    checked_ty: Ty::Error,
+                }
+            })
+            .collect();
+        let call = params.iter().fold(Expr::Var(var.clone(), span), |f, p| {
+            Expr::App(Box::new(f), Box::new(Expr::Var(p.clone(), span)), span)
+        });
+        Some(
+            params
+                .into_iter()
+                .rev()
+                .fold(call, |body, p| Expr::Lam(p, Box::new(body), span)),
+        )
     }
 
     fn typed_show_lambda(name: &str, var: &Var) -> Option<Expr> {
@@ -52739,6 +54922,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$show_arg"),
             id: VarId::new(usize::MAX - 30),
             ty: arg_ty.as_ref().clone(),
+            checked_ty: Ty::Error,
         };
         let body = Expr::App(
             Box::new(Expr::Var(var.clone(), span)),
@@ -53005,6 +55189,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "even" | "odd" | "negate" | "abs" | "signum" => match &var.ty {
                 Ty::Fun(a, _) if self.is_integer_type(a) => 1,
+                // `map negate xs` over doubles: the wrapper negated the bits
+                // as a machine integer.
+                Ty::Fun(a, _)
+                    if !matches!(var.name.as_str(), "even" | "odd")
+                        && (self.is_double_type(a) || self.is_float_type(a)) =>
+                {
+                    1
+                }
                 _ => return None,
             },
             _ => return None,
@@ -53027,6 +55219,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 name: Symbol::intern("$eta_arg"),
                 id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
                 ty: param_ty,
+                checked_ty: Ty::Error,
             });
             ty = rest;
         }
@@ -53095,7 +55288,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let closure_ty = self.closure_type(n_provided);
             let env_slot = self
                 .builder()
-                .build_struct_gep(closure_ty, closure_param, 2, "env_slot")
+                .build_struct_gep(closure_ty, closure_param, 3, "env_slot")
                 .map_err(|e| CodegenError::Internal(format!("partial env slot: {:?}", e)))?;
 
             let mut all_args: Vec<BasicValueEnum<'ctx>> = Vec::new();
@@ -53216,6 +55409,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("$builtin_arg"),
                     id,
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 bhc_span::Span::default(),
             ));
@@ -56935,11 +59129,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    // ========================================================================
+    // The value representation boundary (#94)
+    // ========================================================================
+    //
+    // A value in a lifted position is one machine word, typed `ptr` in LLVM.
+    // Today that word is either a heap pointer or a scalar's own bits: an
+    // `Int` or `Char` is the integer, a `Double` its 64 bits. Nothing in the
+    // word says which, and that is what #94 changes.
+    //
+    // Every conversion between a scalar and such a word goes through the
+    // functions in this section, and each says which of three things it is:
+    //
+    // * `word_from_scalar`: a scalar becomes a value word (boxing);
+    // * `scalar_from_word`: a value word is read as a scalar (unboxing);
+    // * `word_bits`: the word is inspected to find out HOW it is represented
+    //   (an immediate tag, or a pointer to an object).
+    //
+    // `inttoptr` and `ptrtoint` appear nowhere else in this file (a test
+    // holds that), so the representation can be changed here.
+
+    /// A scalar as a value word. Today: the scalar's own bits.
+    fn word_from_scalar(
+        &self,
+        scalar: IntValue<'ctx>,
+        label: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        self.builder()
+            .build_int_to_ptr(scalar, self.type_mapper().ptr_type(), label)
+            .map_err(|e| CodegenError::Internal(format!("failed to box a scalar: {e:?}")))
+    }
+
+    /// The scalar a value word holds, as an `i64`. Today: the word's bits.
+    fn scalar_from_word(
+        &self,
+        word: PointerValue<'ctx>,
+        label: &str,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        self.scalar_from_word_as(word, self.type_mapper().i64_type(), label)
+    }
+
+    /// [`Self::scalar_from_word`] at another integer width.
+    fn scalar_from_word_as(
+        &self,
+        word: PointerValue<'ctx>,
+        int_ty: inkwell::types::IntType<'ctx>,
+        label: &str,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(word, int_ty, label)
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox a scalar: {e:?}")))
+    }
+
+    /// The raw bits of a value word, to tell how the value is represented
+    /// (a `Bool` arrives as the tag itself or as a pointer to its object).
+    /// These are the call sites that know both representations.
+    fn word_bits(&self, word: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(word, self.type_mapper().i64_type(), label)
+            .map_err(|e| CodegenError::Internal(format!("failed to read a word: {e:?}")))
+    }
+
     /// Convert an integer to a pointer (boxing).
     fn int_to_ptr(&self, int_val: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
-        self.builder()
-            .build_int_to_ptr(int_val, self.type_mapper().ptr_type(), "box_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+        self.word_from_scalar(int_val, "box_int")
     }
 
     /// Convert a float to a pointer (boxing via bit cast).
@@ -56949,16 +59202,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_bit_cast(float_val, self.type_mapper().i64_type(), "float_bits")
             .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
             .into_int_value();
-        self.builder()
-            .build_int_to_ptr(bits, self.type_mapper().ptr_type(), "box_float")
-            .map_err(|e| CodegenError::Internal(format!("failed to box float: {:?}", e)))
+        self.word_from_scalar(bits, "box_float")
     }
 
     /// Convert a pointer to an integer (unbox).
     fn ptr_to_int(&self, ptr: PointerValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
-        self.builder()
-            .build_ptr_to_int(ptr, self.type_mapper().i64_type(), "unbox")
-            .map_err(|e| CodegenError::Internal(format!("failed to unbox: {:?}", e)))
+        self.scalar_from_word(ptr, "unbox")
     }
 
     /// Check if an expression is a saturated primitive operation.
@@ -56984,6 +59233,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if the head is a primitive operation
         if let Expr::Var(var, _) = current {
+            // A definition of the same name shadows the primitive, as it
+            // does a builtin (`is_saturated_builtin`): a module that hides
+            // the Prelude's `==` and defines its own must get its own. It
+            // got the machine-word comparison instead.
+            if self.functions.contains_key(&var.id)
+                || self.external_functions.contains_key(&var.name)
+                || self.env.contains_key(&var.id)
+            {
+                return None;
+            }
             if let Some((op, arity)) = self.primitive_op_info(var.name.as_str()) {
                 args.reverse();
                 if args.len() == arity as usize {
@@ -57141,6 +59400,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || matches!(op_ty, Ty::Fun(a, _) if self.is_text_type(a))
                 {
                     return self.lower_text_comparison(op, args);
+                }
+
+                // A `Map` or `Set` is an RTS object too: equal when they hold
+                // the same entries, not when they are the same object.
+                if matches!(op, PrimOp::Eq | PrimOp::Ne) {
+                    let container_ty = match op_ty {
+                        Ty::Fun(a, _) if Self::container_of_ty(a).is_some() => {
+                            Some(a.as_ref().clone())
+                        }
+                        _ => [args[0].ty(), args[1].ty()]
+                            .into_iter()
+                            .find(|t| Self::container_of_ty(t).is_some()),
+                    };
+                    if let Some(ty) = container_ty {
+                        return self.lower_container_equality(op, args, &ty);
+                    }
                 }
 
                 // Tuples compare component-wise, each component by its type.
@@ -57511,9 +59786,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => Ok(i),
             BasicValueEnum::PointerValue(p) => {
                 // Unbox: pointer stores int value directly using ptr_to_int
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
-                    .map_err(|e| CodegenError::Internal(format!("failed to unbox int: {:?}", e)))
+                self.scalar_from_word(p, "unbox_int")
             }
             other => Err(CodegenError::TypeError(format!(
                 "expected int or boxed int, got {other} (from {})",
@@ -57527,9 +59800,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &self,
         val: inkwell::values::IntValue<'ctx>,
     ) -> CodegenResult<inkwell::values::PointerValue<'ctx>> {
-        self.builder()
-            .build_int_to_ptr(val, self.type_mapper().ptr_type(), "box_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+        self.word_from_scalar(val, "box_int")
     }
 
     /// The head variable name of an application spine, peeling type applications
@@ -57688,6 +59959,128 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "arithmetic operations require matching numeric types".to_string(),
             )),
         }
+    }
+
+    /// Whether a type is a `Map`/`IntMap` (`Some(true)`) or a `Set`/`IntSet`
+    /// (`Some(false)`).
+    fn container_of_ty(ty: &Ty) -> Option<bool> {
+        match ty {
+            Ty::Con(con) => match con.name.as_str().rsplit('.').next().unwrap_or("") {
+                "Map" | "IntMap" => Some(true),
+                "Set" | "IntSet" => Some(false),
+                _ => None,
+            },
+            Ty::App(f, _) => Self::container_of_ty(f),
+            _ => None,
+        }
+    }
+
+    /// `==` or `/=` on two maps or two sets, through the RTS.
+    ///
+    /// They are objects the containers library owns, and `==` fell through
+    /// to the comparison of their addresses: two maps with the same entries
+    /// were unequal unless they were the same map.
+    ///
+    /// A map's values are compared with their type's own equality where
+    /// code generation has one to hand (`String`, a type with a derived
+    /// `Eq`), and as machine words otherwise, which is right for `Int`,
+    /// `Char` and the like but not for every boxed type.
+    fn lower_container_equality(
+        &mut self,
+        op: PrimOp,
+        args: &[&Expr],
+        container_ty: &Ty,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("container equality: {step}: {e:?}"))
+        };
+        let mut operands = Vec::with_capacity(2);
+        for arg in &args[..2] {
+            let value = self.lower_expr(arg)?.ok_or_else(|| {
+                CodegenError::Internal("container equality: no value".to_string())
+            })?;
+            let value = self.value_to_ptr(value)?;
+            operands.push(self.build_force(value.into())?.into_pointer_value());
+        }
+        let is_map = Self::container_of_ty(container_ty) == Some(true);
+        let flag = if is_map {
+            // The value type is the container's last argument.
+            let value_ty = match container_ty {
+                Ty::App(_, value) => Some(value.as_ref().clone()),
+                _ => None,
+            };
+            let value_eq = match value_ty {
+                Some(ty) if self.is_string_type(&ty) => {
+                    let f = match self.module.get_function("bhc_string_eq_closure") {
+                        Some(f) => f,
+                        None => self
+                            .module
+                            .add_function("bhc_string_eq_closure", ptr_type.fn_type(&[], false)),
+                    };
+                    self.builder()
+                        .build_call(f, &[], "string_eq")
+                        .map_err(|e| internal("string eq closure", &e))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::Internal("container equality: void".to_string())
+                        })?
+                        .into_pointer_value()
+                }
+                Some(Ty::Con(con)) => {
+                    let derived = self
+                        .derived_eq_fns
+                        .get(con.name.as_str())
+                        .and_then(|id| self.functions.get(id))
+                        .copied();
+                    match derived {
+                        Some(eq_fn) => self.code_closure(eq_fn)?,
+                        None => ptr_type.const_null(),
+                    }
+                }
+                _ => ptr_type.const_null(),
+            };
+            let eq_fn = match self.module.get_function("bhc_map_eq") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_map_eq",
+                    i64_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            self.builder()
+                .build_call(
+                    eq_fn,
+                    &[operands[0].into(), operands[1].into(), value_eq.into()],
+                    "map_eq",
+                )
+                .map_err(|e| internal("call", &e))?
+        } else {
+            let eq_fn = match self.module.get_function("bhc_set_eq") {
+                Some(f) => f,
+                None => self.module.add_function(
+                    "bhc_set_eq",
+                    i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                ),
+            };
+            self.builder()
+                .build_call(eq_fn, &[operands[0].into(), operands[1].into()], "set_eq")
+                .map_err(|e| internal("call", &e))?
+        };
+        let flag = flag
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("container equality: void".to_string()))?
+            .into_int_value();
+        let result = if matches!(op, PrimOp::Ne) {
+            self.builder()
+                .build_xor(flag, i64_type.const_int(1, false), "container_ne")
+                .map_err(|e| internal("xor", &e))?
+        } else {
+            flag
+        };
+        Ok(Some(result.into()))
     }
 
     /// Lower a list comparison operation (== or /= for lists).
@@ -57933,14 +60326,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
         } else {
             // Compare heads as integers (works for primitive types like Int)
-            let head1_int = self
-                .builder()
-                .build_ptr_to_int(head1, i64_type, "head1_int")
-                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-            let head2_int = self
-                .builder()
-                .build_ptr_to_int(head2, i64_type, "head2_int")
-                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+            let head1_int = self.scalar_from_word(head1, "head1_int")?;
+            let head2_int = self.scalar_from_word(head2, "head2_int")?;
             self.builder()
                 .build_int_compare(inkwell::IntPredicate::EQ, head1_int, head2_int, "heads_eq")
                 .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
@@ -58148,10 +60535,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         ptr: inkwell::values::PointerValue<'ctx>,
     ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
         let tm = self.type_mapper();
-        let bits = self
-            .builder()
-            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-            .map_err(|e| CodegenError::Internal(format!("failed to unbox double: {:?}", e)))?;
+        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
         let double_val = self
             .builder()
             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -58257,12 +60641,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // The pointer might be:
                 // 1. A valid Bool ADT pointer (from constructor allocation)
                 // 2. A small integer (0 or 1) cast to pointer (from primop result)
-                let ptr_as_int = self
-                    .builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_as_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                    })?;
+                let ptr_as_int = self.word_bits(p, "ptr_as_int")?;
 
                 // Check if it's a small integer (0 or 1)
                 let is_raw_bool = self
@@ -58539,11 +60918,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => Ok(i),
             BasicValueEnum::PointerValue(p) => {
                 // Pointer might be a boxed int - convert
-                self.builder()
-                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_to_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                    })
+                self.scalar_from_word(p, "ptr_to_int")
             }
             _ => Err(CodegenError::TypeError(
                 "expected integer value".to_string(),
@@ -58914,7 +61289,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 |this: &Self, idx: usize, name: &str| -> CodegenResult<BasicValueEnum<'ctx>> {
                     let env_slot = this
                         .builder()
-                        .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                        .build_struct_gep(closure_ty, closure_ptr, 3, "env_slot")
                         .map_err(|e| CodegenError::Internal(format!("PAP gep failed: {:?}", e)))?;
                     let elem_ptr = unsafe {
                         this.builder()
@@ -59155,9 +61530,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // be a raw `Int` or `Double` (a fold's accumulator, `foldT f
             // (f x (foldT f z r)) l` at `Int`), and a thunk cannot stand in
             // for one, since nothing at run time tells them apart (#64).
-            // Parser knots have concrete types.
+            // Under the eager IO model, neither may an argument of type `m a`:
+            // at `IO` its value is the action's result, which may be just as
+            // raw (`cnt g (n - 1) >>= k` at `IO Int`, #65). Parser knots have
+            // concrete types.
             let recursive_knot = !Self::is_trivial_expr(arg_expr)
-                && !matches!(arg_expr.ty(), Ty::Var(_))
+                && !Self::knot_type_is_opaque(&Self::call_result_ty(arg_expr))
                 && !self.current_top_is_derived
                 && self
                     .current_top_fn
@@ -59179,17 +61557,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.apply_closure_values(closure_ptr, &arg_vals, tail)
     }
 
-    /// Load a closure's recorded physical arity (offset-1 i64 header word).
+    /// Load a closure's recorded physical arity (offset-2 i64 header word).
     /// A value of 0 means "unknown" (closure built without an arity).
     fn load_closure_arity(
         &self,
         closure_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
-        // Offset 1 is at the same byte regardless of env size.
+        // Offset 2 is at the same byte regardless of env size.
         let closure_ty = self.closure_type(0);
         let arity_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .build_struct_gep(closure_ty, closure_ptr, 2, "arity_slot")
             .map_err(|e| CodegenError::Internal(format!("failed to gep arity: {:?}", e)))?;
         let arity = self
             .builder()
@@ -59262,7 +61640,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // The callee may be a lazy thunk (a recursive-CAF reference — see
         // `recursive_caf_ids`): force it before reading the fn ptr.
         // `bhc_force` is a cheap passthrough for real closures (their first
-        // word is a function ADDRESS, which reads as a non-negative tag).
+        // word is the closure kind, which it returns as it is).
         let closure_ptr = self.build_force(closure_ptr.into())?.into_pointer_value();
 
         let fn_ptr = self.checked_closure_fn_ptr(closure_ptr, "closure call")?;
@@ -59529,8 +61907,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // (`arg_should_thunk`): `fst (2, error "BOOM")` must not run the second
         // component. A field that is later projected and used reaches whatever
         // forces it, and one that would have diverged eagerly was already fatal.
+        //
+        // So is a field of a recursive CAF that uses the CAF's recursive
+        // group: `nats = 0 : map (+ 1) nats` evaluated `map (+ 1) nats` while
+        // building `nats`, and `map` forced `nats` again, without end. Lazy,
+        // the cons exists before anything reads its tail, as in GHC.
+        let in_recursive_caf = self
+            .current_top_fn
+            .is_some_and(|f| self.recursive_caf_ids.contains(&f));
         for (i, arg_expr) in args.iter().enumerate() {
-            if self.arg_should_thunk(arg_expr) {
+            let knot = in_recursive_caf
+                && !Self::is_trivial_expr(arg_expr)
+                && Self::expr_mentions_any(arg_expr, &self.recursive_caf_ids);
+            if knot || self.arg_should_thunk(arg_expr) {
+                self.lazy_force_result = knot;
                 if let Some(thunk) = self.lower_lazy(arg_expr)? {
                     self.store_adt_field(adt_ptr, arity, i as u32, thunk)?;
                     continue;
@@ -60095,6 +62485,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         expr: &Expr,
         integer_param_positions: &[bool],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.emit_preempt_check()?;
         // If the expression is a lambda, bind parameters to function arguments
         // Note: param_idx starts at 1 because index 0 is the env/closure pointer
         let mut current = expr;
@@ -60325,12 +62716,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     //
                     // We need to distinguish these cases. Check if pointer value <= 1,
                     // in which case it's a raw boolean, otherwise load from the ADT.
-                    let ptr_as_int = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "ptr_as_int")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to convert ptr to int: {:?}", e))
-                        })?;
+                    let ptr_as_int = self.word_bits(p, "ptr_as_int")?;
 
                     // Check if it's a small integer (0 or 1)
                     let is_raw_bool = self
@@ -60620,21 +63006,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Check if the alternatives have integer/char literals - if so, unbox the pointer
                 if has_int_lit || has_char_lit {
                     // Pointer contains a boxed integer - unbox it
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_for_case")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox for case: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_for_case")?;
                     self.lower_case_literal_int(int_val, alts)
                 } else if has_float_lit {
                     // Pointer contains a boxed float - unbox it
-                    let bits = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                        })?;
+                    let bits = self.scalar_from_word(p, "unbox_float_bits")?;
                     let float_val = self
                         .builder()
                         .build_bit_cast(bits, self.type_mapper().f64_type(), "to_double")
@@ -60653,12 +63029,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.lower_case_literal_string(p, alts, scrut_is_text)
                 } else {
                     // Default case or only Default alternatives - assume integer
-                    let int_val = self
-                        .builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_for_case")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to unbox for case: {:?}", e))
-                        })?;
+                    let int_val = self.scalar_from_word(p, "unbox_for_case")?;
                     self.lower_case_literal_int(int_val, alts)
                 }
             }
@@ -60802,11 +63173,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             name: Symbol::intern("$integer_scrut"),
             id: VarId::new(NEXT_ID.fetch_sub(1, Ordering::Relaxed)),
             ty: integer.clone(),
+            checked_ty: Ty::Error,
         };
         let eq = Var {
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::fun(integer.clone(), Ty::fun(integer.clone(), bool_ty)),
+            checked_ty: Ty::Error,
         };
         let bool_con = |name: &str, tag: u32| DataCon {
             name: Symbol::intern(name),
@@ -60828,6 +63201,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     name: Symbol::intern("error"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 Expr::App(
                     Box::new(Expr::Var(error_var, span)),
@@ -61357,11 +63731,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             BasicValueEnum::IntValue(i) => {
                 // If it's an int, it might be a boxed value - try to interpret as ptr
-                self.builder()
-                    .build_int_to_ptr(i, self.type_mapper().ptr_type(), "scrut_ptr")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to cast scrutinee: {:?}", e))
-                    })?
+                self.word_from_scalar(i, "scrut_ptr")?
             }
             _ => {
                 return Err(CodegenError::Unsupported(
@@ -62088,21 +64458,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 match name {
                     "Int" | "Int#" | "Int64" => {
                         // Unbox: ptr -> int
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         Ok(int_val.into())
                     }
                     "Int32" => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         let truncated = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "trunc_i32")
@@ -62119,12 +64479,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(ptr.into())
                     }
                     "Char" | "Char#" => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_char")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox char: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_char")?;
                         let char_val = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "to_char")
@@ -62135,36 +64490,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                     "Float" | "Float#" => {
                         // Unbox: ptr -> bits -> float
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_float_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                            })?;
-                        let truncated = self
-                            .builder()
-                            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!(
-                                    "failed to truncate float bits: {:?}",
-                                    e
-                                ))
-                            })?;
-                        let float_val = self
-                            .builder()
-                            .build_bit_cast(truncated, tm.f32_type(), "to_float")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to cast to float: {:?}", e))
-                            })?;
-                        Ok(float_val)
+                        let bits = self.scalar_from_word(ptr, "unbox_float_bits")?;
+                        Ok(self.float_from_word_bits(bits)?.into())
                     }
                     "Double" | "Double#" => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox double: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
                         let double_val = self
                             .builder()
                             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -62183,21 +64513,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 use bhc_types::PrimTy;
                 match prim {
                     PrimTy::I64 | PrimTy::U64 => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_i64")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox i64: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_i64")?;
                         Ok(int_val.into())
                     }
                     PrimTy::I32 | PrimTy::U32 => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_int")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox int: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_int")?;
                         let truncated = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "trunc_i32")
@@ -62207,36 +64527,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(truncated.into())
                     }
                     PrimTy::F32 => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_float_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox float: {:?}", e))
-                            })?;
-                        let truncated = self
-                            .builder()
-                            .build_int_truncate(bits, tm.i32_type(), "float_bits_32")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!(
-                                    "failed to truncate float bits: {:?}",
-                                    e
-                                ))
-                            })?;
-                        let float_val = self
-                            .builder()
-                            .build_bit_cast(truncated, tm.f32_type(), "to_float")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to cast to float: {:?}", e))
-                            })?;
-                        Ok(float_val)
+                        let bits = self.scalar_from_word(ptr, "unbox_float_bits")?;
+                        Ok(self.float_from_word_bits(bits)?.into())
                     }
                     PrimTy::F64 => {
-                        let bits = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox double: {:?}", e))
-                            })?;
+                        let bits = self.scalar_from_word(ptr, "unbox_double_bits")?;
                         let double_val = self
                             .builder()
                             .build_bit_cast(bits, tm.f64_type(), "to_double")
@@ -62246,12 +64541,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         Ok(double_val)
                     }
                     PrimTy::Char => {
-                        let int_val = self
-                            .builder()
-                            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_char")
-                            .map_err(|e| {
-                                CodegenError::Internal(format!("failed to unbox char: {:?}", e))
-                            })?;
+                        let int_val = self.scalar_from_word(ptr, "unbox_char")?;
                         let char_val = self
                             .builder()
                             .build_int_truncate(int_val, tm.i32_type(), "to_char")
@@ -63888,6 +66178,8 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "bracket" => Some(3),
         "bracket_" => Some(3),
         "evaluate" => Some(1),
+        "unsafePerformIO" | "unsafeDupablePerformIO" | "traceIO" => Some(1),
+        "trace" => Some(2),
         "<$" => Some(2),
         "finally" | "onException" => Some(2),
         "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
@@ -63900,6 +66192,14 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "fromException" => Some(1),
         "displayException" => Some(1),
         "userError" => Some(1),
+        "isDoesNotExistError"
+        | "isAlreadyExistsError"
+        | "isPermissionError"
+        | "isUserError"
+        | "isEOFError"
+        | "isFullError"
+        | "isAlreadyInUseError"
+        | "isIllegalOperation" => Some(1),
         "ErrorCall" => Some(1),
         "ioError" => Some(1),
 
@@ -63947,6 +66247,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "acos" => Some(1),
         "atan" => Some(1),
         "atan2" => Some(2),
+        "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => Some(1),
+        "**" | "^^" | "logBase" => Some(2),
+        "isNaN" | "isInfinite" | "realToFrac" => Some(1),
         "ceiling" => Some(1),
         "floor" => Some(1),
         "round" => Some(1),
@@ -63968,21 +66271,12 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "toRational" => Some(1),
         "fromRational" => Some(1),
         "recip" => Some(1),
-        // Concurrency runs under the closure IO model. Under the eager model these
-        // have no arity, so a use compiles to a stub that aborts at run time.
+        // Concurrency (rts/bhc-rts/src/concurrent.rs), under either IO model.
         "forkIO" | "forkOS" | "killThread" | "threadDelay" | "newMVar" | "takeMVar"
-        | "readMVar" | "tryTakeMVar" | "readChan"
-            if crate::io_closure_mode() =>
-        {
-            Some(1)
-        }
-        "myThreadId" | "newEmptyMVar" | "newChan" if crate::io_closure_mode() => Some(0),
+        | "readMVar" | "tryTakeMVar" | "readChan" => Some(1),
+        "myThreadId" | "newEmptyMVar" | "newChan" => Some(0),
         "putMVar" | "tryPutMVar" | "swapMVar" | "modifyMVar_" | "modifyMVar" | "withMVar"
-        | "writeChan" | "throwTo"
-            if crate::io_closure_mode() =>
-        {
-            Some(2)
-        }
+        | "writeChan" | "throwTo" => Some(2),
         "newIORef" => Some(1),
         "readIORef" => Some(1),
         "writeIORef" => Some(2),
@@ -64037,6 +66331,12 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "nub" => Some(1),
         "delete" => Some(2),
         "union" => Some(2),
+        "showFFloat" | "Numeric.showFFloat" => Some(3),
+        "$printf_fixed" => Some(2),
+        "$read_generic" | "$readMaybe_generic" | "$reads_generic" => Some(2),
+        "$printf_pad" => Some(4),
+        "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => Some(2),
+        "\\\\" => Some(2),
         "intersect" => Some(2),
         "sort" => Some(1),
         "sortBy" => Some(2),
@@ -64480,6 +66780,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.ByteString.isSuffixOf" => Some(2),
         "Data.ByteString.readFile" => Some(1),
         "Data.ByteString.writeFile" => Some(2),
+        "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => Some(1),
 
         // Data.Text.Lazy operations
         "Data.Text.Lazy.empty" => Some(0),
@@ -64764,6 +67065,40 @@ pub fn shadows_codegen_builtin(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `inttoptr` and `ptrtoint` are emitted only by the functions of the
+    /// value representation boundary (#94). A new direct use elsewhere is a
+    /// place the representation could not be changed from.
+    #[test]
+    fn scalar_and_pointer_conversions_stay_at_the_boundary() {
+        let source = include_str!("lower.rs");
+        let section_start = source
+            .find("// The value representation boundary (#94)")
+            .expect("the boundary section exists");
+        let section_end = source[section_start..]
+            .find("fn int_to_ptr(")
+            .map(|offset| section_start + offset)
+            .expect("the boundary section ends at int_to_ptr");
+        // Spelled in two parts so this test is not itself a match.
+        let int_to_ptr = concat!(".build_int", "_to_ptr(");
+        let ptr_to_int = concat!(".build_ptr", "_to_int(");
+        for (index, line) in source.lines().enumerate() {
+            if !(line.contains(int_to_ptr) || line.contains(ptr_to_int)) {
+                continue;
+            }
+            let offset = source
+                .lines()
+                .take(index)
+                .map(|l| l.len() + 1)
+                .sum::<usize>();
+            assert!(
+                (section_start..section_end).contains(&offset),
+                "lower.rs:{}: a scalar/pointer conversion outside the value \
+                 representation boundary; use word_from_scalar, scalar_from_word \
+                 or word_bits",
+                index + 1
+            );
+        }
+    }
 
     // Tests would go here
 }

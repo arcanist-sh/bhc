@@ -35,3 +35,4 @@ insta = { workspace = true }
 bhc-lower = { workspace = true }
 bhc-typeck = { workspace = true }
 bhc-hir = { workspace = true }
+bhc-types = { workspace = true }

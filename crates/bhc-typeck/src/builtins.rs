@@ -90,6 +90,9 @@ pub struct Builtins {
     pub int_ty: Ty,
     /// The `Float` type.
     pub float_ty: Ty,
+    /// The `Double` type: what a fractional literal defaults to and what the
+    /// `Floating` builtins (`sqrt`, `pi`, …) are typed at, as in GHC.
+    pub double_ty: Ty,
     /// The `Char` type.
     pub char_ty: Ty,
     /// The `Bool` type.
@@ -205,6 +208,7 @@ impl Builtins {
         // Convenient types
         let int_ty = Ty::Con(int_con.clone());
         let float_ty = Ty::Con(float_con.clone());
+        let double_ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
         let char_ty = Ty::Con(char_con.clone());
         let bool_ty = Ty::Con(bool_con.clone());
         // String is a type alias for [Char] in Haskell
@@ -257,6 +261,7 @@ impl Builtins {
             shape_witness_con,
             int_ty,
             float_ty,
+            double_ty,
             char_ty,
             bool_ty,
             string_ty,
@@ -1080,14 +1085,19 @@ impl Builtins {
                 )
             }),
             ("foldM", {
-                // foldM :: (b -> a -> IO b) -> b -> [a] -> IO b
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                // foldM :: (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m b
+                // In any monad, not only IO: at `Maybe` or `Either` it stops
+                // at the first `Nothing`/`Left`. Typed at IO alone, a use at
+                // another monad left the result type unresolved. And over
+                // any container, not only a list: pandoc's Markdown writer
+                // folds a `Doc Text`.
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, star_to_star.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
+                let io_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
+                let list_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![t, m, a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(b.clone()),
@@ -1114,16 +1124,19 @@ impl Builtins {
                 )
             }),
             ("replicateM", {
-                // replicateM :: Int -> IO a -> IO [a]
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
+                // replicateM :: Monad m => Int -> m a -> m [a]
+                // In any monad, not only IO: at a list it is every
+                // combination (`replicateM 2 "ab"`).
+                let m = TyVar::new(
+                    BUILTIN_TYVAR_M,
+                    Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                 );
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let io_list_a = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(list_a));
+                let m_list_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_a));
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.int_ty.clone(), Ty::fun(io_a, io_list_a)),
+                    vec![m, a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(m_a, m_list_a)),
                 )
             }),
             ("replicateM_", {
@@ -2473,14 +2486,13 @@ impl Builtins {
             }),
             ("sortBy", {
                 // sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-                // Using Int as stand-in for Ordering (LT=-1, EQ=0, GT=1)
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()),
+                            Ty::fun(Ty::Var(a.clone()), self.ordering_ty.clone()),
                         ),
                         Ty::fun(list_a.clone(), list_a),
                     ),
@@ -2645,27 +2657,27 @@ impl Builtins {
             ),
             (
                 "sqrt",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "exp",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "log",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "sin",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "cos",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             (
                 "tan",
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone())),
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
             ),
             // Comparison
             ("compare", {
@@ -2970,8 +2982,8 @@ impl Builtins {
                 )
             }),
             ("realToFrac", {
-                // realToFrac :: Float -> Float (simplified, could be polymorphic)
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))
+                // realToFrac :: Double -> Double (simplified, could be polymorphic)
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone()))
             }),
             ("truncate", {
                 // truncate :: (RealFrac a, Integral b) => a -> b
@@ -3031,8 +3043,8 @@ impl Builtins {
             }),
             ("recip", {
                 // recip :: Fractional a => a -> a
-                // Using Float for now (no type class constraints)
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))
+                // Using Double for now (no type class constraints)
+                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone()))
             }),
             // Data.Function
             ("on", {
@@ -6065,7 +6077,7 @@ impl Builtins {
         env.register_value(
             DefId::new(10101),
             Symbol::intern("showDouble"),
-            Scheme::mono(Ty::fun(self.float_ty.clone(), self.string_ty.clone())),
+            Scheme::mono(Ty::fun(self.double_ty.clone(), self.string_ty.clone())),
         );
         env.register_value(
             DefId::new(10102),
@@ -6410,7 +6422,7 @@ impl Builtins {
         env.register_value(
             DefId::new(10351),
             Symbol::intern("pi"),
-            Scheme::mono(self.float_ty.clone()),
+            Scheme::mono(self.double_ty.clone()),
         );
 
         // IORef operations at fixed DefIds 10400-10404
@@ -7010,7 +7022,23 @@ impl Builtins {
                 ),
             );
 
-            // foldM :: (b -> a -> IO b) -> b -> [a] -> IO b
+            // foldM :: (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m b
+            let fold_m = TyVar::new(
+                BUILTIN_TYVAR_M,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let fold_t = TyVar::new(
+                BUILTIN_TYVAR_TRAV,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let fold_t_a = Ty::App(
+                Box::new(Ty::Var(fold_t.clone())),
+                Box::new(Ty::Var(a.clone())),
+            );
+            let fold_m_b = Ty::App(
+                Box::new(Ty::Var(fold_m.clone())),
+                Box::new(Ty::Var(b.clone())),
+            );
             let io_b = Ty::App(
                 Box::new(Ty::Con(self.io_con.clone())),
                 Box::new(Ty::Var(b.clone())),
@@ -7020,13 +7048,13 @@ impl Builtins {
                 DefId::new(11001),
                 Symbol::intern("foldM"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![fold_t, fold_m, a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(b.clone()),
-                            Ty::fun(Ty::Var(a.clone()), io_b.clone()),
+                            Ty::fun(Ty::Var(a.clone()), fold_m_b.clone()),
                         ),
-                        Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a2.clone(), io_b.clone())),
+                        Ty::fun(Ty::Var(b.clone()), Ty::fun(fold_t_a, fold_m_b)),
                     ),
                 ),
             );
@@ -7060,12 +7088,19 @@ impl Builtins {
                 Box::new(Ty::Con(self.io_con.clone())),
                 Box::new(list_a.clone()),
             );
+            let m = TyVar::new(
+                BUILTIN_TYVAR_M,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            );
+            let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+            let m_list_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_a.clone()));
+            let _ = io_list_a2;
             env.register_value(
                 DefId::new(11003),
                 Symbol::intern("replicateM"),
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.int_ty.clone(), Ty::fun(io_a.clone(), io_list_a2)),
+                    vec![m, a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(m_a, m_list_a)),
                 ),
             );
 
@@ -7646,8 +7681,23 @@ impl Builtins {
             env.register_value(
                 DefId::new(11273),
                 Symbol::intern("Data.ByteString.writeFile"),
-                Scheme::mono(Ty::fun(string_ty.clone(), Ty::fun(bs_ty.clone(), io_unit))),
+                Scheme::mono(Ty::fun(
+                    string_ty.clone(),
+                    Ty::fun(bs_ty.clone(), io_unit.clone()),
+                )),
             );
+
+            // ByteString -> IO () (putStr, putStrLn)
+            for (id, name) in [
+                (11274, "Data.ByteString.putStr"),
+                (11275, "Data.ByteString.putStrLn"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(bs_ty.clone(), io_unit.clone())),
+                );
+            }
         }
 
         // E.25: String type class methods at fixed DefIds 11300-11302

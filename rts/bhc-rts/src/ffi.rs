@@ -10,15 +10,16 @@
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::{global, init_default, Profile, RuntimeConfig};
+use bhc_rts_alloc::object;
 
 /// Abort the process with an RTS error message.
 ///
 /// Used at FFI boundaries where unwinding into C is not an option and
 /// continuing with corrupted state would be undefined behavior.
-fn rts_abort(msg: &str) -> ! {
+pub(crate) fn rts_abort(msg: &str) -> ! {
     eprintln!("BHC Runtime Error: {msg}");
     // A fatal runtime error names a symptom; the caller chain is what names
     // the cause. `capture()` honours RUST_BACKTRACE, so this costs nothing
@@ -102,6 +103,9 @@ pub unsafe extern "C" fn bhc_rts_init(argc: c_int, argv: *const *const c_char) {
 pub extern "C" fn bhc_shutdown() {
     // The global runtime will be shutdown on process exit
     // For explicit shutdown, we could clear the global mutex
+    if validate_objects() {
+        report_validation();
+    }
 }
 
 /// Exit the program with the given status code.
@@ -142,15 +146,16 @@ pub extern "C" fn bhc_gc() {
 /// The returned pointer must be freed using `bhc_free` or by GC.
 #[no_mangle]
 pub extern "C" fn bhc_alloc(size: usize) -> *mut u8 {
+    // Pure code reaches no IO step, but it allocates: preempt it here.
+    if crate::concurrent::bhc_preempt_requested.load(Ordering::Relaxed) != 0 {
+        crate::concurrent::bhc_preempt();
+    }
     // The global allocator must not be called with a zero-size layout
     if size == 0 {
         return 8 as *mut u8; // aligned dangling pointer; bhc_free ignores size 0
     }
-    let layout = std::alloc::Layout::from_size_align(size, 8).ok();
-    match layout {
-        Some(layout) => unsafe { std::alloc::alloc(layout) },
-        None => ptr::null_mut(),
-    }
+    // A pointer increment in the thread's chunk, not a `malloc` per object.
+    crate::bump::allocate(size)
 }
 
 /// Allocate zeroed memory from the RTS heap.
@@ -194,7 +199,9 @@ pub extern "C" fn bhc_alloc_zeroed(size: usize) -> *mut u8 {
 pub unsafe extern "C" fn bhc_free(ptr: *mut u8, size: usize) {
     // Size-0 "allocations" are dangling sentinels from bhc_alloc; there is
     // nothing to deallocate (and dealloc with a zero-size layout is UB)
-    if !ptr.is_null() && size > 0 {
+    // An object in a bump chunk is not the system allocator's to free; it
+    // stays until there is a collector.
+    if !ptr.is_null() && size > 0 && !crate::bump::owns(ptr) {
         if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
             unsafe { std::alloc::dealloc(ptr, layout) };
         }
@@ -299,9 +306,20 @@ pub extern "C" fn bhc_print_double(d: f64) {
 /// Format an `f32` like Haskell's `show` for a `Float`: the shortest digits
 /// that read back as the same `f32`, with `format_double`'s layout rules.
 fn format_float(n: f32) -> String {
-    let as_double = format_double(f64::from(n));
-    if !n.is_finite() || n == 0.0 || !(n.abs() >= 0.1 && n.abs() < 1e7) {
-        return as_double;
+    if !n.is_finite() || n == 0.0 {
+        return format_double(f64::from(n));
+    }
+    if !(n.abs() >= 0.1 && n.abs() < 1e7) {
+        // Scientific notation, from the f32's own shortest digits. Through
+        // `format_double` the widened value showed its binary expansion:
+        // `1.0e-3 :: Float` was `1.0000000474974513e-3`.
+        let s = format!("{n:e}");
+        let (mantissa, exponent) = s.split_once('e').unwrap_or((&s, "0"));
+        return if mantissa.contains('.') {
+            format!("{mantissa}e{exponent}")
+        } else {
+            format!("{mantissa}.0e{exponent}")
+        };
     }
     // Widening to f64 would print the f32's exact binary value
     // (`1.100000023841858`); the f32's own shortest form is what GHC shows.
@@ -311,6 +329,268 @@ fn format_float(n: f32) -> String {
     } else {
         s + ".0"
     }
+}
+
+/// The shortest decimal digits of a positive finite `x` and its exponent
+/// `e`, with `x = 0.d1 d2 … × 10^e` (Haskell's `floatToDigits 10`).
+fn float_to_digits(x: f64) -> (Vec<u8>, i32) {
+    if x == 0.0 {
+        return (vec![0], 0);
+    }
+    let s = format!("{x:e}");
+    let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let mut digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+    (digits, exp + 1)
+}
+
+/// Haskell's `roundTo 10 d is` (GHC.Float): `is` rounded to `d` digits, half
+/// to even when the dropped digits are exactly half, with the carry out of
+/// the top digit.
+fn round_to(d: usize, is: &[u8]) -> (u8, Vec<u8>) {
+    fn go(n: usize, even: bool, xs: &[u8]) -> (u8, Vec<u8>) {
+        match xs.split_first() {
+            None => (0, vec![0; n]),
+            Some((&x, rest)) if n == 0 => {
+                let exactly_half = x == 5 && even && rest.iter().all(|&r| r == 0);
+                (u8::from(x >= 5 && !exactly_half), Vec::new())
+            }
+            Some((&x, rest)) => {
+                let (c, mut ds) = go(n - 1, x % 2 == 0, rest);
+                let i = c + x;
+                if i == 10 {
+                    ds.insert(0, 0);
+                    (1, ds)
+                } else {
+                    ds.insert(0, i);
+                    (0, ds)
+                }
+            }
+        }
+    }
+    let (c, mut ds) = go(d, true, is);
+    if c == 1 {
+        ds.insert(0, 1);
+    }
+    (c, ds)
+}
+
+/// `Numeric.showFFloat`: fixed-point, never scientific, `decimals` digits
+/// after the point (all of the shortest representation when `None`), with
+/// GHC's half-up rounding of the decimal digits (`showFFloat (Just 2) 2.675`
+/// is `2.68`, where rounding the binary value gives `2.67`).
+fn format_ffloat(x: f64, decimals: Option<usize>) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if x < 0.0 || (x == 0.0 && x.is_sign_negative()) {
+        return format!("-{}", format_ffloat(-x, decimals));
+    }
+    let digit = |d: &u8| char::from(b'0' + d);
+    let (is, e) = float_to_digits(x);
+    match decimals {
+        None => {
+            if e <= 0 {
+                let zeros = "0".repeat((-e) as usize);
+                format!("0.{zeros}{}", is.iter().map(digit).collect::<String>())
+            } else {
+                let e = e as usize;
+                let mut int: String = is.iter().take(e).map(digit).collect();
+                while int.len() < e {
+                    int.push('0');
+                }
+                let frac: String = is.iter().skip(e).map(digit).collect();
+                let frac = if frac.is_empty() {
+                    "0".to_string()
+                } else {
+                    frac
+                };
+                format!("{int}.{frac}")
+            }
+        }
+        Some(dec) => {
+            if e >= 0 {
+                let e = e as usize;
+                let (ei, rounded) = round_to(dec + e, &is);
+                let split = e + ei as usize;
+                let text: String = rounded.iter().map(digit).collect();
+                let (ls, rs) = text.split_at(split.min(text.len()));
+                let ls = if ls.is_empty() { "0" } else { ls };
+                if rs.is_empty() {
+                    ls.to_string()
+                } else {
+                    format!("{ls}.{rs}")
+                }
+            } else {
+                let mut padded = vec![0; (-e) as usize];
+                padded.extend_from_slice(&is);
+                let (ei, rounded) = round_to(dec, &padded);
+                let ds: Vec<u8> = if ei > 0 {
+                    rounded
+                } else {
+                    let mut v = vec![0];
+                    v.extend(rounded);
+                    v
+                };
+                let text: String = ds.iter().map(digit).collect();
+                let (d, rest) = text.split_at(1);
+                if rest.is_empty() {
+                    d.to_string()
+                } else {
+                    format!("{d}.{rest}")
+                }
+            }
+        }
+    }
+}
+
+/// Prepend `s`'s characters to the BHC list `tail`.
+///
+/// # Safety
+///
+/// `tail` must be a BHC list (or a thunk evaluating to one).
+unsafe fn chars_onto(s: &str, tail: *mut u8) -> *mut u8 {
+    let mut list = tail;
+    for c in s.chars().rev() {
+        list = unsafe { alloc_cons(c as u32 as usize as *mut u8, list) };
+    }
+    list
+}
+
+/// `Numeric.showFFloat digits x suffix`: `digits` is a `Maybe Int`.
+///
+/// # Safety
+///
+/// `digits` must be a BHC `Maybe Int` (or a thunk evaluating to one) and
+/// `suffix` a BHC character list.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_show_ffloat(digits: *mut u8, x: f64, suffix: *mut u8) -> *mut u8 {
+    unsafe {
+        let m = bhc_force(digits);
+        let decimals = if m.is_null() || object::tag(m) == 0 {
+            None
+        } else {
+            let field = object::field(m, 0) as i64;
+            Some(field.max(0) as usize)
+        };
+        chars_onto(&format_ffloat(x, decimals), suffix)
+    }
+}
+
+/// `printf`'s `%.Nf`: `x` fixed-point with `digits` decimals (GHC's
+/// rounding, as `showFFloat`).
+///
+/// # Safety
+///
+/// Always safe; `unsafe` only for the list allocation.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_printf_fixed(digits: i64, x: f64) -> *mut u8 {
+    unsafe { chars_onto(&format_ffloat(x, Some(digits.max(0) as usize)), alloc_nil()) }
+}
+
+/// `printf`'s field width: `text` padded to `width` characters, on the
+/// right when `left` is set, else on the left with spaces or (`zero`, for a
+/// number) zeros after any sign.
+///
+/// # Safety
+///
+/// `text` must be a BHC character list (or a thunk evaluating to one).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_printf_pad(
+    width: i64,
+    left: i64,
+    zero: i64,
+    text: *mut u8,
+) -> *mut u8 {
+    unsafe {
+        let mut chars: Vec<char> = Vec::new();
+        let mut list = bhc_force(text);
+        while object::tag(list) != 0 {
+            let c = object::field(list, 0) as usize as u32;
+            chars.push(char::from_u32(c).unwrap_or('?'));
+            list = bhc_force(object::field(list, 1));
+        }
+        let s: String = chars.into_iter().collect();
+        let len = s.chars().count();
+        let width = width.max(0) as usize;
+        let padded = if len >= width {
+            s
+        } else if left != 0 {
+            format!("{s}{}", " ".repeat(width - len))
+        } else if zero != 0 {
+            let (sign, digits) = match s.strip_prefix('-') {
+                Some(rest) => ("-", rest.to_string()),
+                None => ("", s.clone()),
+            };
+            format!("{sign}{}{digits}", "0".repeat(width - len))
+        } else {
+            format!("{}{s}", " ".repeat(width - len))
+        };
+        chars_onto(&padded, alloc_nil())
+    }
+}
+
+/// A range of an enumeration's nullary constructors (each a tag box) for
+/// `[x ..]`, `[x, y ..]` and `[x, y .. z]`: tags from `from`, stepping by
+/// `then - from` (1 without `then`), while they stay within `to`.
+///
+/// # Safety
+///
+/// Always safe; `unsafe` only for the list allocation.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_enum_ctor_range(
+    from: i64,
+    then: i64,
+    has_then: i64,
+    to: i64,
+) -> *mut u8 {
+    let step = if has_then != 0 { then - from } else { 1 };
+    let mut tags = Vec::new();
+    let mut t = from;
+    if step == 0 {
+        // `[x, x ..]` repeats `x` forever; give the one element rather than
+        // hang building an infinite list eagerly.
+        tags.push(t);
+    } else {
+        while (step > 0 && t <= to) || (step < 0 && t >= to) {
+            tags.push(t);
+            t += step;
+        }
+    }
+    unsafe {
+        let mut list = alloc_nil();
+        for &tag in tags.iter().rev() {
+            // A nullary constructor is its tag alone.
+            let con = object::alloc_con(tag, &[]);
+            list = alloc_cons(con, list);
+        }
+        list
+    }
+}
+
+/// `Numeric.showHex n suffix` / `showOct`: `radix` is 16 or 8.
+///
+/// # Safety
+///
+/// `suffix` must be a BHC character list.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_show_radix(n: i64, radix: i64, suffix: *mut u8) -> *mut u8 {
+    let s = if radix == 8 {
+        format!("{n:o}")
+    } else {
+        format!("{n:x}")
+    };
+    unsafe { chars_onto(&s, suffix) }
 }
 
 /// Format an `f64` the way Haskell's `show` does: whole numbers keep a trailing
@@ -520,34 +800,40 @@ pub extern "C" fn bhc_get_profile() -> c_int {
 // Thunk Support
 // ============================================================================
 //
-// Thunks are heap objects representing suspended computations.
-//
-// Memory Layout:
-//   struct Thunk {
-//       i64   tag;       // -1 = thunk (unevaluated)
-//                        // -2 = blackhole (being evaluated)
-//                        // >= 0 = evaluated (value's ADT tag)
-//       ptr   payload;   // Unevaluated: pointer to eval function
-//                        // Evaluated: the actual value
-//       i64   env_size;  // Number of captured variables
-//       ptr[] env;       // Captured environment
-//   }
+// Thunks are heap objects representing suspended computations. Their
+// layout is in `bhc_rts_alloc::object`.
 //
 // Thunk evaluation:
-//   1. Check tag
-//   2. If tag == -1 (thunk): set tag to -2 (blackhole), call eval_fn(env)
-//   3. If tag == -2 (blackhole): error (circular reference)
-//   4. If tag >= 0: return payload (already evaluated)
+//   1. Check the state word
+//   2. THUNK: set it to BLACKHOLE, call the code on the captured values,
+//      store the value, set it to INDIRECTION
+//   3. BLACKHOLE: wait if another thread owns it, else `<<loop>>`
+//   4. INDIRECTION: return the stored value
+//   5. Anything else is a constructor tag: the object is already a value
 // ============================================================================
 
 /// Thunk tag constant: unevaluated thunk
-pub const BHC_TAG_THUNK: i64 = -1;
+pub const BHC_TAG_THUNK: i64 = object::THUNK;
+
+/// `obj` is a blackhole. Return once it is evaluated if another thread owns
+/// it; abort with `<<loop>>` if this thread does, or if it can never finish.
+fn wait_for_other_owner(obj: *mut u8, tag: &AtomicI64) {
+    let owner = unsafe { object::thunk_owner(obj) };
+    let others_evaluate_it = crate::concurrent::forked()
+        && owner != crate::concurrent::current_thread()
+        && crate::concurrent::wait_for_blackhole(|| {
+            tag.load(Ordering::Acquire) == BHC_TAG_BLACKHOLE
+        });
+    if !others_evaluate_it {
+        rts_abort("<<loop>> - circular reference in thunk evaluation");
+    }
+}
 
 /// Thunk tag constant: blackhole (being evaluated, used to detect cycles)
-pub const BHC_TAG_BLACKHOLE: i64 = -2;
+pub const BHC_TAG_BLACKHOLE: i64 = object::BLACKHOLE;
 
 /// Thunk tag constant: indirection (evaluated thunk, result cached at offset 8)
-pub const BHC_TAG_INDIRECTION: i64 = -3;
+pub const BHC_TAG_INDIRECTION: i64 = object::INDIRECTION;
 
 /// Force evaluation of a thunk to Weak Head Normal Form (WHNF).
 ///
@@ -567,6 +853,9 @@ pub const BHC_TAG_INDIRECTION: i64 = -3;
 pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return obj;
+    }
+    if validate_objects() {
+        validate_forced(obj);
     }
 
     // Debug aid (BHC_TRAP_CODE_OBJ): deliberately SIGSEGV — while the
@@ -609,14 +898,21 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     // Tag and result-slot accesses are atomic: if a thunk is ever shared
     // across tasks, plain loads/stores on these words would be a data race
     // (UB), and a torn update could dispatch on a garbage tag.
-    let tag_atomic = unsafe { &*(obj as *const AtomicI64) };
-    let tag = tag_atomic.load(Ordering::Acquire);
+    let tag_atomic = unsafe { object::state(obj) };
+    let mut tag = tag_atomic.load(Ordering::Acquire);
+
+    // Another thread is evaluating this thunk (it was preempted in the
+    // middle): wait until it is done. Blackholed by this thread, or with no
+    // thread left to finish it, it is a `<<loop>>`.
+    if tag == BHC_TAG_BLACKHOLE {
+        wait_for_other_owner(obj, tag_atomic);
+        tag = tag_atomic.load(Ordering::Acquire);
+    }
 
     // Check for indirection (previously evaluated thunk) — must check before tag >= 0
     if tag == BHC_TAG_INDIRECTION {
-        // Return cached result from offset 8 (published with Release below)
-        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
-        return result_slot.load(Ordering::Acquire);
+        // Return the cached result (published with Release below)
+        return unsafe { object::thunk_slot(obj) }.load(Ordering::Acquire);
     }
 
     if tag >= 0 {
@@ -640,26 +936,26 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
             )
             .is_err()
         {
-            // Lost the race: another forcing is in progress or finished.
-            // Single-owner semantics treat a blackhole as <<loop>>.
+            // Lost the race: only one thread runs at a time, so it was not
+            // lost to a parallel forcing.
             rts_abort("<<loop>> - circular reference in thunk evaluation");
         }
 
-        // Read eval function pointer (at offset 8); we own the thunk after
-        // winning the CAS, so plain reads of its fields are fine
-        let eval_fn_ptr = unsafe { *(obj.add(8) as *const *const u8) };
+        // Record the owner, which a thread that meets the blackhole checks.
+        // The word held the environment size, which nothing reads.
+        unsafe { object::set_thunk_owner(obj, crate::concurrent::current_thread()) };
 
-        // Read env_size (at offset 16) - currently unused but kept for documentation
-        let _env_size = unsafe { *(obj.add(16) as *const i64) };
-
-        // Get environment pointer (at offset 24)
-        let env_ptr = unsafe { obj.add(24) };
+        // The code, and the captured values it runs over. We own the thunk
+        // after winning the CAS, so nothing else writes the slot.
+        let result_slot = unsafe { object::thunk_slot(obj) };
+        let eval_fn_ptr = result_slot.load(Ordering::Relaxed).cast_const();
+        let env_ptr = unsafe { object::thunk_env(obj) };
 
         // A thunk tag with no eval function is not a thunk: something built
         // an object whose first word happens to equal the thunk tag, and
         // jumping through word 1 lands at address 0. Name it instead.
         if eval_fn_ptr.is_null() {
-            let w2 = unsafe { *(obj.add(16) as *const usize) };
+            let w2 = unsafe { object::thunk_owner(obj) };
             rts_abort(&format!(
                 "force: the object at {obj:p} is tagged as a thunk but has no eval \
                  function (word2={w2:#x}); it is most likely not a thunk"
@@ -674,25 +970,24 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Call the evaluation function with the environment
         let result = eval_fn(env_ptr);
 
-        // BHC_DBG_FORCETEXT: a thunk that evaluates to a `Text` (word0 =
-        // self+HEADER_SIZE) is the shape that reaches parsec's continuation
+        // BHC_DBG_FORCETEXT: a thunk that evaluates to a `Text` is the shape that reaches parsec's continuation
         // slot and crashes when called as a function. Print the thunk's
         // eval-fn address so it can be slide-symbolised to the Haskell binding
         // that BUILT the thunk — the continuation caller the crash backtrace
         // cannot reach (CPS unwinds the stack).
-        if force_text_dbg() && !result.is_null() && (result as usize) % 8 == 0 {
-            let w0 = unsafe { *(result as *const usize) };
-            if w0 == (result as usize) + 24 {
-                let here = bhc_force as *const () as usize;
-                eprintln!(
-                    "FORCETEXT thunk={obj:p} eval_fn={eval_fn_ptr:p} -> Text {result:p};                      bhc_force at {here:#x}"
-                );
-            }
+        if force_text_dbg()
+            && !result.is_null()
+            && (result as usize) % 8 == 0
+            && unsafe { object::tag(result) } == object::BYTES
+        {
+            let here = bhc_force as *const () as usize;
+            eprintln!(
+                "FORCETEXT thunk={obj:p} eval_fn={eval_fn_ptr:p} -> Text {result:p};                      bhc_force at {here:#x}"
+            );
         }
 
         // Publish the result, then the INDIRECTION tag (both Release so a
         // reader that Acquire-loads the tag sees the result pointer)
-        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
         result_slot.store(result, Ordering::Release);
         tag_atomic.store(BHC_TAG_INDIRECTION, Ordering::Release);
 
@@ -739,7 +1034,7 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
         return 0;
     }
 
-    let tag = unsafe { *(obj as *const i64) };
+    let tag = unsafe { object::tag(obj) };
     if tag == BHC_TAG_THUNK {
         1
     } else {
@@ -781,6 +1076,66 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
 ///
 /// Cached: `pap_call_closure` is on the hot path of every partial application,
 /// and reading the environment there would allocate on each call.
+/// `BHC_VALIDATE_OBJECTS`: check that everything `bhc_force` is handed is a
+/// heap object, and say at exit what was not.
+fn validate_objects() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_VALIDATE_OBJECTS").is_some())
+}
+
+/// What `BHC_VALIDATE_OBJECTS` has seen forced.
+struct Validation {
+    /// Heap objects: word 0 is a tag, a thunk state or a kind.
+    objects: u64,
+    /// Words that cannot be the address of an object: a scalar in a value
+    /// word (#94).
+    scalars: u64,
+    /// Addresses whose word 0 is none of those, with a count per value of
+    /// that word.
+    unknown: u64,
+    unknown_words: std::collections::BTreeMap<i64, u64>,
+}
+
+static VALIDATION: std::sync::Mutex<Validation> = std::sync::Mutex::new(Validation {
+    objects: 0,
+    scalars: 0,
+    unknown: 0,
+    unknown_words: std::collections::BTreeMap::new(),
+});
+
+/// Classify a value handed to `bhc_force`.
+fn validate_forced(obj: *mut u8) {
+    let address = obj as usize;
+    let mut seen = VALIDATION.lock().unwrap_or_else(|e| e.into_inner());
+    // Below the first page, or not word-aligned: not an object's address.
+    if address < 0x1_0000 || address % object::WORD != 0 {
+        seen.scalars += 1;
+        return;
+    }
+    // SAFETY: `bhc_force` reads this word of whatever it is given.
+    let word = unsafe { object::tag(obj) };
+    if object::is_first_word(word) {
+        seen.objects += 1;
+    } else {
+        seen.unknown += 1;
+        *seen.unknown_words.entry(word).or_insert(0) += 1;
+    }
+}
+
+/// Print what `BHC_VALIDATE_OBJECTS` saw.
+fn report_validation() {
+    let seen = VALIDATION.lock().unwrap_or_else(|e| e.into_inner());
+    eprintln!(
+        "BHC_VALIDATE_OBJECTS: forced {} heap objects, {} scalars, {} objects with an unknown first word",
+        seen.objects, seen.scalars, seen.unknown
+    );
+    let mut words: Vec<(&i64, &u64)> = seen.unknown_words.iter().collect();
+    words.sort_by(|a, b| b.1.cmp(a.1));
+    for (word, count) in words.into_iter().take(10) {
+        eprintln!("  first word {word:#x}: {count}");
+    }
+}
+
 fn force_text_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_FORCETEXT").is_some())
@@ -792,7 +1147,7 @@ fn pap_dbg() -> bool {
 }
 
 unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
-    let fn_ptr = unsafe { *(closure as *const *const u8) };
+    let fn_ptr = unsafe { object::closure_code(closure) };
     // BHC_DBG_PAP: the saturated call jumps through the closure's first word.
     // When that word is not a function pointer the jump lands somewhere
     // arbitrary and the crash report names only the caller, so print the
@@ -804,7 +1159,7 @@ unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
         let t = fn_ptr as usize;
         let plausible =
             t != 0 && t % 4 == 0 && t > here.saturating_sub(0x400_0000) && t < here + 0x400_0000;
-        let arity = unsafe { *(closure.add(8) as *const i64) };
+        let arity = unsafe { object::closure_arity(closure) };
         let argdesc: Vec<String> = args
             .iter()
             .map(|a| {
@@ -865,11 +1220,13 @@ unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
 ///
 /// `pap` must be a PAP built by `pap_create`.
 unsafe fn pap_resume(pap: *mut u8, new_args: &[*mut u8]) -> *mut u8 {
-    let callee = unsafe { *(pap.add(16) as *const *mut u8) };
-    let k = unsafe { *(pap.add(24) as *const i64) } as usize;
+    // A partial application captures its callee, the number of arguments
+    // held, and those arguments.
+    let callee = unsafe { object::closure_captured(pap, 0) };
+    let k = unsafe { object::closure_captured(pap, 1) } as usize;
     let mut args: Vec<*mut u8> = Vec::with_capacity(k + new_args.len());
     for i in 0..k {
-        args.push(unsafe { *(pap.add(32 + 8 * i) as *const *mut u8) });
+        args.push(unsafe { object::closure_captured(pap, 2 + i) });
     }
     args.extend_from_slice(new_args);
     unsafe { pap_call_closure(callee, &args) }
@@ -955,14 +1312,14 @@ pub unsafe extern "C" fn bhc_bad_action(obj: *const u8, site: *const c_char) -> 
 }
 
 unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
-    let arity = unsafe { *(closure.add(8) as *const i64) } as usize;
+    let arity = unsafe { object::closure_arity(closure) };
     let k = args.len();
     // A wild `arity` means `closure` is not a closure: codegen under-applied
     // something that has no arity word, and word 1 is whatever that object
     // happens to store. Reporting only the derived `m` (as this used to) sends
     // you looking for a 50-billion-argument function. Report the object.
     if arity < k || arity - k > MAX_PAP_REMAINING {
-        let code = unsafe { *(closure as *const usize) };
+        let code = unsafe { object::closure_code(closure) } as usize;
         rts_abort(&format!(
             "PAP: applied {k} arg(s) to an object at {closure:p} whose arity word reads {arity} \
              (word0={code:#x}); it is most likely not a closure"
@@ -976,7 +1333,7 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
             .filter(|(_, a)| (**a as usize) % 8 != 0 && !(*a).is_null())
             .map(|(i, a)| format!("arg{i}={:#x}", *a as usize))
             .collect();
-        let cfn = unsafe { *(closure as *const *const u8) };
+        let cfn = unsafe { object::closure_code(closure) };
         if !bad.is_empty() {
             // Name the generated function that built this PAP. The captured
             // argument is what later reaches a slot expecting a heap object,
@@ -996,14 +1353,14 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
             }
         );
     }
-    let pap = bhc_alloc(32 + 8 * k);
+    // A closure taking the `m` missing arguments, over the callee, the
+    // number of arguments held, and those arguments.
+    let pap = bhc_alloc(object::closure_size(2 + k));
+    // SAFETY: `pap` has room for the two fixed captures and `k` arguments.
     unsafe {
-        *(pap as *mut *const u8) = pap_resume_table(m);
-        *(pap.add(8) as *mut i64) = m as i64;
-        *(pap.add(16) as *mut *mut u8) = closure;
-        *(pap.add(24) as *mut i64) = k as i64;
+        object::init_closure(pap, pap_resume_table(m), m, &[closure, k as *mut u8]);
         for (i, a) in args.iter().enumerate() {
-            *(pap.add(32 + 8 * i) as *mut *mut u8) = *a;
+            object::set_closure_captured(pap, 2 + i, *a);
         }
     }
     pap
@@ -1255,18 +1612,8 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
     let g = bhc_gcd(n.abs(), d);
     let n = n / g;
     let d = d / g;
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align(24, 8).unwrap();
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() {
-            // Writing through a null allocation result would be UB
-            std::alloc::handle_alloc_error(layout);
-        }
-        *(ptr as *mut i64) = 0; // tag
-        *(ptr.add(8) as *mut i64) = n;
-        *(ptr.add(16) as *mut i64) = d;
-        ptr
-    }
+    // SAFETY: both fields are scalars held in the word, never dereferenced.
+    unsafe { object::alloc_con(0, &[n as usize as *mut u8, d as usize as *mut u8]) }
 }
 
 /// Construct a Rational from numerator and denominator, normalizing via GCD.
@@ -1287,7 +1634,7 @@ fn rational_parts(r: *const u8) -> (i64, i64) {
     if r.is_null() {
         rts_abort("Rational operation on null pointer");
     }
-    unsafe { (*(r.add(8) as *const i64), *(r.add(16) as *const i64)) }
+    unsafe { (object::field(r, 0) as i64, object::field(r, 1) as i64) }
 }
 
 /// Extract numerator from a Rational.
@@ -1437,8 +1784,18 @@ pub extern "C" fn bhc_rational_show(r: *mut u8) -> *mut c_char {
 /// Create a new IORef (mutable reference cell)
 #[no_mangle]
 pub extern "C" fn bhc_new_ioref(val: *const u8) -> *mut u8 {
-    let cell = Box::new(val);
-    Box::into_raw(cell) as *mut u8
+    Box::into_raw(Box::new(IORefObject {
+        kind: object::IOREF,
+        value: val,
+    })) as *mut u8
+}
+
+/// An `IORef` on the heap: the kind word every heap object starts with,
+/// then the value it holds.
+#[repr(C)]
+struct IORefObject {
+    kind: i64,
+    value: *const u8,
 }
 
 /// Read the value from an IORef
@@ -1452,7 +1809,7 @@ pub unsafe extern "C" fn bhc_read_ioref(ref_ptr: *const u8) -> *const u8 {
     if ref_ptr.is_null() {
         rts_abort("readIORef on null reference");
     }
-    unsafe { *(ref_ptr as *const *const u8) }
+    unsafe { (*(ref_ptr as *const IORefObject)).value }
 }
 
 /// Write a value to an IORef
@@ -1467,7 +1824,7 @@ pub unsafe extern "C" fn bhc_write_ioref(ref_ptr: *mut u8, val: *const u8) {
         rts_abort("writeIORef on null reference");
     }
     unsafe {
-        *(ref_ptr as *mut *const u8) = val;
+        (*(ref_ptr as *mut IORefObject)).value = val;
     }
 }
 
@@ -1713,10 +2070,10 @@ pub extern "C" fn bhc_truncate_float(a: f32) -> i64 {
     a.trunc() as i64
 }
 
-/// Round Float to Int
+/// Round Float to Int, half to even as Haskell's `round` (`round 2.5 == 2`).
 #[no_mangle]
 pub extern "C" fn bhc_round_float(a: f32) -> i64 {
-    a.round() as i64
+    a.round_ties_even() as i64
 }
 
 /// Ceiling of Float
@@ -1734,7 +2091,8 @@ pub extern "C" fn bhc_floor_float(a: f32) -> i64 {
 /// Show Float
 #[no_mangle]
 pub extern "C" fn bhc_show_float(n: f32) -> *mut c_char {
-    let s = format!("{}", n);
+    // Haskell's layout (`3.0`, `1.0e-2`), not Rust's `{}` (`3`, `0.01`).
+    let s = format_float(n);
     let c_string = std::ffi::CString::new(s).unwrap();
     c_string.into_raw()
 }
@@ -1950,16 +2308,36 @@ pub extern "C" fn bhc_truncate_double(a: f64) -> i64 {
     a.trunc() as i64
 }
 
-/// Round Double to Int
+/// Round Double to Int, half to even as Haskell's `round` (`round 2.5 == 2`,
+/// `round 3.5 == 4`); Rust's `round` goes half away from zero.
 #[no_mangle]
 pub extern "C" fn bhc_round_double(a: f64) -> i64 {
-    a.round() as i64
+    a.round_ties_even() as i64
 }
 
 /// Ceiling of Double
 #[no_mangle]
 pub extern "C" fn bhc_ceiling_double(a: f64) -> i64 {
     a.ceil() as i64
+}
+
+/// A double rounded to an `Integer`: `mode` 0 = floor, 1 = ceiling,
+/// 2 = round (half to even), 3 = truncate.
+///
+/// The machine-word rounding functions saturate at 64 bits, so `floor 1.0e20
+/// :: Integer` was `9223372036854775807`. A NaN or an infinity has no integer
+/// value; they answer 0 here (GHC answers an arbitrary huge number).
+#[no_mangle]
+pub extern "C" fn bhc_double_to_integer(a: f64, mode: i64) -> *mut u8 {
+    use num_traits::FromPrimitive;
+    let rounded = match mode {
+        0 => a.floor(),
+        1 => a.ceil(),
+        2 => a.round_ties_even(),
+        _ => a.trunc(),
+    };
+    let big = BigInt::from_f64(rounded).unwrap_or_default();
+    new_integer(big)
 }
 
 /// Floor of Double
@@ -2143,12 +2521,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 let val = f64::from_bits(bits as u64);
                 format_double(val)
             }
-            2 => {
-                // Float: interpret as f32 bits (lower 32 bits)
-                let bits = ptr as i32;
-                let val = f32::from_bits(bits as u32);
-                format_float(val)
-            }
+            2 => format_float(float_from_word(ptr as u64)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers
@@ -2185,16 +2558,20 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
 
 /// Read the characters of a `Data.Text.Text`.
 ///
-/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`; the canonical
-/// definition is `bhc-text`'s `text.rs`. It is repeated here so `show` can
-/// render a Text without the runtime depending on the text library.
+/// Reads the header through `bhc_rts_alloc::object`, so `show` can render a
+/// Text without the runtime depending on the text library.
 unsafe fn bhc_text_show_str(text: *const u8) -> String {
     if text.is_null() {
         return String::new();
     }
-    let data = unsafe { *(text as *const *const u8) };
-    let off = unsafe { *((text as *const u64).add(1)) } as usize;
-    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    // SAFETY: the caller guarantees a `Text`.
+    let (data, off, len) = unsafe {
+        (
+            object::bytes_buffer(text),
+            object::bytes_offset(text),
+            object::bytes_len(text),
+        )
+    };
     if data.is_null() || len > (1 << 30) {
         return String::new();
     }
@@ -2227,7 +2604,7 @@ unsafe fn nullary_tag(ptr: *const u8, max_tag: usize) -> i64 {
         #[allow(clippy::cast_possible_wrap)]
         return raw as i64;
     }
-    unsafe { *(ptr as *const i64) }
+    unsafe { object::tag(ptr) }
 }
 
 /// Read a [Char] linked list into a Rust String.
@@ -2236,17 +2613,17 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
     unsafe {
         let mut result = String::new();
         while !list_ptr.is_null() {
-            let tag = *(list_ptr as *const i64);
+            let tag = object::tag(list_ptr);
             if tag == 0 {
                 break; // Nil
             }
             // Cons: head at +8, tail at +16
-            let head = *(list_ptr.add(8) as *const *const u8);
+            let head = object::field(list_ptr, 0).cast_const();
             let char_val = head as u32;
             if let Some(ch) = char::from_u32(char_val) {
                 result.push(ch);
             }
-            list_ptr = bhc_force(*(list_ptr.add(16) as *const *mut u8));
+            list_ptr = bhc_force(object::field(list_ptr, 1));
         }
         result
     }
@@ -2280,7 +2657,7 @@ pub unsafe extern "C" fn bhc_string_eq_cstr(list_ptr: *const u8, pat: *const c_c
         // nil is sometimes elided.
         return i64::from(want.is_empty());
     }
-    let tag = unsafe { *(list_ptr as *const i64) };
+    let tag = unsafe { object::tag(list_ptr) };
     if tag == 0 {
         return i64::from(want.is_empty());
     }
@@ -2318,13 +2695,13 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
     let mut cur = list_ptr;
     unsafe {
         while !cur.is_null() {
-            let tag = *(cur as *const i64);
+            let tag = object::tag(cur);
             if tag == 0 {
                 break; // Nil
             }
-            let head = *(cur.add(8) as *const *const u8);
+            let head = object::field(cur, 0).cast_const();
             elems.push(show_elem(head, elem_type_tag));
-            cur = bhc_force(*(cur.add(16) as *const *mut u8));
+            cur = bhc_force(object::field(cur, 1));
         }
     }
     let shown = format!("[{}]", elems.join(","));
@@ -2335,11 +2712,11 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
 /// Show Maybe - "Nothing" or "Just `<val>`"
 #[no_mangle]
 pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
-    let tag = unsafe { *(maybe_ptr as *const i64) };
+    let tag = unsafe { object::tag(maybe_ptr) };
     let shown = if tag == 0 {
         "Nothing".to_string()
     } else {
-        let val = unsafe { *(maybe_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(maybe_ptr, 0).cast_const() };
         format!("Just {}", unsafe { show_elem(val, elem_type_tag) })
     };
     let c_string = CString::new(shown).unwrap();
@@ -2353,12 +2730,12 @@ pub extern "C" fn bhc_show_either(
     left_type_tag: i64,
     right_type_tag: i64,
 ) -> *mut c_char {
-    let tag = unsafe { *(either_ptr as *const i64) };
+    let tag = unsafe { object::tag(either_ptr) };
     let shown = if tag == 0 {
-        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(either_ptr, 0).cast_const() };
         format!("Left {}", unsafe { show_elem(val, left_type_tag) })
     } else {
-        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        let val = unsafe { object::field(either_ptr, 0).cast_const() };
         format!("Right {}", unsafe { show_elem(val, right_type_tag) })
     };
     let c_string = CString::new(shown).unwrap();
@@ -2372,8 +2749,8 @@ pub extern "C" fn bhc_show_tuple2(
     fst_type_tag: i64,
     snd_type_tag: i64,
 ) -> *mut c_char {
-    let fst = unsafe { *(tuple_ptr.add(8) as *const *const u8) };
-    let snd = unsafe { *(tuple_ptr.add(16) as *const *const u8) };
+    let fst = unsafe { object::field(tuple_ptr, 0).cast_const() };
+    let snd = unsafe { object::field(tuple_ptr, 1).cast_const() };
     let shown = format!("({},{})", unsafe { show_elem(fst, fst_type_tag) }, unsafe {
         show_elem(snd, snd_type_tag)
     });
@@ -2410,6 +2787,8 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 ///   19=Adt with type arguments: `child1` holds the type's derived
 ///      `$derived_showt_*` function (`fn(env, targs, value) -> [Char]`) and
 ///      `child2` a null-terminated array of the type arguments' descriptors.
+///   20=exception object (`IOException`, `ErrorCall`, `ArithException`, …):
+///      shown by `bhc_show_exception`, never parenthesized.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
@@ -2419,6 +2798,22 @@ pub struct ShowTypeDesc {
     pub child1: *const ShowTypeDesc,
     /// Second child descriptor (snd for Tuple2, right for Either).
     pub child2: *const ShowTypeDesc,
+}
+
+/// A `Float` held in a value word.
+///
+/// Compiled code computes a `Float` in double precision and stores those 64
+/// bits, as it does a `Double`. Read as the low 32 bits of the word, every
+/// `Float` in a list, tuple or `Maybe` was shown as `0.0` (#156). A word
+/// whose upper half is clear cannot be such a double unless it is zero (the
+/// double of any non-zero `f32` has exponent bits there), so that one is
+/// taken as raw `f32` bits.
+fn float_from_word(bits: u64) -> f32 {
+    if bits >> 32 == 0 {
+        f32::from_bits(bits as u32)
+    } else {
+        f64::from_bits(bits) as f32
+    }
 }
 
 /// Recursively show a value given its type descriptor.
@@ -2434,11 +2829,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 let val = f64::from_bits(ptr as u64);
                 format_double(val)
             }
-            2 => {
-                // Float: interpret as f32 bits (lower 32 bits)
-                let val = f32::from_bits(ptr as u32);
-                format_float(val)
-            }
+            2 => format_float(float_from_word(ptr as u64)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers
@@ -2472,7 +2863,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             }
             9 => {
                 // Integer: a boxed BigInt.
-                (*(ptr as *const BigInt)).to_string()
+                integer(ptr).to_string()
             }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
@@ -2524,6 +2915,16 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 read_char_list(result)
             }
             18 => format!("{}", ptr as i64),
+            20 => {
+                let text = bhc_show_exception(bhc_force(ptr as *mut u8));
+                if text.is_null() {
+                    "<<exception>>".to_string()
+                } else {
+                    CStr::from_ptr(text as *const c_char)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            }
             19 => {
                 let raw = desc.child1 as *const ();
                 let show_fn: extern "C" fn(*const u8, *const u8, *const u8) -> *const u8 =
@@ -2576,7 +2977,7 @@ unsafe fn is_constructor_app(ptr: *const u8, desc: &ShowTypeDesc) -> bool {
         match desc.tag {
             11 => {
                 // Maybe: Just is a constructor app, Nothing is not
-                *(ptr as *const i64) == 1
+                object::tag(ptr) == 1
             }
             13 => {
                 // Either: Left/Right are always constructor apps
@@ -2599,13 +3000,13 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
         let mut elems = Vec::new();
         let mut cur = list_ptr;
         while !cur.is_null() {
-            let tag = *(cur as *const i64);
+            let tag = object::tag(cur);
             if tag == 0 {
                 break; // Nil
             }
-            let head = *(cur.add(8) as *const *const u8);
+            let head = object::field(cur, 0).cast_const();
             elems.push(show_any(head, elem_desc));
-            cur = bhc_force(*(cur.add(16) as *const *mut u8));
+            cur = bhc_force(object::field(cur, 1));
         }
         format!("[{}]", elems.join(","))
     }
@@ -2614,11 +3015,11 @@ unsafe fn show_list_recursive(list_ptr: *const u8, elem_desc: &ShowTypeDesc) -> 
 /// Recursively show a Maybe value.
 unsafe fn show_maybe_recursive(maybe_ptr: *const u8, elem_desc: &ShowTypeDesc) -> String {
     unsafe {
-        let tag = *(maybe_ptr as *const i64);
+        let tag = object::tag(maybe_ptr);
         if tag == 0 {
             "Nothing".to_string()
         } else {
-            let val = *(maybe_ptr.add(8) as *const *const u8);
+            let val = object::field(maybe_ptr, 0).cast_const();
             format!("Just {}", show_any_prec(val, elem_desc, 11))
         }
     }
@@ -2631,8 +3032,8 @@ unsafe fn show_tuple2_recursive(
     snd_desc: &ShowTypeDesc,
 ) -> String {
     unsafe {
-        let fst = *(tuple_ptr.add(8) as *const *const u8);
-        let snd = *(tuple_ptr.add(16) as *const *const u8);
+        let fst = object::field(tuple_ptr, 0).cast_const();
+        let snd = object::field(tuple_ptr, 1).cast_const();
         format!("({},{})", show_any(fst, fst_desc), show_any(snd, snd_desc))
     }
 }
@@ -2644,12 +3045,12 @@ unsafe fn show_either_recursive(
     right_desc: &ShowTypeDesc,
 ) -> String {
     unsafe {
-        let tag = *(either_ptr as *const i64);
+        let tag = object::tag(either_ptr);
         if tag == 0 {
-            let val = *(either_ptr.add(8) as *const *const u8);
+            let val = object::field(either_ptr, 0).cast_const();
             format!("Left {}", show_any_prec(val, left_desc, 11))
         } else {
-            let val = *(either_ptr.add(8) as *const *const u8);
+            let val = object::field(either_ptr, 0).cast_const();
             format!("Right {}", show_any_prec(val, right_desc, 11))
         }
     }
@@ -2886,8 +3287,103 @@ pub extern "C" fn bhc_string_length(s: *const c_char) -> i64 {
     unsafe { CStr::from_ptr(s) }.to_bytes().len() as i64
 }
 
+/// Raise the `IOException` of a file operation that failed, worded as GHC
+/// words it: `<path>: openFile: does not exist (No such file or directory)`.
+/// Returns what a runtime function returns while an exception is pending.
+fn throw_io_error(path: &str, operation: &str, error: &std::io::Error) -> *mut u8 {
+    use std::io::ErrorKind;
+    let kind = match error.kind() {
+        ErrorKind::NotFound => "does not exist",
+        ErrorKind::PermissionDenied => "permission denied",
+        ErrorKind::AlreadyExists => "already exists",
+        ErrorKind::InvalidData => "invalid argument",
+        _ => "failed",
+    };
+    // The system's own wording, without Rust's "(os error N)" suffix.
+    let detail = error.to_string();
+    let detail = detail.split(" (os error").next().unwrap_or(&detail);
+    let message = format!("{path}: {operation}: {kind} ({detail})");
+    let payload = CString::new(message).map_or(ptr::null_mut(), |cs| cs.into_raw());
+    bhc_throw(bhc_make_some_exception(
+        EXC_TAG_IO_EXCEPTION,
+        payload as *mut u8,
+    ))
+}
+
+/// Whether an `IOException` is of a kind, for `isDoesNotExistError` and its
+/// siblings in `System.IO.Error`. Returns 1 or 0.
+///
+/// An `IOException` here is its message, worded as GHC words it
+/// (`<location>: <kind> (<detail>)`, or `user error (<text>)`), so the kind
+/// is read from the message.
+///
+/// `kind`: 0 does not exist, 1 already exists, 2 permission denied,
+/// 3 user error, 4 end of file, 5 resource exhausted, 6 resource busy,
+/// 7 illegal operation.
+#[no_mangle]
+pub extern "C" fn bhc_io_error_is(exc: *mut u8, kind: i64) -> i64 {
+    const PHRASES: [&str; 8] = [
+        "does not exist",
+        "already exists",
+        "permission denied",
+        "user error",
+        "end of file",
+        "resource exhausted",
+        "resource busy",
+        "illegal operation",
+    ];
+    let Some(phrase) = usize::try_from(kind).ok().and_then(|k| PHRASES.get(k)) else {
+        return 0;
+    };
+    if exc.is_null() || bhc_exc_get_tag(exc) != EXC_TAG_IO_EXCEPTION {
+        return 0;
+    }
+    let payload = bhc_exc_get_payload(exc);
+    if payload.is_null() {
+        return 0;
+    }
+    // SAFETY: an IO exception's payload is the NUL-terminated message
+    // `bhc_make_some_exception` was given (see `bhc_show_exception`).
+    let message = unsafe { CStr::from_ptr(payload as *const c_char) }.to_string_lossy();
+    // The kind is what stands before the parenthesised detail: at the start
+    // of the message, or after the `: ` that ends the location.
+    let Some(head) = message.split(" (").next() else {
+        return 0;
+    };
+    i64::from(head == *phrase || head.ends_with(&format!(": {phrase}")))
+}
+
+/// [`throw_io_error`] for a library that has only the OS error code: the
+/// text library, which does not link the runtime, is handed this function
+/// at startup (`bhc_text_set_io_error_hook`).
+///
+/// # Safety
+///
+/// `path` and `operation` must be NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_throw_io_error_code(
+    path: *const c_char,
+    operation: *const c_char,
+    os_error: i32,
+) -> *mut u8 {
+    let text = |s: *const c_char| {
+        if s.is_null() {
+            String::new()
+        } else {
+            // SAFETY: the caller guarantees a NUL-terminated string.
+            unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
+        }
+    };
+    let error = if os_error == 0 {
+        std::io::Error::other("unknown error")
+    } else {
+        std::io::Error::from_raw_os_error(os_error)
+    };
+    throw_io_error(&text(path), &text(operation), &error)
+}
+
 /// Read entire file contents into a heap-allocated C string.
-/// Returns null on error.
+/// Raises an `IOException` if the file cannot be read.
 #[no_mangle]
 pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -2896,17 +3392,12 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     match std::fs::read_to_string(path_str) {
         Ok(contents) => CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw()),
-        Err(e) => {
-            // Throw an IOException with the error message as payload
-            let msg = format!("{}: {}", path_str, e);
-            let payload = CString::new(msg).map_or(ptr::null_mut(), |cs| cs.into_raw());
-            let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, payload as *mut u8);
-            bhc_throw(exc) as *mut c_char
-        }
+        Err(e) => throw_io_error(path_str, "openFile", &e) as *mut c_char,
     }
 }
 
-/// Write a C string to a file, replacing its contents.
+/// Write a C string to a file, replacing its contents. Raises an
+/// `IOException` if the file cannot be written.
 #[no_mangle]
 pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
     if bhc_exception_pending() {
@@ -2917,10 +3408,13 @@ pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
     }
     let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
-    let _ = std::fs::write(p, c);
+    if let Err(e) = std::fs::write(p, c) {
+        throw_io_error(p, "withFile", &e);
+    }
 }
 
-/// Append a C string to a file, creating it if needed.
+/// Append a C string to a file, creating it if needed. Raises an
+/// `IOException` if the file cannot be written.
 #[no_mangle]
 pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
     if bhc_exception_pending() {
@@ -2932,12 +3426,13 @@ pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
     let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let appended = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(p)
-    {
-        let _ = f.write_all(c.as_bytes());
+        .and_then(|mut f| f.write_all(c.as_bytes()));
+    if let Err(e) = appended {
+        throw_io_error(p, "withFile", &e);
     }
 }
 
@@ -2945,26 +3440,16 @@ pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
 // String split/join: lines, words, unlines, unwords
 // ----------------------------------------------------------------------------
 
-/// Allocate a cons cell: `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
-unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 1; // tag = cons
-        *(cell.add(8) as *mut *mut u8) = head;
-        *(cell.add(16) as *mut *mut u8) = tail;
-        cell
-    }
+/// Allocate `head : tail`.
+pub(crate) unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { object::cons(head, tail) }
 }
 
-/// Allocate a nil cell: `[i64 tag=0, ...]` (24 bytes, matching cons layout).
-unsafe fn alloc_nil() -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 0;
-        cell
-    }
+/// Allocate `[]`.
+pub(crate) unsafe fn alloc_nil() -> *mut u8 {
+    // SAFETY: no fields to vouch for.
+    unsafe { object::nil() }
 }
 
 /// `reads :: String -> [(Int, String)]`, at `Int` only: optional leading
@@ -2980,8 +3465,8 @@ unsafe fn alloc_nil() -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
     unsafe {
-        let tag = |p: *mut u8| *(p as *const i64);
-        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let tag = |p: *mut u8| object::tag(p);
+        let field = |p: *mut u8, i: usize| object::field(p, i);
         let mut cells: Vec<*mut u8> = Vec::new();
         let mut list = bhc_force(str_list);
         while tag(list) != 0 {
@@ -3014,12 +3499,63 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
         } else {
             alloc_nil()
         };
-        // A pair is constructor 0 with two fields.
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let pair = std::alloc::alloc(layout);
-        *(pair as *mut i64) = 0;
-        *(pair.add(8) as *mut *mut u8) = n as *mut u8;
-        *(pair.add(16) as *mut *mut u8) = rest;
+        let pair = object::alloc_con(object::TUPLE, &[n as *mut u8, rest]);
+        alloc_cons(pair, alloc_nil())
+    }
+}
+
+/// `reads :: String -> [(T, String)]` at an enumeration `T` with derived
+/// `Read`: optional leading whitespace, then an identifier token that is
+/// exactly one of the constructor names. `names` lists them, newline
+/// separated, in tag order. `[(con, rest)]` on success, `[]` otherwise
+/// (`reads "Greenish"` does not match `Green`, as `lex` reads the whole
+/// token).
+///
+/// # Safety
+///
+/// `str_list` must be a BHC list of characters (or a thunk evaluating to
+/// one), and `names` a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_reads_enum(str_list: *mut u8, names: *const c_char) -> *mut u8 {
+    unsafe {
+        let tag = |p: *mut u8| object::tag(p);
+        let field = |p: *mut u8, i: usize| object::field(p, i);
+        let mut cells: Vec<*mut u8> = Vec::new();
+        let mut list = bhc_force(str_list);
+        while tag(list) != 0 {
+            cells.push(list);
+            list = bhc_force(field(list, 1));
+        }
+        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let as_char = |c: i64| u32::try_from(c).ok().and_then(char::from_u32);
+        let mut i = 0;
+        while i < chars.len() && as_char(chars[i]).is_some_and(char::is_whitespace) {
+            i += 1;
+        }
+        let start = i;
+        if !as_char(chars.get(i).copied().unwrap_or(-1))
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        {
+            return alloc_nil();
+        }
+        while i < chars.len()
+            && as_char(chars[i]).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+        {
+            i += 1;
+        }
+        let token: String = chars[start..i].iter().filter_map(|&c| as_char(c)).collect();
+        let names = CStr::from_ptr(names).to_str().unwrap_or("");
+        let Some(con_tag) = names.split('\n').position(|n| n == token) else {
+            return alloc_nil();
+        };
+        let rest = if i < cells.len() {
+            cells[i]
+        } else {
+            alloc_nil()
+        };
+        // A nullary constructor is its tag alone.
+        let con = object::alloc_con(con_tag as i64, &[]);
+        let pair = object::alloc_con(object::TUPLE, &[con, rest]);
         alloc_cons(pair, alloc_nil())
     }
 }
@@ -3158,6 +3694,31 @@ pub(crate) fn report_thread_exception() {
     }
 }
 
+/// `Debug.Trace`: write `message` and a newline to stderr. Stdout is flushed
+/// first, so a trace lands between the lines printed around it.
+///
+/// # Safety
+///
+/// `message` must be null or a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_trace_message(message: *const c_char) {
+    let _ = std::io::stdout().flush();
+    let text = if message.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        unsafe { CStr::from_ptr(message) }.to_string_lossy()
+    };
+    eprintln!("{text}");
+}
+
+/// 1 if a Haskell exception is pending on this thread, else 0. Unlike
+/// [`bhc_exception_check`] it is not a preemption point, so pure code (a
+/// memoized CAF deciding whether to cache its value) can ask.
+#[no_mangle]
+pub extern "C" fn bhc_exception_is_pending() -> i64 {
+    i64::from(bhc_exception_pending())
+}
+
 /// C-ABI probe for compiled code: 1 if a Haskell exception is pending
 /// (thrown and not yet caught), else 0. Codegen emits this check at
 /// IO-bind boundaries so a thrown sentinel short-circuits the rest of a
@@ -3239,16 +3800,10 @@ fn exception_matches(exc: *mut u8, type_tag: i64) -> bool {
 /// Pointer to the allocated SomeException struct.
 #[no_mangle]
 pub extern "C" fn bhc_make_some_exception(type_tag: i64, payload: *mut u8) -> *mut u8 {
-    let layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        *(ptr as *mut i64) = type_tag;
-        *(ptr.add(8) as *mut *mut u8) = payload;
-    }
-    ptr
+    // An exception is laid out as a one-field constructor whose tag is its
+    // type tag.
+    // SAFETY: the payload is the caller's to vouch for.
+    unsafe { object::alloc_con(type_tag, &[payload]) }
 }
 
 /// The text of `userError msg`, as GHC shows it: `user error (msg)`.
@@ -3278,7 +3833,7 @@ pub extern "C" fn bhc_exc_get_tag(exc: *mut u8) -> i64 {
     if exc.is_null() {
         return EXC_TAG_SOME_EXCEPTION;
     }
-    unsafe { *(exc as *const i64) }
+    unsafe { object::tag(exc) }
 }
 
 /// Get the payload from a SomeException pointer.
@@ -3295,7 +3850,7 @@ pub extern "C" fn bhc_exc_get_payload(exc: *mut u8) -> *mut u8 {
     if exc.is_null() {
         return ptr::null_mut();
     }
-    unsafe { *(exc.add(8) as *const *mut u8) }
+    unsafe { object::field(exc, 0) }
 }
 
 /// Get a human-readable string representation of a SomeException.
@@ -3434,13 +3989,8 @@ pub extern "C" fn bhc_catch_typed(
 /// Allocate a one-field constructor cell `[i64 tag, field]` — `Left x` (tag 0)
 /// or `Right x` (tag 1) of `Either`.
 unsafe fn alloc_con1(tag: i64, field: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(16, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = tag;
-        *(cell.add(8) as *mut *mut u8) = field;
-        cell
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { object::alloc_con(tag, &[field]) }
 }
 
 /// Run an IO action and reify a matching exception as `Left`:
@@ -3714,6 +4264,25 @@ pub extern "C" fn bhc_bracket(
     }
 }
 
+/// Set this thread's async exception masking state, and let the scheduler
+/// know: it defers an exception thrown to a masked thread and raises it once
+/// the thread unmasks.
+fn set_mask_state(state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+    crate::concurrent::mask_changed(state);
+}
+
+/// This thread's async exception masking state.
+pub(crate) fn current_mask_state() -> i64 {
+    BHC_MASK_STATE.with(|cell| cell.get())
+}
+
+/// Start a forked thread in its parent's masking state. The scheduler records
+/// it for the thread itself.
+pub(crate) fn init_mask_state(state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+}
+
 /// Masking state constants matching Haskell's MaskingState constructors.
 const MASK_UNMASKED: i64 = 0;
 const MASK_INTERRUPTIBLE: i64 = 1;
@@ -3746,7 +4315,7 @@ pub extern "C" fn bhc_query_terminal(fd: i64) -> i64 {
 /// Set the async exception masking state.
 #[no_mangle]
 pub extern "C" fn bhc_set_masking_state(state: i64) {
-    BHC_MASK_STATE.with(|cell| cell.set(state));
+    set_mask_state(state);
 }
 
 // ----------------------------------------------------------------------------
@@ -3759,23 +4328,41 @@ pub extern "C" fn bhc_set_masking_state(state: i64) {
 // brackets the run with `bhc_mask_enter`/`bhc_mask_exit` and hands the body a
 // `restore` built by `bhc_make_restore`.
 
-/// The `restore` function `mask` passes to its body: a one-argument function
-/// closure holding the masking state to restore.
-#[repr(C)]
-struct RestoreFn {
-    code: unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-    arity: i64,
-    saved_state: i64,
+/// Allocate a closure the runtime itself provides the code for.
+///
+/// # Safety
+///
+/// `code` must take the closure and then `arity` arguments.
+unsafe fn alloc_closure(code: *const u8, arity: usize, captured: &[*mut u8]) -> *mut u8 {
+    let closure = bhc_alloc(object::closure_size(captured.len()));
+    // SAFETY: `closure` has room for the header and the captured values.
+    unsafe { object::init_closure(closure, code, arity, captured) };
+    closure
 }
 
-/// `restore action`: an action closure that runs `action` under the saved
-/// masking state.
-#[repr(C)]
-struct RestoreAction {
-    code: unsafe extern "C" fn(*mut u8) -> *mut u8,
-    arity: i64,
-    inner: *mut u8,
+/// The `restore` function `mask` passes to its body: a one-argument function
+/// closure over the masking state to restore.
+fn restore_fn(
+    code: unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8,
     saved_state: i64,
+) -> *mut u8 {
+    // SAFETY: `code` takes the closure and one argument; the captured value
+    // is a scalar in the word.
+    unsafe { alloc_closure(code as *const u8, 1, &[saved_state as usize as *mut u8]) }
+}
+
+/// Run an IO action closure.
+///
+/// # Safety
+///
+/// `action` must be an evaluated IO action closure.
+unsafe fn run_action_closure(action: *mut u8) -> *mut u8 {
+    // SAFETY: an action's code takes the closure alone.
+    unsafe {
+        let code: unsafe extern "C" fn(*mut u8) -> *mut u8 =
+            std::mem::transmute(object::closure_code(action));
+        code(action)
+    }
 }
 
 /// Enter a masked region: set the masking state to `state` and return the
@@ -3783,24 +4370,20 @@ struct RestoreAction {
 #[no_mangle]
 pub extern "C" fn bhc_mask_enter(state: i64) -> i64 {
     let old = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(state));
+    set_mask_state(state);
     old
 }
 
 /// Leave a masked region entered with `bhc_mask_enter`.
 #[no_mangle]
 pub extern "C" fn bhc_mask_exit(old_state: i64) {
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
 }
 
 /// The `restore` function for a `mask` entered from `saved_state`.
 #[no_mangle]
 pub extern "C" fn bhc_make_restore(saved_state: i64) -> *mut u8 {
-    Box::into_raw(Box::new(RestoreFn {
-        code: restore_apply,
-        arity: 1,
-        saved_state,
-    })) as *mut u8
+    restore_fn(restore_apply, saved_state)
 }
 
 /// Apply `restore` to an action: build the action that runs it unmasked (or
@@ -3808,15 +4391,14 @@ pub extern "C" fn bhc_make_restore(saved_state: i64) -> *mut u8 {
 ///
 /// # Safety
 ///
-/// `closure` must be a `RestoreFn` from `bhc_make_restore`.
+/// `closure` must be a `restore` closure from `bhc_make_restore`.
 unsafe extern "C" fn restore_apply(closure: *mut u8, inner: *mut u8) -> *mut u8 {
-    let saved_state = unsafe { (*(closure as *const RestoreFn)).saved_state };
-    Box::into_raw(Box::new(RestoreAction {
-        code: restore_run,
-        arity: 0,
-        inner,
-        saved_state,
-    })) as *mut u8
+    // SAFETY: a `restore` closure captures the saved masking state. The
+    // action built here runs `inner` under it: it captures both.
+    unsafe {
+        let saved_state = object::closure_captured(closure, 0);
+        alloc_closure(restore_run as *const u8, 0, &[inner, saved_state])
+    }
 }
 
 /// Run a `restore action`: the inner action under the saved masking state,
@@ -3824,21 +4406,19 @@ unsafe extern "C" fn restore_apply(closure: *mut u8, inner: *mut u8) -> *mut u8 
 ///
 /// # Safety
 ///
-/// `action` must be a `RestoreAction` from `restore_apply`, whose `inner` is
-/// an IO action closure or a thunk evaluating to one.
+/// `action` must be a closure from `restore_apply`, whose first captured
+/// value is an IO action closure or a thunk evaluating to one.
 unsafe extern "C" fn restore_run(action: *mut u8) -> *mut u8 {
     let (inner, saved_state) = unsafe {
-        let action = &*(action as *const RestoreAction);
-        (action.inner, action.saved_state)
+        (
+            object::closure_captured(action, 0),
+            object::closure_captured(action, 1) as usize as i64,
+        )
     };
     let current = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
-    let result = unsafe {
-        let inner = bhc_force(inner);
-        let code = *(inner as *const unsafe extern "C" fn(*mut u8) -> *mut u8);
-        code(inner)
-    };
-    BHC_MASK_STATE.with(|cell| cell.set(current));
+    set_mask_state(saved_state);
+    let result = unsafe { run_action_closure(bhc_force(inner)) };
+    set_mask_state(current);
     result
 }
 
@@ -3852,9 +4432,9 @@ pub extern "C" fn bhc_mask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
+    set_mask_state(MASK_INTERRUPTIBLE);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3868,9 +4448,9 @@ pub extern "C" fn bhc_unmask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNMASKED));
+    set_mask_state(MASK_UNMASKED);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
@@ -3881,92 +4461,60 @@ pub extern "C" fn bhc_uninterruptible_mask(
     action_env: *mut u8,
 ) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
+    set_mask_state(MASK_UNINTERRUPTIBLE);
     let result = action_fn(action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
-/// Mask with restore function (for `mask`).
+/// Run a `mask`/`uninterruptibleMask` body under the eager IO model.
 ///
-/// Sets masking state to MaskedInterruptible, creates a restore closure
-/// that temporarily restores the previous state, calls the action with
-/// the restore closure, then restores the original state.
-///
-/// The action is `(IO a -> IO a) -> IO b` — it takes the restore function
-/// as its first argument.
-#[no_mangle]
-pub extern "C" fn bhc_mask_with_restore(
-    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-    action_env: *mut u8,
-) -> *mut u8 {
+/// `body` is the body's function closure, `(IO a -> IO a) -> IO b`, called
+/// with a `restore` closure (`fn(closure, arg)`, the closure convention).
+/// Under the eager model calling it runs it, so the masking state is set
+/// around the call.
+fn mask_with_restore_eager(body: *mut u8, state: i64) -> *mut u8 {
     let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
-
-    // Create a restore closure: [fn_ptr, saved_state]
-    // The restore function temporarily sets masking state to old_state,
-    // runs the inner IO action, then re-sets to current state.
-    let restore_closure = unsafe {
-        let size = 2 * std::mem::size_of::<*mut u8>();
-        let closure = bhc_alloc(size) as *mut *mut u8;
-        // fn_ptr at offset 0
-        *closure = bhc_restore_fn as *mut u8;
-        // saved state at offset 1 (env[0])
-        *closure.add(1) = old_state as *mut u8;
-        closure as *mut u8
+    set_mask_state(state);
+    let restore = restore_fn(restore_apply_eager, old_state);
+    let result = unsafe {
+        let code: unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8 =
+            std::mem::transmute(object::closure_code(body));
+        code(body, restore)
     };
-
-    let result = action_fn(restore_closure, action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    set_mask_state(old_state);
     result
 }
 
-/// Uninterruptible mask with restore function (for `uninterruptibleMask`).
+/// `restore` under the eager IO model. An IO argument has already run by
+/// the time a function receives it (the eager model evaluates arguments),
+/// so `restore` can only pass its result through: the action ran under the
+/// masked state rather than the restored one.
+///
+/// # Safety
+///
+/// Called through the closure convention with a `restore` closure.
+unsafe extern "C" fn restore_apply_eager(_closure: *mut u8, result: *mut u8) -> *mut u8 {
+    result
+}
+
+/// Mask with restore function (for `mask`) under the eager IO model.
+///
+/// The first argument is ignored (kept for the declared signature); `body`
+/// is the body's function closure.
+#[no_mangle]
+pub extern "C" fn bhc_mask_with_restore(_body_fn: *mut u8, body: *mut u8) -> *mut u8 {
+    mask_with_restore_eager(body, MASK_INTERRUPTIBLE)
+}
+
+/// Uninterruptible mask with restore function (for `uninterruptibleMask`)
+/// under the eager IO model.
 #[no_mangle]
 pub extern "C" fn bhc_uninterruptible_mask_with_restore(
-    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-    action_env: *mut u8,
+    _body_fn: *mut u8,
+    body: *mut u8,
 ) -> *mut u8 {
-    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
-
-    let restore_closure = unsafe {
-        let size = 2 * std::mem::size_of::<*mut u8>();
-        let closure = bhc_alloc(size) as *mut *mut u8;
-        *closure = bhc_restore_fn as *mut u8;
-        *closure.add(1) = old_state as *mut u8;
-        closure as *mut u8
-    };
-
-    let result = action_fn(restore_closure, action_env);
-    BHC_MASK_STATE.with(|cell| cell.set(old_state));
-    result
-}
-
-/// The restore function used inside `mask`/`uninterruptibleMask`.
-///
-/// Called as a BHC closure: `restore_fn(inner_io_closure, self_closure)`.
-/// Temporarily restores the masking state to the saved value, runs the
-/// inner IO action, then re-sets the masking state.
-extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mut u8 {
-    // Extract saved state from restore closure env[0]
-    let saved_state = unsafe {
-        let closure = restore_closure as *const *mut u8;
-        *closure.add(1) as i64
-    };
-
-    let current_state = BHC_MASK_STATE.with(|cell| cell.get());
-    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
-
-    // inner_io is a closure: extract fn_ptr and call fn_ptr(inner_io)
-    let result = unsafe {
-        let closure = inner_io as *const *mut u8;
-        let fn_ptr: extern "C" fn(*mut u8) -> *mut u8 = std::mem::transmute(*closure);
-        fn_ptr(inner_io)
-    };
-
-    BHC_MASK_STATE.with(|cell| cell.set(current_state));
-    result
+    mask_with_restore_eager(body, MASK_UNINTERRUPTIBLE)
 }
 
 // ============================================================================
@@ -3980,21 +4528,26 @@ extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mu
 
 use std::io::{Read, Seek, Write};
 
-/// Internal handle representation tracking open state and capabilities.
-struct BhcHandle {
-    file: Option<std::fs::File>,
-    readable: bool,
-    writable: bool,
-    closed: bool,
+use bhc_rts_alloc::handle::{
+    Handle as BhcHandle, STDERR as HANDLE_STDERR, STDIN as HANDLE_STDIN, STDOUT as HANDLE_STDOUT,
+};
+
+/// The standard streams' handles. They are heap objects like an opened
+/// file's handle, told apart by the stream they name.
+static STDIN_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDIN);
+static STDOUT_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDOUT);
+static STDERR_HANDLE: BhcHandle = BhcHandle::standard(HANDLE_STDERR);
+
+/// Which stream a handle is: 0 for an opened file (or null), otherwise one
+/// of the `HANDLE_STD*` numbers.
+fn handle_stream(handle: *mut u8) -> usize {
+    // SAFETY: every handle compiled code holds came from this module.
+    unsafe { bhc_rts_alloc::handle::stream(handle) }
 }
 
-const HANDLE_STDIN: usize = 1;
-const HANDLE_STDOUT: usize = 2;
-const HANDLE_STDERR: usize = 3;
-
+/// Whether `handle` is one of the standard streams.
 fn is_sentinel(handle: *mut u8) -> bool {
-    let h = handle as usize;
-    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+    handle_stream(handle) != 0
 }
 
 fn get_bhc_handle(handle: *mut u8) -> Option<&'static mut BhcHandle> {
@@ -4009,27 +4562,27 @@ fn get_bhc_handle(handle: *mut u8) -> Option<&'static mut BhcHandle> {
 // Standard handle accessors
 // ----------------------------------------------------------------------------
 
-/// Return sentinel pointer for stdin.
+/// The stdin handle.
 #[no_mangle]
 pub extern "C" fn bhc_stdin() -> *mut u8 {
-    HANDLE_STDIN as *mut u8
+    std::ptr::addr_of!(STDIN_HANDLE) as *mut u8
 }
 
 /// Whether `handle` is the stdin handle.
 pub(crate) fn is_stdin_handle(handle: *mut u8) -> bool {
-    handle as usize == HANDLE_STDIN
+    handle_stream(handle) == HANDLE_STDIN
 }
 
-/// Return sentinel pointer for stdout.
+/// The stdout handle.
 #[no_mangle]
 pub extern "C" fn bhc_stdout() -> *mut u8 {
-    HANDLE_STDOUT as *mut u8
+    std::ptr::addr_of!(STDOUT_HANDLE) as *mut u8
 }
 
-/// Return sentinel pointer for stderr.
+/// The stderr handle.
 #[no_mangle]
 pub extern "C" fn bhc_stderr() -> *mut u8 {
-    HANDLE_STDERR as *mut u8
+    std::ptr::addr_of!(STDERR_HANDLE) as *mut u8
 }
 
 // ----------------------------------------------------------------------------
@@ -4039,7 +4592,7 @@ pub extern "C" fn bhc_stderr() -> *mut u8 {
 /// Open a file and return a handle pointer.
 ///
 /// Mode: 0=ReadMode, 1=WriteMode, 2=AppendMode, 3=ReadWriteMode.
-/// Returns null on error.
+/// Raises an `IOException` if the file cannot be opened.
 ///
 /// # Safety
 ///
@@ -4079,15 +4632,10 @@ pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut
 
     match file_result {
         Ok(file) => {
-            let handle = Box::new(BhcHandle {
-                file: Some(file),
-                readable,
-                writable,
-                closed: false,
-            });
+            let handle = Box::new(BhcHandle::on_file(file, readable, writable));
             Box::into_raw(handle) as *mut u8
         }
-        Err(_) => ptr::null_mut(),
+        Err(e) => throw_io_error(path_str, "openFile", &e),
     }
 }
 
@@ -4124,7 +4672,7 @@ pub unsafe extern "C" fn bhc_close_handle(handle: *mut u8) {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         let mut buf = [0u8; 1];
         match crate::concurrent::outside_baton(|| std::io::stdin().read(&mut buf)) {
@@ -4155,7 +4703,7 @@ pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
-    let h = handle as usize;
+    let h = handle_stream(handle);
 
     if h == HANDLE_STDIN {
         let mut line = String::new();
@@ -4220,7 +4768,7 @@ pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     let mut contents = String::new();
 
     let result = if h == HANDLE_STDIN {
@@ -4290,7 +4838,7 @@ pub unsafe extern "C" fn bhc_hPutStr(handle: *mut u8, s: *const c_char) {
         Err(_) => return,
     };
 
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(str_val.as_bytes());
     } else if h == HANDLE_STDERR {
@@ -4317,7 +4865,7 @@ pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
 
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().write_all(s.as_bytes());
     } else if h == HANDLE_STDERR {
@@ -4337,7 +4885,7 @@ pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
 /// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hFlush(handle: *mut u8) {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDOUT {
         let _ = std::io::stdout().flush();
     } else if h == HANDLE_STDERR {
@@ -4390,7 +4938,7 @@ pub extern "C" fn bhc_hIsClosed(handle: *mut u8) -> c_int {
 /// Check if a handle is readable. Returns 1 if readable, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         return 1;
     }
@@ -4411,7 +4959,7 @@ pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
 /// Check if a handle is writable. Returns 1 if writable, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn bhc_hIsWritable(handle: *mut u8) -> c_int {
-    let h = handle as usize;
+    let h = handle_stream(handle);
     if h == HANDLE_STDIN {
         return 0;
     }
@@ -4689,16 +5237,16 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = list;
     while !cur.is_null() {
-        let tag = unsafe { *(cur as *const i64) };
+        let tag = unsafe { object::tag(cur) };
         if tag == 0 {
             break;
         }
-        let head = unsafe { *(cur.add(8) as *const *const c_char) };
+        let head = unsafe { object::field(cur, 0).cast::<c_char>().cast_const() };
         if !head.is_null() {
             let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
             parts.push(s.to_string());
         }
-        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+        cur = unsafe { bhc_force(object::field(cur, 1)) };
     }
     parts
 }
@@ -5315,26 +5863,51 @@ pub extern "C" fn bhc_exit_failure() -> ! {
 
 use num_bigint::BigInt;
 
-/// Create a BigInt from an i64 value. Returns a heap-allocated `Box<BigInt>`.
-#[no_mangle]
-pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
-    let big = Box::new(BigInt::from(n));
-    Box::into_raw(big) as *mut u8
+/// An `Integer` on the heap: the kind word every heap object starts with,
+/// then the number.
+#[repr(C)]
+struct IntegerObject {
+    kind: i64,
+    value: BigInt,
 }
 
-/// Create a BigInt from a C string representation. Returns a heap-allocated `Box<BigInt>`.
+/// Allocate an `Integer`.
+fn new_integer(value: BigInt) -> *mut u8 {
+    Box::into_raw(Box::new(IntegerObject {
+        kind: object::INTEGER,
+        value,
+    })) as *mut u8
+}
+
+/// The number in an `Integer` object.
+///
+/// # Safety
+///
+/// `ptr` must come from [`new_integer`].
+unsafe fn integer<'a>(ptr: *const u8) -> &'a BigInt {
+    // SAFETY: the caller guarantees an `IntegerObject`.
+    unsafe { &(*(ptr as *const IntegerObject)).value }
+}
+
+/// Create an `Integer` from an i64 value.
+#[no_mangle]
+pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
+    new_integer(BigInt::from(n))
+}
+
+/// Create an `Integer` from a C string representation.
 #[no_mangle]
 pub extern "C" fn bhc_integer_from_str(s: *const c_char) -> *mut u8 {
     let c_str = unsafe { CStr::from_ptr(s) };
     let str_val = c_str.to_str().unwrap_or("0");
     let big = str_val.parse::<BigInt>().unwrap_or_default();
-    Box::into_raw(Box::new(big)) as *mut u8
+    new_integer(big)
 }
 
 /// Convert a BigInt to i64 (truncating if necessary).
 #[no_mangle]
 pub extern "C" fn bhc_integer_to_i64(ptr: *const u8) -> i64 {
-    let big = unsafe { &*(ptr as *const BigInt) };
+    let big = unsafe { integer(ptr) };
     use num_traits::ToPrimitive;
     big.to_i64().unwrap_or(0)
 }
@@ -5342,127 +5915,127 @@ pub extern "C" fn bhc_integer_to_i64(ptr: *const u8) -> i64 {
 /// Add two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_add(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a + b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a + b)
 }
 
 /// Subtract two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_sub(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a - b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a - b)
 }
 
 /// Multiply two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_mul(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
-    Box::into_raw(Box::new(a * b)) as *mut u8
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
+    new_integer(a * b)
 }
 
 /// Divide two BigInts (floor division, like Haskell's `div`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_div(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.div_floor(b))) as *mut u8
+    new_integer(a.div_floor(b))
 }
 
 /// Modulo of two BigInts (floor mod, like Haskell's `mod`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_mod(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.mod_floor(b))) as *mut u8
+    new_integer(a.mod_floor(b))
 }
 
 /// Truncating quotient of two BigInts (Haskell's `quot`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_quot(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
-    Box::into_raw(Box::new(a / b)) as *mut u8
+    new_integer(a / b)
 }
 
 /// Truncating remainder of two BigInts (Haskell's `rem`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_rem(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_traits::Zero;
     if b.is_zero() {
         throw_arith("divide by zero");
-        return Box::into_raw(Box::new(BigInt::from(0))) as *mut u8;
+        return new_integer(BigInt::from(0));
     }
-    Box::into_raw(Box::new(a % b)) as *mut u8
+    new_integer(a % b)
 }
 
 /// Negate a BigInt.
 #[no_mangle]
 pub extern "C" fn bhc_integer_negate(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    Box::into_raw(Box::new(-a)) as *mut u8
+    let a = unsafe { integer(a) };
+    new_integer(-a)
 }
 
 /// Absolute value of a BigInt.
 #[no_mangle]
 pub extern "C" fn bhc_integer_abs(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_traits::Signed;
-    Box::into_raw(Box::new(a.abs())) as *mut u8
+    new_integer(a.abs())
 }
 
 /// Signum of a BigInt (-1, 0, or 1).
 #[no_mangle]
 pub extern "C" fn bhc_integer_signum(a: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_traits::Signed;
-    Box::into_raw(Box::new(a.signum())) as *mut u8
+    new_integer(a.signum())
 }
 
 /// GCD of two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_gcd(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.gcd(b))) as *mut u8
+    new_integer(a.gcd(b))
 }
 
 /// Least common multiple of two BigInts, non-negative like `lcm`.
 #[no_mangle]
 pub extern "C" fn bhc_integer_lcm(a: *const u8, b: *const u8) -> *mut u8 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     use num_integer::Integer;
-    Box::into_raw(Box::new(a.lcm(b))) as *mut u8
+    new_integer(a.lcm(b))
 }
 
 /// Equality check for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a == b {
         1
     } else {
@@ -5473,8 +6046,8 @@ pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
 /// Less-than comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a < b {
         1
     } else {
@@ -5485,8 +6058,8 @@ pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
 /// Less-than-or-equal comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a <= b {
         1
     } else {
@@ -5497,8 +6070,8 @@ pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
 /// Greater-than comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a > b {
         1
     } else {
@@ -5509,8 +6082,8 @@ pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
 /// Greater-than-or-equal comparison for two BigInts.
 #[no_mangle]
 pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     if a >= b {
         1
     } else {
@@ -5521,8 +6094,8 @@ pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
 /// Compare two BigInts, returning Ordering tag (0=LT, 1=EQ, 2=GT).
 #[no_mangle]
 pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
-    let b = unsafe { &*(b as *const BigInt) };
+    let a = unsafe { integer(a) };
+    let b = unsafe { integer(b) };
     match a.cmp(b) {
         std::cmp::Ordering::Less => 0,
         std::cmp::Ordering::Equal => 1,
@@ -5533,7 +6106,7 @@ pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
 /// 1 if the BigInt is even, else 0 (`even`/`odd` at `Integer`).
 #[no_mangle]
 pub extern "C" fn bhc_integer_is_even(a: *const u8) -> i64 {
-    let a = unsafe { &*(a as *const BigInt) };
+    let a = unsafe { integer(a) };
     use num_integer::Integer;
     i64::from(a.is_even())
 }
@@ -5546,27 +6119,24 @@ fn integer_enum_thunk(next: BigInt, step: *const u8) -> *mut u8 {
         unsafe {
             let cur = *(env as *const *const u8);
             let step = *(env.add(8) as *const *const u8);
-            let next = &*(cur as *const BigInt) + &*(step as *const BigInt);
+            let next = integer(cur) + integer(step);
             alloc_cons(cur as *mut u8, integer_enum_thunk(next, step))
         }
     }
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
-        let obj = std::alloc::alloc(layout);
-        *(obj as *mut i64) = BHC_TAG_THUNK;
-        *(obj.add(8) as *mut *const u8) = resume as *const u8;
-        *(obj.add(16) as *mut i64) = 2;
-        *(obj.add(24) as *mut *mut u8) = Box::into_raw(Box::new(next)) as *mut u8;
-        *(obj.add(32) as *mut *const u8) = step;
+        let size = object::thunk_size(2);
+        let obj = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(size, 8));
+        let next = new_integer(next);
+        object::init_thunk(obj, resume as *const u8, &[next, step.cast_mut()]);
         obj
     }
 }
 
 /// `[from, from + step ..]` at `Integer`, produced lazily.
 fn integer_enum_unbounded(from: BigInt, step: BigInt) -> *mut u8 {
-    let step = Box::into_raw(Box::new(step)) as *const u8;
-    let next = &from + unsafe { &*(step as *const BigInt) };
-    let head = Box::into_raw(Box::new(from)) as *mut u8;
+    let step = new_integer(step).cast_const();
+    let next = &from + unsafe { integer(step) };
+    let head = new_integer(from);
     unsafe { alloc_cons(head, integer_enum_thunk(next, step)) }
 }
 
@@ -5589,7 +6159,7 @@ fn integer_enum_bounded(from: &BigInt, step: BigInt, to: &BigInt) -> *mut u8 {
         &x >= to
     } {
         let next = &x + &step;
-        elems.push(Box::into_raw(Box::new(x)) as *mut u8);
+        elems.push(new_integer(x));
         x = next;
     }
     let mut list = unsafe { alloc_nil() };
@@ -5614,13 +6184,11 @@ fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
         }
     }
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(40, 8);
-        let obj = std::alloc::alloc(layout);
-        *(obj as *mut i64) = BHC_TAG_THUNK;
-        *(obj.add(8) as *mut *const u8) = resume as *const u8;
-        *(obj.add(16) as *mut i64) = 2;
-        *(obj.add(24) as *mut i64) = next;
-        *(obj.add(32) as *mut i64) = step;
+        let size = object::thunk_size(2);
+        let obj = std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(size, 8));
+        // The captured values are the two scalars themselves.
+        let captured = [next as usize as *mut u8, step as usize as *mut u8];
+        object::init_thunk(obj, resume as *const u8, &captured);
         obj
     }
 }
@@ -5640,23 +6208,23 @@ pub extern "C" fn bhc_enum_from_step_int(from: i64, step: i64) -> *mut u8 {
 /// `enumFrom` at `Integer`: `[from ..]`, lazily.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_integer(from: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
+    let from = unsafe { integer(from) };
     integer_enum_unbounded(from.clone(), BigInt::from(1))
 }
 
 /// `enumFromThen` at `Integer`: `[from, then ..]`, lazily.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_then_integer(from: *const u8, then: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let then = unsafe { &*(then as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let then = unsafe { integer(then) };
     integer_enum_unbounded(from.clone(), then - from)
 }
 
 /// `enumFromTo` at `Integer`: `[from .. to]`.
 #[no_mangle]
 pub extern "C" fn bhc_enum_from_to_integer(from: *const u8, to: *const u8) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let to = unsafe { &*(to as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let to = unsafe { integer(to) };
     integer_enum_bounded(from, BigInt::from(1), to)
 }
 
@@ -5667,9 +6235,9 @@ pub extern "C" fn bhc_enum_from_then_to_integer(
     then: *const u8,
     to: *const u8,
 ) -> *mut u8 {
-    let from = unsafe { &*(from as *const BigInt) };
-    let then = unsafe { &*(then as *const BigInt) };
-    let to = unsafe { &*(to as *const BigInt) };
+    let from = unsafe { integer(from) };
+    let then = unsafe { integer(then) };
+    let to = unsafe { integer(to) };
     integer_enum_bounded(from, then - from, to)
 }
 
@@ -5678,10 +6246,10 @@ pub extern "C" fn bhc_enum_from_then_to_integer(
 pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut u8 {
     let mut best: *mut u8 = std::ptr::null_mut();
     let mut cur = unsafe { bhc_force(list) };
-    while !cur.is_null() && unsafe { *(cur as *const i64) } == 1 {
-        let head = unsafe { *(cur.add(8) as *const *mut u8) };
+    while !cur.is_null() && unsafe { object::tag(cur) } == 1 {
+        let head = unsafe { object::field(cur, 0) };
         let better = best.is_null() || {
-            let (h, b) = unsafe { (&*(head as *const BigInt), &*(best as *const BigInt)) };
+            let (h, b) = unsafe { (integer(head), integer(best)) };
             if want_max != 0 {
                 h > b
             } else {
@@ -5691,7 +6259,7 @@ pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut
         if better {
             best = head;
         }
-        cur = unsafe { bhc_force(*(cur.add(16) as *const *mut u8)) };
+        cur = unsafe { bhc_force(object::field(cur, 1)) };
     }
     if best.is_null() {
         let which = if want_max != 0 { "maximum" } else { "minimum" };
@@ -5703,7 +6271,7 @@ pub extern "C" fn bhc_integer_list_extreme(list: *mut u8, want_max: i64) -> *mut
 /// Show a BigInt as a C string.
 #[no_mangle]
 pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
-    let big = unsafe { &*(ptr as *const BigInt) };
+    let big = unsafe { integer(ptr) };
     let s = big.to_string();
     let c_string = CString::new(s).unwrap_or_else(|_| CString::new("0").unwrap());
     c_string.into_raw()
@@ -6199,9 +6767,13 @@ mod tests {
         let stdin = bhc_stdin();
         let stdout = bhc_stdout();
         let stderr = bhc_stderr();
-        assert_eq!(stdin as usize, HANDLE_STDIN);
-        assert_eq!(stdout as usize, HANDLE_STDOUT);
-        assert_eq!(stderr as usize, HANDLE_STDERR);
+        assert_eq!(handle_stream(stdin), HANDLE_STDIN);
+        assert_eq!(handle_stream(stdout), HANDLE_STDOUT);
+        assert_eq!(handle_stream(stderr), HANDLE_STDERR);
+        // Each is a heap object, not a number in a pointer's place.
+        for handle in [stdin, stdout, stderr] {
+            assert_eq!(unsafe { object::tag(handle) }, object::HANDLE);
+        }
         assert!(is_sentinel(stdin));
         assert!(is_sentinel(stdout));
         assert!(is_sentinel(stderr));
@@ -6294,7 +6866,7 @@ mod tests {
         // A Haskell `String` now: a cons list, not a C string.
         let name = bhc_get_prog_name();
         assert!(!name.is_null());
-        assert_eq!(unsafe { *(name as *const i64) }, 1, "a non-empty cons cell");
+        assert_eq!(unsafe { object::tag(name) }, 1, "a non-empty cons cell");
     }
 
     #[test]
@@ -6309,7 +6881,7 @@ mod tests {
         let args = bhc_get_args();
         assert!(!args.is_null());
         // At minimum there should be the program name
-        let tag = unsafe { *(args as *const i64) };
+        let tag = unsafe { object::tag(args) };
         assert!(tag == 0 || tag == 1); // nil or cons
     }
 
@@ -6335,5 +6907,31 @@ mod tests {
 
         unsafe { bhc_close_handle(h) };
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod ffloat_tests {
+    use super::format_ffloat;
+
+    #[test]
+    fn show_ffloat_matches_ghc() {
+        assert_eq!(format_ffloat(3.14159, Some(2)), "3.14");
+        assert_eq!(format_ffloat(2.675, Some(2)), "2.68");
+        assert_eq!(format_ffloat(0.001234, Some(3)), "0.001");
+        assert_eq!(format_ffloat(0.0016, Some(3)), "0.002");
+        assert_eq!(format_ffloat(9.999, Some(2)), "10.00");
+        assert_eq!(format_ffloat(1.5, Some(0)), "2");
+        assert_eq!(format_ffloat(-2.5, Some(1)), "-2.5");
+        assert_eq!(format_ffloat(3.0, None), "3.0");
+        assert_eq!(format_ffloat(0.01, None), "0.01");
+        assert_eq!(format_ffloat(1e22, None), "10000000000000000000000.0");
+        assert_eq!(format_ffloat(123.456, Some(1)), "123.5");
+        assert_eq!(format_ffloat(0.0, Some(2)), "0.00");
+        // Exactly half rounds to even, as GHC's roundTo.
+        assert_eq!(format_ffloat(2.25, Some(1)), "2.2");
+        assert_eq!(format_ffloat(2.35, Some(1)), "2.4");
+        assert_eq!(format_ffloat(0.5, Some(0)), "0");
+        assert_eq!(format_ffloat(2.5, Some(0)), "2");
     }
 }

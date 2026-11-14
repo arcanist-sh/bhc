@@ -177,6 +177,7 @@ impl E2ERunner {
                         // Skip source, expected output, and config files
                         if !name_str.ends_with(".hs")
                             && name_str != "expected.txt"
+                            && name_str != "expected_stderr.txt"
                             && name_str != "test.toml"
                         {
                             let dest = test_work_dir.join(name);
@@ -225,6 +226,17 @@ impl E2ERunner {
                 actual: output.stdout,
                 diff: comparison.diff(),
             });
+        }
+
+        if let Some(expected_stderr) = &test_case.expected_stderr {
+            let comparison = GoldenComparison::new(expected_stderr, &output.stderr);
+            if !comparison.matches() {
+                return Ok(E2EResult::OutputMismatch {
+                    expected: expected_stderr.clone(),
+                    actual: output.stderr,
+                    diff: format!("stderr differs:\n{}", comparison.diff()),
+                });
+            }
         }
 
         // Clean up artifacts if not keeping them

@@ -33,6 +33,7 @@
 pub mod builder;
 pub mod bytearray;
 pub mod bytestring;
+pub mod io_error;
 pub mod lazy_bytestring;
 pub mod lazy_text;
 pub mod simd;

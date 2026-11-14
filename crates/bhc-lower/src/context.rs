@@ -70,11 +70,10 @@ impl DefKind {
     }
 }
 
-/// Builtins that type-check but abort at run time. Threads, `MVar`s and `Chan`s
-/// run only under the closure IO model, so the eager model (and with it
-/// WebAssembly) reports them all (#38). Using one is a warning rather than an
-/// error, so a module that merely mentions them (pandoc's `Text.Pandoc.Process`)
-/// still compiles.
+/// Builtins that type-check but abort at run time on WebAssembly, which has no
+/// threads yet; every native target runs them, under either IO model (#38,
+/// #75). Using one is a warning rather than an error, so a module that merely
+/// mentions them (pandoc's `Text.Pandoc.Process`) still compiles.
 const UNIMPLEMENTED_BUILTINS: &[&str] = &[
     "forkIO",
     "forkOS",
@@ -261,6 +260,10 @@ pub struct LowerContext {
     current_scope: ScopeId,
     /// Definition information.
     pub defs: DefMap,
+    /// The Prelude's own value bindings, as defined before any module is
+    /// lowered. A module may define a `show` or an `==` of its own, which
+    /// shadows the unqualified name; `Prelude.show` still means this one.
+    prelude_values: FxHashMap<Symbol, DefId>,
     /// Type synonyms loaded from `.bhi` interfaces (name, params, body).
     /// The interface loader fills this; the driver hands it to the type
     /// checker so synonyms like `type RowHead = [Cell]` expand across
@@ -373,6 +376,7 @@ impl LowerContext {
             errors: Vec::new(),
             warnings: Vec::new(),
             unimplemented_defs: FxHashSet::default(),
+            prelude_values: FxHashMap::default(),
             import_aliases: FxHashMap::default(),
             qualified_names: FxHashMap::default(),
             type_signatures: FxHashMap::default(),
@@ -387,6 +391,7 @@ impl LowerContext {
         let mut ctx = Self::new();
         ctx.define_builtins();
         ctx.define_stubs();
+        ctx.prelude_values = ctx.scopes[ctx.current_scope.index()].values.clone();
         ctx
     }
 
@@ -590,6 +595,11 @@ impl LowerContext {
             "execState",
             "execStateT",
             "lift",
+            // System.IO.Unsafe and Debug.Trace
+            "unsafePerformIO",
+            "unsafeDupablePerformIO",
+            "trace",
+            "traceIO",
             // Exception handling
             "catch",
             "try",
@@ -1196,6 +1206,8 @@ impl LowerContext {
             "Data.ByteString.isSuffixOf",
             "Data.ByteString.readFile",
             "Data.ByteString.writeFile",
+            "Data.ByteString.putStr",
+            "Data.ByteString.putStrLn",
             // Container PrimOps: Data.Text.Lazy (chunked lazy text)
             "Data.Text.Lazy.empty",
             "Data.Text.Lazy.fromStrict",
@@ -1297,6 +1309,22 @@ impl LowerContext {
             // as `$splice (embedFile "f")` — the placeholder scheme gives the
             // splice a fresh result type per use.
             "$splice",
+            // `Floating`/`RealFloat` functions the Prelude exports that were
+            // not bound at all. Typed by name in typeck's
+            // `register_lowered_builtins`, so their position here is free.
+            "asin",
+            "acos",
+            "atan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "asinh",
+            "acosh",
+            "atanh",
+            "atan2",
+            "logBase",
+            "isNaN",
+            "isInfinite",
         ];
 
         for name in builtin_funcs {
@@ -1307,6 +1335,31 @@ impl LowerContext {
             let def_id = self.fresh_def_id();
             self.define(def_id, sym, DefKind::Value, Span::default());
             self.bind_value(sym, def_id);
+        }
+
+        // Builtins that live in a module bhc otherwise stubs: bind the
+        // module-qualified name to the builtin too, so `Debug.Trace.trace`
+        // does not resolve through the bare name to a same-named definition
+        // of the importing module (pandoc's `PandocMonad` class has a `trace`
+        // method and calls `Debug.Trace.trace` in it).
+        for (module, name) in [
+            ("Debug.Trace", "trace"),
+            ("Debug.Trace", "traceIO"),
+            ("System.IO.Unsafe", "unsafePerformIO"),
+            ("System.IO.Unsafe", "unsafeDupablePerformIO"),
+        ] {
+            if let Some(def_id) = self.lookup_value(Symbol::intern(name)) {
+                self.bind_value(Symbol::intern(&format!("{module}.{name}")), def_id);
+            }
+        }
+
+        // The builtins that desugarings refer to, under names no source can
+        // spell, so a user definition of the same name cannot capture them
+        // (see `builtin_ref`).
+        for name in ["show", "pure", "trace", "compare"] {
+            if let Some(def_id) = self.lookup_value(Symbol::intern(name)) {
+                self.bind_value(Symbol::intern(&format!("builtin${name}")), def_id);
+            }
         }
 
         // Register monad transformer builtins at fixed DefIds (10000+).
@@ -1708,6 +1761,8 @@ impl LowerContext {
             (11271, "Data.ByteString.isSuffixOf"),
             (11272, "Data.ByteString.readFile"),
             (11273, "Data.ByteString.writeFile"),
+            (11274, "Data.ByteString.putStr"),
+            (11275, "Data.ByteString.putStrLn"),
         ];
 
         for &(id, name) in e20_bs_builtins {
@@ -2567,8 +2622,8 @@ impl LowerContext {
     /// Record the `UNIMPLEMENTED_BUILTINS` that importing `module` just bound,
     /// bare and under `qualifier`, so their uses warn (#38).
     pub fn mark_unimplemented_imports(&mut self, module: &str, qualifier: &str) {
-        // They all run under the closure IO model.
-        if !module.starts_with("Control.Concurrent") || bhc_types::io_closure_mode() {
+        // They all run on a native target.
+        if !module.starts_with("Control.Concurrent") || bhc_types::target_has_threads() {
             return;
         }
         for name in UNIMPLEMENTED_BUILTINS {
@@ -2584,7 +2639,21 @@ impl LowerContext {
     /// Returns true if a warning was emitted.
     pub fn warn_if_stub(&mut self, def_id: DefId, name: &str, span: Span) -> bool {
         if let Some(info) = self.defs.get(&def_id) {
-            if info.kind.is_stub() {
+            // Declared with the stubs of its module, but code generation
+            // implements it by name: the `System.IO.Error` predicates.
+            let implemented = info.kind == DefKind::StubValue
+                && matches!(
+                    name.rsplit('.').next().unwrap_or(name),
+                    "isDoesNotExistError"
+                        | "isAlreadyExistsError"
+                        | "isPermissionError"
+                        | "isUserError"
+                        | "isEOFError"
+                        | "isFullError"
+                        | "isAlreadyInUseError"
+                        | "isIllegalOperation"
+                );
+            if info.kind.is_stub() && !implemented {
                 let kind = match info.kind {
                     DefKind::StubValue => "function",
                     DefKind::StubType => "type",
@@ -2790,6 +2859,20 @@ impl LowerContext {
         }
 
         let module = self.import_aliases.get(&qualifier).copied();
+        // `Prelude.show` (or `P.show` under `import qualified Prelude as P`)
+        // is the Prelude's, whatever the module defines under that name.
+        // Resolved through the unqualified name, as below, it found the
+        // module's own `show`: a definition written in terms of the
+        // Prelude's called itself.
+        let names_prelude =
+            qualifier.as_str() == "Prelude" || module.is_some_and(|m| m.as_str() == "Prelude");
+        if names_prelude {
+            for m in &variants {
+                if let Some(def_id) = self.prelude_values.get(&Symbol::intern(m)) {
+                    return Some(*def_id);
+                }
+            }
+        }
         for m in &variants {
             // Direct lookup of "Qualifier.member".
             let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), m));

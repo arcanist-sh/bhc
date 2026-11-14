@@ -13,16 +13,24 @@
 //! (`outside_baton`). When no thread can run, the baton is idle, and an
 //! idle thread wakes sleepers and waits for readers to come back.
 //!
+//! Pure code is preempted on entry to a function and at allocations
+//! (`bhc_preempt`), which check a flag a timer thread sets once per slice. A thread preempted while it evaluates a thunk leaves
+//! it blackholed, and another thread that needs it waits for it
+//! (`wait_for_blackhole`) instead of reporting `<<loop>>`.
+//!
 //! ==== Limits
 //!
-//! * Pure code is not preempted: a thread in a long pure computation keeps
-//!   the baton until its next IO step.
+//! * A loop inside one function that neither calls nor allocates (such as a
+//!   builtin numeric loop) is not preempted.
+//! * An exception thrown to a thread in pure code is raised at its next IO
+//!   step: pure code does not check for one.
 //! * An exception thrown to a thread waiting for stdin is raised when the read
 //!   returns.
 //! * `throwTo` and `killThread` reach a thread where it next runs: the
 //!   other thread is always parked, blocked or waiting for the baton, so the
 //!   exception is raised as it returns from there, and its handlers run.
-//!   `mask` does not defer them.
+//!   As in GHC, `mask` defers it until the thread unmasks or blocks, and
+//!   `uninterruptibleMask` until it unmasks; the thrower waits meanwhile.
 //! * An RTS panic in a forked thread aborts the program. A thrown exception
 //!   ends only that thread, and is reported on stderr as GHC does, except
 //!   `ThreadKilled`.
@@ -30,7 +38,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -55,22 +63,57 @@ struct Waiter {
     is_read: bool,
 }
 
-/// An `MVar`. The object header makes it an evaluated heap object, so
+/// A value an `MVar` or a `Chan` holds. GHC's are lazy in their contents:
+/// `newMVar (error "x")` is fine until someone uses the value. Codegen stores a
+/// still-unevaluated argument as a thunk and says so; the reader forces it.
+/// The flag travels with the value because nothing in a word tells a thunk
+/// from an unboxed scalar.
+#[derive(Clone, Copy)]
+struct Slot {
+    ptr: *mut u8,
+    lazy: bool,
+}
+
+impl Slot {
+    const EMPTY: Slot = Slot {
+        ptr: std::ptr::null_mut(),
+        lazy: false,
+    };
+
+    fn new(ptr: *mut u8, lazy: bool) -> Slot {
+        Slot { ptr, lazy }
+    }
+
+    /// The value, evaluating a lazily stored one. Called without the lock
+    /// held: the evaluation runs Haskell code, which may block or be
+    /// preempted. A thunk that throws leaves the exception pending and yields
+    /// null, as every blocking operation does.
+    fn resolve(self) -> *mut u8 {
+        if self.lazy {
+            // SAFETY: a lazy slot holds a thunk built by codegen.
+            unsafe { crate::ffi::bhc_force(self.ptr) }
+        } else {
+            self.ptr
+        }
+    }
+}
+
+/// An `MVar`. Its first word is the kind word of a heap object, so
 /// `bhc_force` leaves it alone. Fields are only touched under the `SCHED` lock.
 #[repr(C)]
 pub struct MVar {
-    tag: i64,
+    kind: i64,
     full: bool,
-    value: *mut u8,
+    value: Slot,
     waiters: VecDeque<Waiter>,
-    putters: VecDeque<(u64, *mut u8)>,
+    putters: VecDeque<(u64, Slot)>,
 }
 
 /// A `Chan`: an unbounded queue, with threads waiting when it is empty.
 #[repr(C)]
 pub struct Chan {
-    tag: i64,
-    items: VecDeque<*mut u8>,
+    kind: i64,
+    items: VecDeque<Slot>,
     readers: VecDeque<u64>,
 }
 
@@ -81,12 +124,25 @@ enum Blocked {
     Put(*mut MVar),
     ReadChan(*mut Chan),
     Sleep,
+    /// In `throwTo`, until the target receives the exception.
+    ThrowTo(u64),
 }
 
-/// A `ThreadId`, with the header of an evaluated heap object.
+/// Masking states, as `BHC_MASK_STATE` in `ffi.rs` holds them.
+const MASK_UNMASKED: i64 = 0;
+const MASK_UNINTERRUPTIBLE: i64 = 2;
+
+/// Whether a thread in masking state `state` takes an exception thrown to it
+/// now: unmasked always; under `mask` only at an interruptible point, a
+/// blocking operation; under `uninterruptibleMask` never.
+fn deliverable(state: i64, interruptible_point: bool) -> bool {
+    state == MASK_UNMASKED || (interruptible_point && state != MASK_UNINTERRUPTIBLE)
+}
+
+/// A `ThreadId`, behind the kind word of a heap object.
 #[repr(C)]
 pub struct ThreadIdObject {
-    tag: i64,
+    kind: i64,
     id: u64,
 }
 
@@ -99,7 +155,7 @@ struct Sched {
     /// How a parked thread is woken, for every live thread.
     wakers: HashMap<u64, Arc<Condvar>>,
     /// Values handed to a thread that blocked in `takeMVar`/`readChan`.
-    delivered: HashMap<u64, *mut u8>,
+    delivered: HashMap<u64, Slot>,
     /// Threads waiting in an `MVar`, a `Chan` or `threadDelay`.
     blocked: HashMap<u64, Blocked>,
     /// Exceptions thrown to a thread that has not run since, raised when it
@@ -107,6 +163,10 @@ struct Sched {
     interrupts: HashMap<u64, *mut u8>,
     /// Threads waiting for stdin without the baton.
     outside: usize,
+    /// The masking state of every thread that is not unmasked.
+    masked: HashMap<u64, i64>,
+    /// Threads waiting in `throwTo` for the target thread, by target.
+    throwers: HashMap<u64, Vec<u64>>,
 }
 
 // SAFETY: the raw pointers are Haskell values, which stay valid because the
@@ -145,6 +205,8 @@ fn lock() -> Guard {
             blocked: HashMap::new(),
             interrupts: HashMap::new(),
             outside: 0,
+            masked: HashMap::new(),
+            throwers: HashMap::new(),
         });
     }
     guard
@@ -228,15 +290,44 @@ fn run_idle() {
     }
 }
 
-/// Raise the exception thrown to this thread since it last ran, if any.
-/// Returns whether there was one.
-fn raise_interrupt(s: &mut Sched, me: u64) -> bool {
-    match s.interrupts.remove(&me) {
-        Some(exception) => {
-            crate::ffi::raise_async(exception);
-            true
-        }
-        None => false,
+/// Raise the exception thrown to this thread since it last ran, if any and
+/// if its masking state lets it (`interruptible_point`: the thread is at a
+/// blocking operation). Returns whether it raised one.
+fn raise_interrupt(s: &mut Sched, me: u64, interruptible_point: bool) -> bool {
+    if !s.interrupts.contains_key(&me)
+        || !deliverable(crate::ffi::current_mask_state(), interruptible_point)
+    {
+        return false;
+    }
+    let exception = s.interrupts.remove(&me).expect("checked above");
+    crate::ffi::raise_async(exception);
+    release_throwers(s, me);
+    true
+}
+
+/// The threads waiting in `throwTo` for `target` can go on: it received the
+/// exception, or finished.
+fn release_throwers(s: &mut Sched, target: u64) {
+    for thrower in s.throwers.remove(&target).unwrap_or_default() {
+        wake(s, thrower);
+    }
+}
+
+/// Record that this thread's masking state is now `state`, and raise an
+/// exception that was deferred while it was masked once it unmasks. The RTS
+/// calls this whenever the state changes.
+pub(crate) fn mask_changed(state: i64) {
+    if !FORKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    if state == MASK_UNMASKED {
+        s.masked.remove(&me);
+        raise_interrupt(s, me, false);
+    } else {
+        s.masked.insert(me, state);
     }
 }
 
@@ -258,11 +349,117 @@ pub(crate) fn safe_point() {
     wake_sleepers(s);
     if s.run_queue.is_empty() {
         SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+        // Thrown to while it ran pure code (`bhc_preempt` deferred it here).
+        raise_interrupt(s, me, false);
         return;
     }
     s.run_queue.push_back(me);
     let mut guard = park(guard, me);
-    raise_interrupt(sched(&mut guard), me);
+    raise_interrupt(sched(&mut guard), me, false);
+}
+
+/// Set by the timer thread once per time slice, and checked by compiled code
+/// at every function entry and by `bhc_alloc`, which call `bhc_preempt` when
+/// it is set. Pure code reaches no IO step, so without it a thread in a long
+/// pure computation would keep the baton until it finished. Nothing sets it
+/// before the first `forkIO`, so a program without threads pays one load.
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static bhc_preempt_requested: AtomicU8 = AtomicU8::new(0);
+
+/// Whether other threads exist, so that preemption can matter.
+#[inline]
+pub(crate) fn forked() -> bool {
+    FORKED.load(Ordering::Relaxed)
+}
+
+/// The id of the running thread, which `bhc_force` records as the owner of a
+/// thunk it is evaluating.
+#[inline]
+pub(crate) fn current_thread() -> u64 {
+    me()
+}
+
+/// The timer thread: ask the running thread to check its slice once per
+/// slice.
+fn run_timer() {
+    loop {
+        std::thread::sleep(TIME_SLICE);
+        bhc_preempt_requested.store(1, Ordering::Relaxed);
+    }
+}
+
+/// A preemption point in pure code: compiled code calls it on entry to a
+/// function, and `bhc_alloc` when it allocates, once `bhc_preempt_requested`
+/// is set. Once the slice is over and another thread is ready, it gives way.
+///
+/// Unlike `safe_point`, it raises no exception thrown to this thread: pure
+/// code does not check for one, so it is raised at the next IO step instead.
+/// It is reached only from compiled code and from allocation, and RTS code
+/// never allocates with a lock held, so giving way here is safe.
+#[no_mangle]
+pub extern "C" fn bhc_preempt() {
+    bhc_preempt_requested.store(0, Ordering::Relaxed);
+    if !FORKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let started = SLICE_START.with(Cell::get);
+    if started.is_some_and(|at| at.elapsed() < TIME_SLICE) {
+        return;
+    }
+    let me = me();
+    let mut guard = lock();
+    let s = sched(&mut guard);
+    wake_sleepers(s);
+    if s.run_queue.is_empty() {
+        SLICE_START.with(|cell| cell.set(Some(Instant::now())));
+        // Keep an exception thrown to it earlier due at the next IO step.
+        defer_interrupt_to_io_step(s, me);
+        return;
+    }
+    s.run_queue.push_back(me);
+    let mut guard = park(guard, me);
+    defer_interrupt_to_io_step(sched(&mut guard), me);
+}
+
+/// An exception thrown to this thread while it was parked in pure code waits
+/// for the next IO step; make that step take `safe_point`'s slow path, which
+/// raises it, instead of waiting for the slice to end.
+fn defer_interrupt_to_io_step(s: &Sched, me: u64) {
+    if s.interrupts.contains_key(&me) {
+        SLICE_START.with(|cell| cell.set(None));
+    }
+}
+
+/// Wait while another thread evaluates a thunk this one needs: it was
+/// preempted in the middle (`alloc_tick`), or blocked in IO inside it. Gives
+/// the baton away until `is_blackhole` turns false, and returns `true` then.
+/// Returns `false` if no thread can ever finish the thunk, because none is
+/// ready and none will wake.
+pub(crate) fn wait_for_blackhole(is_blackhole: impl Fn() -> bool) -> bool {
+    let me = me();
+    loop {
+        let mut guard = lock();
+        let s = sched(&mut guard);
+        let earliest = wake_sleepers(s);
+        if s.run_queue.is_empty() {
+            if earliest.is_none() && s.outside == 0 {
+                return false;
+            }
+            // The owner is blocked: look again once a sleeper or a reader
+            // has had the chance to run.
+            s.sleepers
+                .push((Instant::now() + Duration::from_millis(1), me));
+        } else {
+            s.run_queue.push_back(me);
+        }
+        let mut guard = park(guard, me);
+        defer_interrupt_to_io_step(sched(&mut guard), me);
+        drop(guard);
+        if !is_blackhole() {
+            return true;
+        }
+    }
 }
 
 /// Run `read`, a read from stdin that may block, without the baton, so other
@@ -301,7 +498,7 @@ fn reacquire_baton() {
         IDLE_WAKER.notify_one();
     }
     let mut guard = wait_for_baton(guard, me);
-    raise_interrupt(sched(&mut guard), me);
+    raise_interrupt(sched(&mut guard), me, true);
 }
 
 /// Before a read from `handle` in another runtime library (`Data.Text.IO`,
@@ -343,17 +540,43 @@ fn park(mut guard: Guard, me: u64) -> Guard {
 }
 
 /// Park this thread where `blocked` says until it is woken. Returns `false` if
-/// it was woken by an exception thrown to it, which is then pending.
+/// it was woken by an exception thrown to it, which is then pending. Blocking
+/// is interruptible: an exception deferred under `mask` is raised here instead,
+/// without blocking.
 fn park_blocked(mut guard: Guard, me: u64, blocked: Blocked) -> (Guard, bool) {
+    if raise_interrupt(sched(&mut guard), me, true) {
+        undo_block(sched(&mut guard), me, blocked);
+        return (guard, false);
+    }
     sched(&mut guard).blocked.insert(me, blocked);
     let mut guard = park(guard, me);
     let s = sched(&mut guard);
     s.blocked.remove(&me);
-    if raise_interrupt(s, me) {
+    if raise_interrupt(s, me, true) {
         s.delivered.remove(&me);
         return (guard, false);
     }
     (guard, true)
+}
+
+/// Take `thread` out of whatever `blocked` names: the queue of an `MVar` or a
+/// `Chan`, the sleepers, or a target's throwers.
+fn undo_block(s: &mut Sched, thread: u64, blocked: Blocked) {
+    // SAFETY: a blocked thread's `MVar` or `Chan` stays allocated, and the
+    // lock guards its fields.
+    unsafe {
+        match blocked {
+            Blocked::Take(m) => (*m).waiters.retain(|w| w.thread != thread),
+            Blocked::Put(m) => (*m).putters.retain(|(t, _)| *t != thread),
+            Blocked::ReadChan(c) => (*c).readers.retain(|t| *t != thread),
+            Blocked::Sleep => s.sleepers.retain(|(_, t)| *t != thread),
+            Blocked::ThrowTo(target) => {
+                if let Some(throwers) = s.throwers.get_mut(&target) {
+                    throwers.retain(|t| *t != thread);
+                }
+            }
+        }
+    }
 }
 
 fn me() -> u64 {
@@ -367,7 +590,7 @@ fn wake(s: &mut Sched, thread: u64) {
 }
 
 /// Give a blocked thread its value and make it runnable.
-fn wake_with(s: &mut Sched, thread: u64, value: *mut u8) {
+fn wake_with(s: &mut Sched, thread: u64, value: Slot) {
     s.delivered.insert(thread, value);
     wake(s, thread);
 }
@@ -377,7 +600,8 @@ fn wake_with(s: &mut Sched, thread: u64, value: *mut u8) {
 unsafe fn run_action(action: *mut u8) {
     unsafe {
         let action = crate::ffi::bhc_force(action);
-        let code = *(action as *const extern "C" fn(*mut u8) -> *mut u8);
+        let code: extern "C" fn(*mut u8) -> *mut u8 =
+            std::mem::transmute(bhc_rts_alloc::object::closure_code(action));
         code(action);
     }
 }
@@ -403,14 +627,26 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
                 eprintln!("forkIO: cannot create the idle thread: {e}");
                 std::process::exit(1)
             });
+        std::thread::Builder::new()
+            .name("bhc-timer".to_string())
+            .spawn(run_timer)
+            .unwrap_or_else(|e| {
+                eprintln!("forkIO: cannot create the timer thread: {e}");
+                std::process::exit(1)
+            });
         SLICE_START.with(|cell| cell.set(Some(Instant::now())));
     }
+    // A forked thread starts in its parent's masking state, as in GHC.
+    let parent_mask = crate::ffi::current_mask_state();
     let mut guard = lock();
     let s = sched(&mut guard);
     let id = s.next_id;
     s.next_id += 1;
     s.wakers.insert(id, Arc::new(Condvar::new()));
     s.run_queue.push_back(id);
+    if parent_mask != MASK_UNMASKED {
+        s.masked.insert(id, parent_mask);
+    }
     let action = SendPtr(action);
     std::thread::Builder::new()
         .stack_size(FORKED_THREAD_STACK_BYTES)
@@ -418,19 +654,22 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
             let action = action;
             crate::stack::enter_thread(FORKED_THREAD_STACK_BYTES);
             THIS_THREAD.with(|t| t.set(id));
+            crate::ffi::init_mask_state(parent_mask);
             let mut guard = wait_for_baton(lock(), id);
-            let interrupt = sched(&mut guard).interrupts.remove(&id);
+            // Thrown to before it first ran: unmasked, it ends at once.
+            let thrown = raise_interrupt(sched(&mut guard), id, false);
             drop(guard);
-            match interrupt {
-                // Thrown to before it first ran: it ends at once.
-                Some(exception) => crate::ffi::raise_async(exception),
+            if !thrown {
                 // SAFETY: the caller of `bhc_fork_io` guarantees the closure.
-                None => unsafe { run_action(action.0) },
+                unsafe { run_action(action.0) };
             }
             crate::ffi::report_thread_exception();
             let mut guard = lock();
             let s = sched(&mut guard);
             s.wakers.remove(&id);
+            s.masked.remove(&id);
+            s.interrupts.remove(&id);
+            release_throwers(s, id);
             hand_off(s);
         })
         .unwrap_or_else(|e| {
@@ -441,8 +680,26 @@ pub unsafe extern "C" fn bhc_fork_io(action: *mut u8) -> *mut u8 {
     new_thread_id(id)
 }
 
+/// The `ThreadId` object of thread `id`: one object per thread.
+///
+/// `==` on two `ThreadId`s compares the two words, as it does for any type
+/// the compiler has no equality for. With a fresh object from every
+/// `myThreadId`, a thread's id was not equal to itself, and no `ThreadId`
+/// could be found in a list or a map.
 fn new_thread_id(id: u64) -> *mut u8 {
-    Box::into_raw(Box::new(ThreadIdObject { tag: 0, id })) as *mut u8
+    static OBJECTS: std::sync::Mutex<Option<std::collections::HashMap<u64, usize>>> =
+        std::sync::Mutex::new(None);
+    let mut objects = OBJECTS.lock().unwrap_or_else(|e| e.into_inner());
+    let object = *objects
+        .get_or_insert_with(std::collections::HashMap::new)
+        .entry(id)
+        .or_insert_with(|| {
+            Box::into_raw(Box::new(ThreadIdObject {
+                kind: bhc_rts_alloc::object::THREAD_ID,
+                id,
+            })) as usize
+        });
+    object as *mut u8
 }
 
 /// `myThreadId`.
@@ -471,6 +728,11 @@ pub extern "C" fn bhc_thread_delay(micros: i64) {
 /// runnable, and it raises the exception when it next runs, so its handlers
 /// run as in GHC. A finished thread ignores it.
 ///
+/// A target that defers the exception (masked and not blocked, or blocked
+/// under `uninterruptibleMask`) keeps waiting, and the caller waits too, until
+/// the target receives it or finishes: `throwTo` returns only once the
+/// exception is raised, as in GHC.
+///
 /// # Safety
 ///
 /// `thread` must be a pointer returned by `bhc_fork_io` or `bhc_my_thread_id`,
@@ -491,21 +753,24 @@ pub unsafe extern "C" fn bhc_throw_to(thread: *mut u8, exception: *mut u8) {
         return;
     }
     s.interrupts.entry(target).or_insert(exception);
-    let Some(blocked) = s.blocked.remove(&target) else {
-        // Runnable, or not started yet: it raises it when it gets the baton.
-        return;
-    };
-    // SAFETY: a blocked thread's `MVar` or `Chan` stays allocated, and the
-    // lock guards its fields.
-    unsafe {
-        match blocked {
-            Blocked::Take(m) => (*m).waiters.retain(|w| w.thread != target),
-            Blocked::Put(m) => (*m).putters.retain(|(t, _)| *t != target),
-            Blocked::ReadChan(c) => (*c).readers.retain(|t| *t != target),
-            Blocked::Sleep => s.sleepers.retain(|(_, t)| *t != target),
+    let mask = s.masked.get(&target).copied().unwrap_or(MASK_UNMASKED);
+    match s.blocked.get(&target).copied() {
+        // Blocking is interruptible: it raises the exception when it runs.
+        Some(blocked) if mask != MASK_UNINTERRUPTIBLE => {
+            s.blocked.remove(&target);
+            undo_block(s, target, blocked);
+            s.run_queue.push_back(target);
+            return;
         }
+        // Runnable or not started, and unmasked: it raises it when it next
+        // gets the baton.
+        None if mask == MASK_UNMASKED => return,
+        // Deferred: wait for it.
+        _ => {}
     }
-    s.run_queue.push_back(target);
+    let me = me();
+    s.throwers.entry(target).or_default().push(me);
+    drop(park_blocked(guard, me, Blocked::ThrowTo(target)));
 }
 
 /// `killThread`: `throwTo` with `ThreadKilled`.
@@ -522,17 +787,15 @@ pub unsafe extern "C" fn bhc_kill_thread(thread: *mut u8) {
 #[no_mangle]
 pub extern "C" fn bhc_new_empty_mvar() -> *mut u8 {
     Box::into_raw(Box::new(MVar {
-        tag: 0,
+        kind: bhc_rts_alloc::object::MVAR,
         full: false,
-        value: std::ptr::null_mut(),
+        value: Slot::EMPTY,
         waiters: VecDeque::new(),
         putters: VecDeque::new(),
     })) as *mut u8
 }
 
-/// `newMVar`.
-#[no_mangle]
-pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
+fn new_full_mvar(value: Slot) -> *mut u8 {
     let mvar = bhc_new_empty_mvar();
     // SAFETY: `mvar` was just allocated and nothing else can see it.
     unsafe {
@@ -541,6 +804,18 @@ pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
         m.value = value;
     }
     mvar
+}
+
+/// `newMVar`.
+#[no_mangle]
+pub extern "C" fn bhc_new_mvar(value: *mut u8) -> *mut u8 {
+    new_full_mvar(Slot::new(value, false))
+}
+
+/// `newMVar` of an unevaluated value: `thunk` is forced by its first reader.
+#[no_mangle]
+pub extern "C" fn bhc_new_mvar_lazy(thunk: *mut u8) -> *mut u8 {
+    new_full_mvar(Slot::new(thunk, true))
 }
 
 /// After the value left a full `MVar`: the first blocked `putMVar` fills it.
@@ -566,10 +841,11 @@ unsafe fn take_or_read(mvar: *mut u8, is_read: bool) -> *mut u8 {
         let value = m.value;
         if !is_read {
             m.full = false;
-            m.value = std::ptr::null_mut();
+            m.value = Slot::EMPTY;
             refill(s, m);
         }
-        return value;
+        drop(guard);
+        return value.resolve();
     }
     m.waiters.push_back(Waiter {
         thread: me,
@@ -579,10 +855,9 @@ unsafe fn take_or_read(mvar: *mut u8, is_read: bool) -> *mut u8 {
     if !woken {
         return std::ptr::null_mut();
     }
-    sched(&mut guard)
-        .delivered
-        .remove(&me)
-        .unwrap_or(std::ptr::null_mut())
+    let value = sched(&mut guard).delivered.remove(&me);
+    drop(guard);
+    value.unwrap_or(Slot::EMPTY).resolve()
 }
 
 /// `takeMVar`: empty the `MVar`, waiting until it is full.
@@ -607,7 +882,7 @@ pub unsafe extern "C" fn bhc_read_mvar(mvar: *mut u8) -> *mut u8 {
 
 /// Store into an empty `MVar`: every waiting `readMVar` sees the value, then
 /// the first waiting `takeMVar` takes it, and otherwise it stays.
-fn fill(s: &mut Sched, m: &mut MVar, value: *mut u8) {
+fn fill(s: &mut Sched, m: &mut MVar, value: Slot) {
     let mut taker = None;
     let mut rest = VecDeque::new();
     while let Some(waiter) = m.waiters.pop_front() {
@@ -635,6 +910,20 @@ fn fill(s: &mut Sched, m: &mut MVar, value: *mut u8) {
 /// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_put_mvar(mvar: *mut u8, value: *mut u8) {
+    unsafe { put_mvar(mvar, Slot::new(value, false)) }
+}
+
+/// `putMVar` of an unevaluated value: `thunk` is forced by its first reader.
+///
+/// # Safety
+///
+/// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_put_mvar_lazy(mvar: *mut u8, thunk: *mut u8) {
+    unsafe { put_mvar(mvar, Slot::new(thunk, true)) }
+}
+
+unsafe fn put_mvar(mvar: *mut u8, value: Slot) {
     if crate::ffi::exception_pending() {
         return;
     }
@@ -652,10 +941,8 @@ pub unsafe extern "C" fn bhc_put_mvar(mvar: *mut u8, value: *mut u8) {
 
 /// A heap object: an ADT's tag followed by its fields.
 fn new_object(tag: i64, fields: &[*mut u8]) -> *mut u8 {
-    let mut words: Vec<usize> = Vec::with_capacity(1 + fields.len());
-    words.push(tag as usize);
-    words.extend(fields.iter().map(|f| *f as usize));
-    Box::into_raw(words.into_boxed_slice()) as *mut usize as *mut u8
+    // SAFETY: the fields are the caller's values, stored and not read here.
+    unsafe { bhc_rts_alloc::object::alloc_con(tag, fields) }
 }
 
 /// `tryTakeMVar`: `Just` the value if it was full, otherwise `Nothing`.
@@ -675,8 +962,13 @@ pub unsafe extern "C" fn bhc_try_take_mvar(mvar: *mut u8) -> *mut u8 {
     }
     let value = m.value;
     m.full = false;
-    m.value = std::ptr::null_mut();
+    m.value = Slot::EMPTY;
     refill(sched(&mut guard), m);
+    drop(guard);
+    let value = value.resolve();
+    if crate::ffi::exception_pending() {
+        return std::ptr::null_mut();
+    }
     new_object(JUST, &[value])
 }
 
@@ -687,6 +979,20 @@ pub unsafe extern "C" fn bhc_try_take_mvar(mvar: *mut u8) -> *mut u8 {
 /// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_try_put_mvar(mvar: *mut u8, value: *mut u8) -> *mut u8 {
+    unsafe { try_put_mvar(mvar, Slot::new(value, false)) }
+}
+
+/// `tryPutMVar` of an unevaluated value: `thunk` is forced by its first reader.
+///
+/// # Safety
+///
+/// `mvar` must be a pointer returned by `bhc_new_mvar` or `bhc_new_empty_mvar`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_try_put_mvar_lazy(mvar: *mut u8, thunk: *mut u8) -> *mut u8 {
+    unsafe { try_put_mvar(mvar, Slot::new(thunk, true)) }
+}
+
+unsafe fn try_put_mvar(mvar: *mut u8, value: Slot) -> *mut u8 {
     const FALSE: i64 = 0;
     const TRUE: i64 = 1;
     let mut guard = lock();
@@ -715,7 +1021,7 @@ pub unsafe extern "C" fn bhc_mvar_finish(mvar: *mut u8, old: *mut u8, new: *mut 
     let mut guard = lock();
     // SAFETY: the caller passes an `MVar`, and the lock guards its fields.
     let m = unsafe { &mut *(mvar as *mut MVar) };
-    fill(sched(&mut guard), m, value);
+    fill(sched(&mut guard), m, Slot::new(value, false));
 }
 
 /// Finish `modifyMVar`: the action returned `pair`, `(new value, result)`. If
@@ -739,8 +1045,8 @@ pub unsafe extern "C" fn bhc_mvar_finish_pair(
     let (new, result) = unsafe {
         let pair = crate::ffi::bhc_force(pair);
         (
-            *(pair.add(8) as *mut *mut u8),
-            *(pair.add(16) as *mut *mut u8),
+            bhc_rts_alloc::object::field(pair, 0),
+            bhc_rts_alloc::object::field(pair, 1),
         )
     };
     // SAFETY: the caller's guarantee for `mvar`.
@@ -752,7 +1058,7 @@ pub unsafe extern "C" fn bhc_mvar_finish_pair(
 #[no_mangle]
 pub extern "C" fn bhc_new_chan() -> *mut u8 {
     Box::into_raw(Box::new(Chan {
-        tag: 0,
+        kind: bhc_rts_alloc::object::CHAN,
         items: VecDeque::new(),
         readers: VecDeque::new(),
     })) as *mut u8
@@ -765,6 +1071,20 @@ pub extern "C" fn bhc_new_chan() -> *mut u8 {
 /// `chan` must be a pointer returned by `bhc_new_chan`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_write_chan(chan: *mut u8, value: *mut u8) {
+    unsafe { write_chan(chan, Slot::new(value, false)) }
+}
+
+/// `writeChan` of an unevaluated value: `thunk` is forced by its reader.
+///
+/// # Safety
+///
+/// `chan` must be a pointer returned by `bhc_new_chan`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_write_chan_lazy(chan: *mut u8, thunk: *mut u8) {
+    unsafe { write_chan(chan, Slot::new(thunk, true)) }
+}
+
+unsafe fn write_chan(chan: *mut u8, value: Slot) {
     if crate::ffi::exception_pending() {
         return;
     }
@@ -793,15 +1113,15 @@ pub unsafe extern "C" fn bhc_read_chan(chan: *mut u8) -> *mut u8 {
     // SAFETY: the caller passes a `Chan`, and the lock guards its fields.
     let c = unsafe { &mut *(chan as *mut Chan) };
     if let Some(value) = c.items.pop_front() {
-        return value;
+        drop(guard);
+        return value.resolve();
     }
     c.readers.push_back(me);
     let (mut guard, woken) = park_blocked(guard, me, Blocked::ReadChan(c));
     if !woken {
         return std::ptr::null_mut();
     }
-    sched(&mut guard)
-        .delivered
-        .remove(&me)
-        .unwrap_or(std::ptr::null_mut())
+    let value = sched(&mut guard).delivered.remove(&me);
+    drop(guard);
+    value.unwrap_or(Slot::EMPTY).resolve()
 }

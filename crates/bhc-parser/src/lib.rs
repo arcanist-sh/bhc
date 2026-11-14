@@ -605,6 +605,32 @@ mod tests {
     }
 
     #[test]
+    fn test_data_decl_kind_signature() {
+        for (kind, arity) in [
+            ("* -> *", 1),
+            ("Type -> Type", 1),
+            ("Type -> (Type -> Type) -> Type", 2),
+            ("Type", 0),
+        ] {
+            let src = format!("data T :: {kind} where\n  C :: T\n");
+            let module = parse_module_ok(&src);
+            match &module.decls[0] {
+                Decl::DataDecl(d) => {
+                    assert_eq!(d.params.len(), arity, "kind {kind}");
+                    assert_eq!(d.gadt_constrs.len(), 1, "kind {kind}");
+                }
+                other => panic!("expected data declaration, got {other:?}"),
+            }
+        }
+        // Named parameters and a kind signature add up.
+        let module = parse_module_ok("data T a :: Type -> Type where\n  C :: T a b\n");
+        match &module.decls[0] {
+            Decl::DataDecl(d) => assert_eq!(d.params.len(), 2),
+            other => panic!("expected data declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parser_creation() {
         let parser = Parser::new("let x = 1 in x", FileId::new(0));
         assert!(!parser.at_eof());
@@ -1448,6 +1474,36 @@ x <&&> y = x && y
             eprintln!("Error: {:?}", d);
         }
         assert!(diags.is_empty(), "Infix function definitions should parse");
+    }
+
+    #[test]
+    fn test_top_level_infix_definition_with_constructor_operand() {
+        // tagsoup's `~==`: the left operand is a constructor pattern, at top
+        // level (it was "unexpected constructor, expected declaration").
+        let src = r#"module Test where
+
+TagOpen n atts ~== TagOpen p patts = n == p && present
+  where present = length atts >= length patts
+_ ~== _ = False
+
+Box a `plus` Box b = Box (a + b)
+
+Box seven = Box 7
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        let names: Vec<String> = module
+            .expect("module")
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::FunBind(f) => Some(f.name.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.iter().any(|n| n == "~=="), "{names:?}");
+        assert!(names.iter().any(|n| n == "plus"), "{names:?}");
+        assert!(names.iter().any(|n| n == "$patbind"), "{names:?}");
     }
 
     #[test]

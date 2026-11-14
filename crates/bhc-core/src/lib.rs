@@ -65,6 +65,7 @@ pub mod eval;
 pub mod monomorphize;
 pub mod numeric_specialize;
 pub mod pretty;
+pub mod rep_coverage;
 pub mod simplify;
 pub mod specialize;
 pub mod uarray;
@@ -95,21 +96,227 @@ impl Idx for ExprId {
 ///
 /// In Core IR, every variable carries its type explicitly.
 /// This enables type-safe transformations and optimizations.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Var {
     /// The variable name (may be compiler-generated).
     pub name: Symbol,
     /// The unique identifier for this variable.
     pub id: VarId,
-    /// The type of this variable.
+    /// The type of this variable, as far as code generation is told it.
+    ///
+    /// Mostly [`Ty::Error`]: the backends infer scalar widths and dispatch
+    /// from this field and from the shape of expressions, and were written
+    /// against it being empty (spec/BHC-BRIEF-0002). It is filled only where
+    /// a consumer is known to read it correctly.
     pub ty: Ty,
+    /// The type the checker gave this variable; [`Ty::Error`] when it is not
+    /// known.
+    ///
+    /// The bridge to a typed Core (#95): this can be filled everywhere
+    /// without disturbing what reads [`Var::ty`], and a consumer moves over
+    /// to it when it is ready. It is what tells a scalar from a pointer in a
+    /// value word (#94, [`Var::rep`]).
+    ///
+    /// Not part of a variable's identity (equality and hashing ignore it) and
+    /// not written to interface files, whose format it would change.
+    #[serde(skip, default = "unknown_ty")]
+    pub checked_ty: Ty,
+}
+
+fn unknown_ty() -> Ty {
+    Ty::Error
+}
+
+impl PartialEq for Var {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.id == other.id && self.ty == other.ty
+    }
+}
+
+impl Eq for Var {}
+
+impl std::hash::Hash for Var {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.id.hash(state);
+        self.ty.hash(state);
+    }
+}
+
+/// How a value is held in a machine word, as far as its type says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rep {
+    /// The type is not known.
+    Unknown,
+    /// A value at a type variable. Today its word is whatever the value's
+    /// own type makes it, a pointer or a scalar's bits, and nothing says
+    /// which; under the uniform representation (#94) it is always a heap
+    /// object. These are the positions where boxing happens.
+    Polymorphic,
+    /// A heap object: a data type, a function, a list, a tuple.
+    Lifted,
+    /// A machine integer (`Int`, `Word` and the sized ones).
+    Int,
+    /// A `Char`.
+    Char,
+    /// A `Double`.
+    Double,
+    /// A `Float`.
+    Float,
+}
+
+impl Rep {
+    /// The representation of a value of type `ty`.
+    ///
+    /// One thing this cannot see: a newtype is erased at run time, so a
+    /// value of `newtype Age = Age Int` is the `Int` itself, while its type
+    /// is a constructor this answers [`Rep::Lifted`] for. Here `Lifted`
+    /// means "a heap object, or a newtype of anything"; [`Rep::of_ty_in`]
+    /// sees through newtypes and is the one to act on.
+    #[must_use]
+    pub fn of_ty(ty: &Ty) -> Self {
+        match ty {
+            Ty::Error => Self::Unknown,
+            Ty::Var(_) => Self::Polymorphic,
+            Ty::Forall(_, body) => Self::of_ty(body),
+            // `m a` at a variable `m` is some applied type: an object.
+            Ty::Con(con) => match con.name.as_str() {
+                "Int" | "Int8" | "Int16" | "Int32" | "Int64" | "Word" | "Word8" | "Word16"
+                | "Word32" | "Word64" => Self::Int,
+                "Char" => Self::Char,
+                "Double" => Self::Double,
+                "Float" => Self::Float,
+                _ => Self::Lifted,
+            },
+            _ => Self::Lifted,
+        }
+    }
+
+    /// The representation of a value of type `ty`, seeing through newtypes
+    /// and type synonyms.
+    ///
+    /// `expansions` maps a newtype's or synonym's name to its parameters and
+    /// the type it stands for. A newtype is erased at run time, so its
+    /// representation is its field's: `newtype Age = Age Int` is an `Int`,
+    /// and `newtype Wrap a = Wrap a` at `Wrap Double` a `Double`.
+    #[must_use]
+    pub fn of_ty_in(ty: &Ty, expansions: &TypeExpansions) -> Self {
+        // A recursive newtype (`newtype Fix f = Fix (f (Fix f))`) stops by
+        // itself once the head is not in the table; the bound is for one
+        // that never does.
+        let mut current = ty.clone();
+        for _ in 0..64 {
+            match expand_head(&current, expansions) {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        Self::of_ty(&current)
+    }
+
+    /// Whether a value of this representation is a scalar, not a heap object.
+    #[must_use]
+    pub fn is_scalar(self) -> bool {
+        matches!(self, Self::Int | Self::Char | Self::Double | Self::Float)
+    }
+}
+
+/// What newtypes and type synonyms stand for: a name to its parameters and
+/// the type it expands to.
+pub type TypeExpansions = rustc_hash::FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>;
+
+/// `ty` with its head expanded once, if the head is a newtype or synonym in
+/// `expansions` applied to as many arguments as it has parameters.
+fn expand_head(ty: &Ty, expansions: &TypeExpansions) -> Option<Ty> {
+    let mut head = ty;
+    while let Ty::Forall(_, body) = head {
+        head = body;
+    }
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, a) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    let Ty::Con(con) = head else {
+        return None;
+    };
+    let (params, body) = expansions.get(&con.name)?;
+    if params.len() != args.len() {
+        return None;
+    }
+    let mut subst = bhc_types::Subst::new();
+    for (param, arg) in params.iter().zip(args) {
+        subst.insert(param, arg.clone());
+    }
+    Some(subst.apply(body))
+}
+
+/// The type recorded for a class dictionary: a compiler-built record of
+/// methods, which has no source type. It only says the value is a heap
+/// object ([`Rep::Lifted`]).
+#[must_use]
+pub fn dictionary_ty() -> Ty {
+    Ty::Con(bhc_types::TyCon::new(
+        Symbol::intern("$Dictionary"),
+        bhc_types::Kind::Star,
+    ))
+}
+
+/// Whether a compiler-generated variable name is a class dictionary's
+/// (`$dictFunctor_IO`, `$dMonad`).
+#[must_use]
+pub fn is_dictionary_name(name: &str) -> bool {
+    name.starts_with("$dict")
+        || name
+            .strip_prefix("$d")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_uppercase()))
+}
+
+/// The checked type of a freshly made variable: the type it was given, or a
+/// dictionary's for a dictionary name, else unknown.
+#[must_use]
+pub fn fresh_checked_ty(name: &str, ty: &Ty) -> Ty {
+    if !matches!(ty, Ty::Error) {
+        ty.clone()
+    } else if is_dictionary_name(name) {
+        dictionary_ty()
+    } else {
+        Ty::Error
+    }
 }
 
 impl Var {
     /// Creates a new variable with the given name, ID, and type.
     #[must_use]
     pub fn new(name: Symbol, id: VarId, ty: Ty) -> Self {
-        Self { name, id, ty }
+        Self {
+            name,
+            id,
+            ty,
+            checked_ty: Ty::Error,
+        }
+    }
+
+    /// This variable with the type the checker gave it.
+    #[must_use]
+    pub fn with_checked_ty(mut self, ty: Ty) -> Self {
+        self.checked_ty = ty;
+        self
+    }
+
+    /// How this variable's value is represented, from the checker's type.
+    /// Does not see through newtypes; see [`Var::rep_in`].
+    #[must_use]
+    pub fn rep(&self) -> Rep {
+        Rep::of_ty(&self.checked_ty)
+    }
+
+    /// How this variable's value is represented, seeing through the
+    /// newtypes and synonyms in `expansions`. This is the one to act on.
+    #[must_use]
+    pub fn rep_in(&self, expansions: &TypeExpansions) -> Rep {
+        Rep::of_ty_in(&self.checked_ty, expansions)
     }
 }
 

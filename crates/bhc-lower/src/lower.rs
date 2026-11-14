@@ -328,6 +328,13 @@ fn process_imports(
         // Try to load the module from the file system
         match loader::load_module(&module_name, search_paths, cache, ctx) {
             Ok(exports) => {
+                for name in loader::missing_imports(&exports, &import.spec) {
+                    ctx.warnings.push(crate::LowerWarning::NotExported {
+                        module: module_name.clone(),
+                        name: name.as_str().to_string(),
+                        span: import.span,
+                    });
+                }
                 // Apply import specification (Only/Hiding)
                 let filtered = loader::apply_import_spec(&exports, &import.spec);
                 // Register the imported names
@@ -615,6 +622,13 @@ pub(crate) fn is_prelude_export(name: &str) -> bool {
 /// import alias (e.g., `T.pack` for `import qualified Data.Text as T`).
 ///
 /// Returns whether bhc knows the module, i.e. it has an export table here.
+/// Exports of a module bhc otherwise stubs that codegen implements by name
+/// (`Numeric.showFFloat`, …): they are values, not stubs, so using one
+/// neither warns nor aborts.
+fn is_implemented_module_export(module_name: &str, export: &str) -> bool {
+    module_name == "Numeric" && matches!(export, "showFFloat" | "showHex" | "showOct")
+}
+
 fn register_standard_module_exports(
     ctx: &mut LowerContext,
     module_name: &str,
@@ -1772,6 +1786,9 @@ fn register_standard_module_exports(
             "hPutNonBlocking",
         ],
         "Data.ByteString.Char8" => &[
+            "putStr",
+            "putStrLn",
+            "reverse",
             "uncons",
             "ByteString",
             "pack",
@@ -1859,6 +1876,11 @@ fn register_standard_module_exports(
             "isDoesNotExistError",
             "isPermissionError",
             "isAlreadyExistsError",
+            "isEOFError",
+            "isUserError",
+            "isFullError",
+            "isAlreadyInUseError",
+            "isIllegalOperation",
             "ioError",
             "userError",
             "catchIOError",
@@ -6125,14 +6147,19 @@ fn register_standard_module_exports(
         //
         // Likewise `nubOrd`/`nubInt` are `nub` (same result, only faster for
         // `Ord` keys); stubbed, pandoc's header identifiers aborted on them.
+        //
+        // `Data.Foldable`'s `for_`, `traverse_` and `foldl'` are the builtins
+        // of those names; as `Data.Foldable.for_` stubs they aborted at run
+        // time, on lists too.
         if matches!(
             module_name,
-            "Data.Traversable" | "Data.Containers.ListUtils"
+            "Data.Traversable" | "Data.Containers.ListUtils" | "Data.Foldable"
         ) {
-            let target = match export {
-                "fmapDefault" => Some("fmap"),
-                "foldMapDefault" => Some("foldMap"),
-                "nubOrd" | "nubInt" => Some("nub"),
+            let target = match (module_name, export) {
+                (_, "fmapDefault") => Some("fmap"),
+                (_, "foldMapDefault") => Some("foldMap"),
+                (_, "nubOrd" | "nubInt") => Some("nub"),
+                ("Data.Foldable", "for_" | "traverse_" | "foldl'" | "foldMap") => Some(export),
                 _ => None,
             };
             if let Some(def) = target.and_then(|t| ctx.lookup_value(Symbol::intern(t))) {
@@ -6267,12 +6294,15 @@ fn register_standard_module_exports(
                             Span::default(),
                         );
                     } else {
-                        ctx.define(
-                            qual_def_id,
-                            qual_def_name,
-                            DefKind::StubValue,
-                            Span::default(),
-                        );
+                        // A function the backend implements is an ordinary
+                        // value: as a stub it warned "external package not
+                        // implemented" at every use.
+                        let kind = if implemented_bytestring_export(module_name, export) {
+                            DefKind::Value
+                        } else {
+                            DefKind::StubValue
+                        };
+                        ctx.define(qual_def_id, qual_def_name, kind, Span::default());
                     }
                     ctx.bind_value(aliased_qualified, qual_def_id);
                 }
@@ -6460,6 +6490,9 @@ fn register_standard_module_exports(
             };
             if is_constructor {
                 ctx.define(def_id, def_name, DefKind::StubConstructor, Span::default());
+            } else if is_implemented_module_export(module_name, export) {
+                // Implemented by codegen by name; not a stub.
+                ctx.define(def_id, def_name, DefKind::Value, Span::default());
             } else {
                 ctx.define(def_id, def_name, DefKind::StubValue, Span::default());
             }
@@ -7851,11 +7884,32 @@ fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
     }
 }
 
+/// Whether `fun arg` is an application of `printf` whose first argument (the
+/// format) is a string literal.
+fn printf_with_literal_format(fun: &ast::Expr, arg: &ast::Expr) -> bool {
+    let mut head = fun;
+    let mut first = arg;
+    while let ast::Expr::App(g, a, _) = head {
+        first = a.as_ref();
+        head = g.as_ref();
+    }
+    let is_printf = match head {
+        ast::Expr::Var(ident, _) | ast::Expr::QualVar(_, ident, _) => {
+            ident.name.as_str() == "printf"
+        }
+        _ => false,
+    };
+    is_printf && matches!(first, ast::Expr::Lit(ast::Lit::String(_), _))
+}
+
 /// Lower an expression.
 fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
     match expr {
         ast::Expr::Var(ident, span) => {
             let name = ident.name;
+            if let Some(desugared) = desugar_base_helper(ctx, None, name, *span) {
+                return desugared;
+            }
             if let Some(def_id) = resolve_var(ctx, name, *span) {
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {
@@ -7870,6 +7924,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // Qualified variable like M.foo or Data.Map.lookup
             let qualifier = Symbol::intern(&module_name.to_string());
             let name = ident.name;
+            if let Some(desugared) = desugar_base_helper(ctx, Some(qualifier), name, *span) {
+                return desugared;
+            }
 
             // Use the qualified name resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_var(qualifier, name) {
@@ -7971,12 +8028,39 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     return lower_expr(ctx, arg);
                 }
             }
+            let warnings_before = ctx.warnings.len();
             let f = lower_expr(ctx, fun);
+            // `printf "<literal>" …` is implemented (hir-to-core formats it);
+            // only a computed format string is left to the stub.
+            if printf_with_literal_format(fun, arg) {
+                let mut i = warnings_before;
+                while i < ctx.warnings.len() {
+                    let is_printf_stub = matches!(&ctx.warnings[i],
+                        crate::LowerWarning::StubUsed { name, .. }
+                            if name.rsplit('.').next() == Some("printf"));
+                    if is_printf_stub {
+                        ctx.warnings.remove(i);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
             let a = lower_expr(ctx, arg);
             hir::Expr::App(Box::new(f), Box::new(a), *span)
         }
 
         ast::Expr::Infix(lhs, op, rhs, span) => {
+            // A backtick-infix base helper (``(==) `on` isDigit``,
+            // ``f `comparing` g`` is rare but legal): the desugared lambda
+            // applied to both operands, as for the prefix spelling.
+            if matches!(op.name.as_str(), "on" | "comparing") {
+                if let Some(helper) = desugar_base_helper(ctx, None, op.name, *span) {
+                    let l = lower_expr(ctx, lhs);
+                    let r = lower_expr(ctx, rhs);
+                    let app1 = hir::Expr::App(Box::new(helper), Box::new(l), *span);
+                    return hir::Expr::App(Box::new(app1), Box::new(r), *span);
+                }
+            }
             // `f =<< m` IS `m >>= f` (Haskell report: `(=<<) = flip (>>=)`).
             // Carried through as its own operator, every later stage needs a
             // flipped twin of whatever it does for `>>=` — and the monad
@@ -8882,6 +8966,121 @@ fn operator_is_builtin(ctx: &LowerContext, name: Symbol) -> bool {
     ctx.lookup_value(name)
         .and_then(|d| ctx.lookup_def(d))
         .is_some_and(|info| info.span == Span::DUMMY)
+}
+
+/// `Debug.Trace`'s helpers, in terms of `trace` and `show`, as base defines
+/// them:
+///
+/// - `traceShow a b`  is `trace (show a) b`
+/// - `traceShowId a`  is `trace (show a) a`
+/// - `traceM s`       is `trace s (pure ())`
+/// - `traceShowM a`   is `trace (show a) (pure ())`
+///
+/// and two `Data.Function`/`Data.Ord` combinators:
+///
+/// - `on op f a b`    is `op (f a) (f b)`
+/// - `comparing f a b` is `compare (f a) (f b)`
+///
+/// Desugared here rather than given codegen of their own so `show` and
+/// `compare` resolve through the usual class machinery, user types with
+/// derived instances included. Only a reference that resolves to the builtin
+/// (or the `Debug.Trace` stub) is rewritten; a user's own `traceM` or `on` is
+/// left alone.
+fn desugar_base_helper(
+    ctx: &mut LowerContext,
+    qualifier: Option<Symbol>,
+    name: Symbol,
+    span: Span,
+) -> Option<hir::Expr> {
+    let helper = name.as_str();
+    if !matches!(
+        helper,
+        "traceShow" | "traceShowId" | "traceM" | "traceShowM" | "comparing" | "on"
+    ) {
+        return None;
+    }
+    let def_id = match qualifier {
+        Some(q) => ctx.resolve_qualified_var(q, name)?,
+        None => ctx.lookup_value(name)?,
+    };
+    let info = ctx.lookup_def(def_id)?;
+    if matches!(helper, "comparing" | "on") {
+        // `comparing` is a real builtin, but its codegen compared the keys as
+        // machine integers (and its scheme fixed them to `Int`): `sortBy
+        // (comparing area)` with a `Double` key was a type error. As in base,
+        // `comparing f a b = compare (f a) (f b)`, so `compare` dispatches on
+        // the key's type. Only the builtin (no source span), not a user's
+        // own `comparing`. Likewise `on op f a b = op (f a) (f b)`: lowered
+        // only as a saturated builtin, `(==) \`on\` isDigit` passed to
+        // `groupBy` and applied there crashed.
+        if !matches!(info.kind, DefKind::Value | DefKind::StubValue) || info.span != Span::default()
+        {
+            return None;
+        }
+    } else if info.kind != DefKind::StubValue {
+        return None;
+    }
+    let ident = |s: &str| bhc_intern::Ident::new(Symbol::intern(s));
+    let var = |s: &str| ast::Expr::Var(ident(s), span);
+    let app = |f: ast::Expr, a: ast::Expr| ast::Expr::App(Box::new(f), Box::new(a), span);
+    let lam = |param: &str, body: ast::Expr| {
+        ast::Expr::Lam(
+            vec![ast::Pat::Var(ident(param), span)],
+            Box::new(body),
+            span,
+        )
+    };
+    let shown = |param: &str| app(var("builtin$show"), var(param));
+    let trace = |msg: ast::Expr, value: ast::Expr| app(app(var("builtin$trace"), msg), value);
+    let unit_action = || app(var("builtin$pure"), ast::Expr::Con(ident("()"), span));
+    let desugared = match helper {
+        "traceShow" => lam(
+            "trace$shown",
+            lam(
+                "trace$value",
+                trace(shown("trace$shown"), var("trace$value")),
+            ),
+        ),
+        "traceShowId" => lam(
+            "trace$value",
+            trace(shown("trace$value"), var("trace$value")),
+        ),
+        "traceM" => lam("trace$message", trace(var("trace$message"), unit_action())),
+        "on" => lam(
+            "on$op",
+            lam(
+                "on$key",
+                lam(
+                    "on$a",
+                    lam(
+                        "on$b",
+                        app(
+                            app(var("on$op"), app(var("on$key"), var("on$a"))),
+                            app(var("on$key"), var("on$b")),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        "comparing" => lam(
+            "comparing$key",
+            lam(
+                "comparing$a",
+                lam(
+                    "comparing$b",
+                    app(
+                        app(
+                            var("builtin$compare"),
+                            app(var("comparing$key"), var("comparing$a")),
+                        ),
+                        app(var("comparing$key"), var("comparing$b")),
+                    ),
+                ),
+            ),
+        ),
+        _ => lam("trace$shown", trace(shown("trace$shown"), unit_action())),
+    };
+    Some(lower_expr(ctx, &desugared))
 }
 
 /// Whether `name` is a MagicHash boxing constructor (`I#`, `C#`, `D#`, `F#`,
@@ -10199,4 +10398,40 @@ mod tests {
 
         assert!(matches!(result, hir::Expr::App(_, _, _)));
     }
+}
+
+/// Whether `export` of the strict `Data.ByteString` or of
+/// `Data.ByteString.Char8` is implemented: by a strict-ByteString primitive
+/// (the Char8 functions are those primitives at `Char`; hir-to-core renames
+/// them) or by a rewrite there (`map`).
+fn implemented_bytestring_export(module: &str, export: &str) -> bool {
+    matches!(module, "Data.ByteString" | "Data.ByteString.Char8")
+        && matches!(
+            export,
+            "empty"
+                | "singleton"
+                | "pack"
+                | "unpack"
+                | "null"
+                | "length"
+                | "head"
+                | "last"
+                | "tail"
+                | "init"
+                | "append"
+                | "cons"
+                | "snoc"
+                | "take"
+                | "drop"
+                | "reverse"
+                | "elem"
+                | "index"
+                | "isPrefixOf"
+                | "isSuffixOf"
+                | "readFile"
+                | "writeFile"
+                | "putStr"
+                | "putStrLn"
+                | "map"
+        )
 }

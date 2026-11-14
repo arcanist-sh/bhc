@@ -877,10 +877,11 @@ fn start_repl(cli: &Cli) -> Result<()> {
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
     if !bhci_exe.exists() {
-        // Release archives ship only `bhc` so far (#50).
+        // Release archives ship `bhci` from v0.2.30 on (#50); an older install
+        // or a source build of `bhc` alone lacks it.
         anyhow::bail!(
-            "the REPL needs `bhci` next to `bhc` ({} is missing); release builds do not \
-             include it yet, so build it from source with `cargo build --release -p bhci` \
+            "the REPL needs `bhci` next to `bhc` ({} is missing); reinstall a release \
+             from v0.2.30 on, or build it from source with `cargo build --release -p bhci` \
              and copy target/release/bhci next to bhc",
             bhci_exe.display()
         );

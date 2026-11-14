@@ -10,20 +10,74 @@
 #![allow(unsafe_code)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
+
+mod persistent;
 
 // ========================================================================
 // Opaque container types
 // ========================================================================
 
-/// Opaque Map type: BTreeMap<Key, *mut u8> behind a Box.
-type RtsMap = BTreeMap<Key, *mut u8>;
+/// A `Map`: a persistent ordered map (see [`persistent`]), so that an insert
+/// or delete, which starts from a copy of the map, shares the old map's
+/// nodes instead of copying every entry.
+type RtsMap = persistent::Map<Key, *mut u8>;
 
-/// Opaque Set type: BTreeSet<Key> behind a Box.
-type RtsSet = BTreeSet<Key>;
+/// A `Set`: a persistent ordered set, for the same reason.
+type RtsSet = persistent::Set<Key>;
+
+/// A container on the heap: the kind word every heap object starts with
+/// (`bhc_rts_alloc::object`), then the collection.
+#[repr(C)]
+struct Owned<T> {
+    kind: i64,
+    value: T,
+}
+
+/// A collection compiled code holds a pointer to.
+trait Kinded {
+    /// Word 0 of the object.
+    const KIND: i64;
+}
+
+impl Kinded for RtsMap {
+    const KIND: i64 = bhc_rts_alloc::object::MAP;
+}
+
+impl Kinded for RtsSet {
+    const KIND: i64 = bhc_rts_alloc::object::SET;
+}
+
+/// Allocate a container object. It is never freed: there is no collector.
+fn new_object<T: Kinded>(value: T) -> *mut u8 {
+    Box::into_raw(Box::new(Owned {
+        kind: T::KIND,
+        value,
+    })) as *mut u8
+}
+
+/// The collection in a container object.
+///
+/// # Safety
+///
+/// `object` must come from [`new_object`] at the same `T`.
+unsafe fn payload<T: Kinded>(object: *const u8) -> *const T {
+    // SAFETY: the caller guarantees an `Owned<T>`.
+    unsafe { std::ptr::addr_of!((*(object as *const Owned<T>)).value) }
+}
+
+/// The collection in a container object, to change in place.
+///
+/// # Safety
+///
+/// As for [`payload`], and nothing else may hold a reference into it.
+unsafe fn payload_mut<T: Kinded>(object: *mut u8) -> *mut T {
+    // SAFETY: the caller guarantees an `Owned<T>`.
+    unsafe { std::ptr::addr_of_mut!((*(object as *mut Owned<T>)).value) }
+}
 
 /// A Map key or Set element: the machine word codegen passes, plus the
 /// content of an interned boxed key (see [`bhc_container_key`]).
@@ -102,19 +156,20 @@ static INTERNED_CONTENT: Mutex<Option<HashMap<i64, Arc<[u8]>>>> = Mutex::new(Non
 /// [`Key::of`] skips the table.
 static ANY_INTERNED: AtomicBool = AtomicBool::new(false);
 
-/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`, 24 bytes.
-/// Canonical definition: `bhc-text`'s `text.rs`.
-const TEXT_HEADER_SIZE: usize = 24;
-
 /// Read the active bytes of a `BhcText`.
 unsafe fn text_key_bytes(text: *const u8) -> Vec<u8> {
-    let data = unsafe { *(text as *const *const u8) };
-    let off = unsafe { *((text as *const u64).add(1)) } as usize;
-    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    use bhc_rts_alloc::object;
+    // SAFETY: the caller guarantees a `Text`.
+    let (data, off, len) = unsafe {
+        (
+            object::bytes_buffer(text),
+            object::bytes_offset(text),
+            object::bytes_len(text),
+        )
+    };
     if data.is_null() || len > (1 << 30) {
         return Vec::new();
     }
-    let _ = TEXT_HEADER_SIZE;
     unsafe { std::slice::from_raw_parts(data.add(off), len) }.to_vec()
 }
 
@@ -124,16 +179,16 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
     let mut out = Vec::new();
     let mut guard = 0usize;
     while !p.is_null() {
-        let tag = unsafe { *(p as *const i64) };
+        let tag = unsafe { bhc_rts_alloc::object::tag(p) };
         if tag != 1 {
             break;
         }
-        let head = unsafe { *(p.add(8) as *const u64) } as u32;
+        let head = unsafe { bhc_rts_alloc::object::field(p, 0) } as u64 as u32;
         if let Some(ch) = char::from_u32(head) {
             let mut buf = [0u8; 4];
             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         }
-        p = unsafe { bhc_prelude::force_heap_object(*(p.add(16) as *const *mut u8)) };
+        p = unsafe { bhc_prelude::force_heap_object(bhc_rts_alloc::object::field(p, 1)) };
         guard += 1;
         if guard > (1 << 24) {
             break;
@@ -149,7 +204,7 @@ const ENUM_KIND_SHIFT: i64 = 16;
 
 /// The constructor tag of a nullary-constructor value (`[tag]`).
 unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
-    let tag = unsafe { *(p as *const i64) };
+    let tag = unsafe { bhc_rts_alloc::object::tag(p) };
     // Big-endian, so byte order is numeric order (constructor order).
     tag.to_be_bytes().to_vec()
 }
@@ -187,7 +242,7 @@ pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
             // Tags below the threshold are the type's field-less
             // constructors; a constructor with fields keeps its address.
             let threshold = kind >> ENUM_KIND_SHIFT;
-            if unsafe { *(ptr as *const i64) } >= threshold {
+            if unsafe { bhc_rts_alloc::object::tag(ptr) } >= threshold {
                 return raw;
             }
             unsafe { enum_key_bytes(ptr) }
@@ -245,9 +300,9 @@ pub unsafe extern "C" fn bhc_map_canon(map_ptr: *mut u8, kind: i64) {
     if map_ptr.is_null() || kind == 0 || !claim_for_canon(map_ptr) {
         return;
     }
-    let m = unsafe { &mut *(map_ptr as *mut RtsMap) };
+    let m = unsafe { &mut *payload_mut::<RtsMap>(map_ptr) };
     let entries: Vec<(i64, *mut u8)> = m.iter().map(|(k, v)| (k.raw, *v)).collect();
-    let mut rekeyed = BTreeMap::new();
+    let mut rekeyed = RtsMap::new();
     for (k, v) in entries {
         rekeyed.insert(Key::of(unsafe { bhc_container_key(kind, k) }), v);
     }
@@ -264,13 +319,109 @@ pub unsafe extern "C" fn bhc_set_canon(set_ptr: *mut u8, kind: i64) {
     if set_ptr.is_null() || kind == 0 || !claim_for_canon(set_ptr) {
         return;
     }
-    let s = unsafe { &mut *(set_ptr as *mut RtsSet) };
+    let s = unsafe { &mut *payload_mut::<RtsSet>(set_ptr) };
     let elems: Vec<i64> = s.iter().map(|k| k.raw).collect();
-    let mut rekeyed = BTreeSet::new();
+    let mut rekeyed = RtsSet::new();
     for e in elems {
         rekeyed.insert(Key::of(unsafe { bhc_container_key(kind, e) }));
     }
     *s = rekeyed;
+}
+
+// ========================================================================
+// Equality
+// ========================================================================
+
+/// The `Bool` an equality closure returned: the tag itself in the word
+/// (0 or 1), or a `Bool` object.
+unsafe fn closure_said_true(result: *mut u8) -> bool {
+    let word = result as usize;
+    if word <= 1 {
+        word != 0
+    } else {
+        // SAFETY: anything else is a pointer to a `Bool` constructor.
+        unsafe { bhc_rts_alloc::object::tag(result) != 0 }
+    }
+}
+
+/// `==` on two maps: the same keys, each with an equal value. Returns 1 or 0.
+///
+/// Keys are compared as the maps order them. Values are compared with
+/// `value_eq`, a closure taking two values, or as machine words when it is
+/// null (right for values that are scalars in the word).
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be null or a map from this crate, and
+/// `value_eq` null or a two-argument closure returning a `Bool`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_map_eq(map1: *mut u8, map2: *mut u8, value_eq: *mut u8) -> i64 {
+    let empty = RtsMap::new();
+    // SAFETY: the caller guarantees maps from this crate.
+    let (m1, m2) = unsafe {
+        (
+            if map1.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsMap>(map1)
+            },
+            if map2.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsMap>(map2)
+            },
+        )
+    };
+    if m1.len() != m2.len() {
+        return 0;
+    }
+    let equal = m1.iter().zip(m2.iter()).all(|((k1, v1), (k2, v2))| {
+        if k1.cmp(k2) != Ordering::Equal {
+            return false;
+        }
+        if value_eq.is_null() {
+            return v1 == v2;
+        }
+        // SAFETY: the caller guarantees a closure of two arguments.
+        unsafe {
+            let code: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+                std::mem::transmute(bhc_rts_alloc::object::closure_code(value_eq));
+            closure_said_true(code(value_eq, *v1, *v2))
+        }
+    });
+    i64::from(equal)
+}
+
+/// `==` on two sets: the same elements, compared as the sets order them.
+/// Returns 1 or 0.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be null or a set from this crate.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_set_eq(set1: *mut u8, set2: *mut u8) -> i64 {
+    let empty = RtsSet::new();
+    // SAFETY: the caller guarantees sets from this crate.
+    let (s1, s2) = unsafe {
+        (
+            if set1.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsSet>(set1)
+            },
+            if set2.is_null() {
+                &empty
+            } else {
+                &*payload::<RtsSet>(set2)
+            },
+        )
+    };
+    let equal = s1.len() == s2.len()
+        && s1
+            .iter()
+            .zip(s2.iter())
+            .all(|(a, b)| a.cmp(b) == Ordering::Equal);
+    i64::from(equal)
 }
 
 // ========================================================================
@@ -280,16 +431,15 @@ pub unsafe extern "C" fn bhc_set_canon(set_ptr: *mut u8, kind: i64) {
 /// Create an empty map.
 #[no_mangle]
 pub extern "C" fn bhc_map_empty() -> *mut u8 {
-    let m: Box<RtsMap> = Box::default();
-    Box::into_raw(m) as *mut u8
+    new_object(RtsMap::new())
 }
 
 /// Create a singleton map.
 #[no_mangle]
 pub extern "C" fn bhc_map_singleton(key: i64, value: *mut u8) -> *mut u8 {
-    let mut m = BTreeMap::new();
+    let mut m = RtsMap::new();
     m.insert(Key::of(key), value);
-    Box::into_raw(Box::new(m)) as *mut u8
+    new_object(m)
 }
 
 /// Check if map is empty. Returns 1 if null, 0 otherwise.
@@ -304,7 +454,7 @@ pub unsafe extern "C" fn bhc_map_null(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
         return 1;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     if m.is_empty() {
         1
     } else {
@@ -324,7 +474,7 @@ pub unsafe extern "C" fn bhc_map_size(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
         return 0;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     m.len() as i64
 }
 
@@ -340,7 +490,7 @@ pub unsafe extern "C" fn bhc_map_member(key: i64, map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
         return 0;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     if m.contains_key(&Key::of(key)) {
         1
     } else {
@@ -363,7 +513,7 @@ pub unsafe extern "C" fn bhc_map_lookup(key: i64, map_ptr: *mut u8) -> *mut u8 {
     if map_ptr.is_null() {
         return ptr::null_mut();
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     match m.get(&Key::of(key)) {
         Some(&v) => v,
         None => ptr::null_mut(),
@@ -387,7 +537,7 @@ pub unsafe extern "C" fn bhc_map_find_with_default(
     if map_ptr.is_null() {
         return default;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     match m.get(&Key::of(key)) {
         Some(&v) => v,
         None => default,
@@ -405,12 +555,12 @@ pub unsafe extern "C" fn bhc_map_find_with_default(
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_insert(key: i64, value: *mut u8, map_ptr: *mut u8) -> *mut u8 {
     let mut m = if map_ptr.is_null() {
-        BTreeMap::new()
+        RtsMap::new()
     } else {
-        (*(map_ptr as *const RtsMap)).clone()
+        (*payload::<RtsMap>(map_ptr)).clone()
     };
     m.insert(Key::of(key), value);
-    Box::into_raw(Box::new(m)) as *mut u8
+    new_object(m)
 }
 
 /// Delete a key from the map. Returns a new map (COW).
@@ -426,9 +576,9 @@ pub unsafe extern "C" fn bhc_map_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
     if map_ptr.is_null() {
         return bhc_map_empty();
     }
-    let mut m = (*(map_ptr as *const RtsMap)).clone();
+    let mut m = (*payload::<RtsMap>(map_ptr)).clone();
     m.remove(&Key::of(key));
-    Box::into_raw(Box::new(m)) as *mut u8
+    new_object(m)
 }
 
 /// Union of two maps (left-biased). Returns a new map.
@@ -442,17 +592,19 @@ pub unsafe extern "C" fn bhc_map_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_union(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     let mut result = if map1.is_null() {
-        BTreeMap::new()
+        RtsMap::new()
     } else {
-        (*(map1 as *const RtsMap)).clone()
+        (*payload::<RtsMap>(map1)).clone()
     };
     if !map2.is_null() {
-        let m2 = &*(map2 as *const RtsMap);
+        let m2 = &*payload::<RtsMap>(map2);
         for (k, &v) in m2.iter() {
-            result.entry(k.clone()).or_insert(v);
+            if !result.contains_key(k) {
+                result.insert(k.clone(), v);
+            }
         }
     }
-    Box::into_raw(Box::new(result)) as *mut u8
+    new_object(result)
 }
 
 /// Intersection of two maps (left-biased). Returns a new map.
@@ -468,14 +620,14 @@ pub unsafe extern "C" fn bhc_map_intersection(map1: *mut u8, map2: *mut u8) -> *
     if map1.is_null() || map2.is_null() {
         return bhc_map_empty();
     }
-    let m1 = &*(map1 as *const RtsMap);
-    let m2 = &*(map2 as *const RtsMap);
+    let m1 = &*payload::<RtsMap>(map1);
+    let m2 = &*payload::<RtsMap>(map2);
     let result: RtsMap = m1
         .iter()
         .filter(|(k, _)| m2.contains_key(k))
         .map(|(k, &v)| (k.clone(), v))
         .collect();
-    Box::into_raw(Box::new(result)) as *mut u8
+    new_object(result)
 }
 
 /// Difference of two maps. Returns a new map with keys in m1 but not m2.
@@ -492,16 +644,16 @@ pub unsafe extern "C" fn bhc_map_difference(map1: *mut u8, map2: *mut u8) -> *mu
         return bhc_map_empty();
     }
     if map2.is_null() {
-        return Box::into_raw(Box::new((*(map1 as *const RtsMap)).clone())) as *mut u8;
+        return new_object((*payload::<RtsMap>(map1)).clone());
     }
-    let m1 = &*(map1 as *const RtsMap);
-    let m2 = &*(map2 as *const RtsMap);
+    let m1 = &*payload::<RtsMap>(map1);
+    let m2 = &*payload::<RtsMap>(map2);
     let result: RtsMap = m1
         .iter()
         .filter(|(k, _)| !m2.contains_key(k))
         .map(|(k, &v)| (k.clone(), v))
         .collect();
-    Box::into_raw(Box::new(result)) as *mut u8
+    new_object(result)
 }
 
 /// Get the keys of a map as a count + array.
@@ -517,7 +669,7 @@ pub unsafe extern "C" fn bhc_map_keys_count(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
         return 0;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     m.len() as i64
 }
 
@@ -534,7 +686,7 @@ pub unsafe extern "C" fn bhc_map_key_at(map_ptr: *mut u8, index: i64) -> i64 {
     if map_ptr.is_null() {
         return 0;
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     m.keys().nth(index as usize).map(|k| k.raw).unwrap_or(0)
 }
 
@@ -552,7 +704,7 @@ pub unsafe extern "C" fn bhc_map_value_at(map_ptr: *mut u8, index: i64) -> *mut 
     if map_ptr.is_null() {
         return ptr::null_mut();
     }
-    let m = &*(map_ptr as *const RtsMap);
+    let m = &*payload::<RtsMap>(map_ptr);
     m.values()
         .nth(index as usize)
         .copied()
@@ -575,8 +727,8 @@ pub unsafe extern "C" fn bhc_map_is_submap_of(map1: *mut u8, map2: *mut u8) -> i
     if map2.is_null() {
         return 0;
     }
-    let m1 = &*(map1 as *const RtsMap);
-    let m2 = &*(map2 as *const RtsMap);
+    let m1 = &*payload::<RtsMap>(map1);
+    let m2 = &*payload::<RtsMap>(map2);
     if m1.keys().all(|k| m2.contains_key(k)) {
         1
     } else {
@@ -591,15 +743,15 @@ pub unsafe extern "C" fn bhc_map_is_submap_of(map1: *mut u8, map2: *mut u8) -> i
 /// Create an empty set.
 #[no_mangle]
 pub extern "C" fn bhc_set_empty() -> *mut u8 {
-    Box::into_raw(Box::new(BTreeSet::<Key>::new())) as *mut u8
+    new_object(RtsSet::new())
 }
 
 /// Create a singleton set.
 #[no_mangle]
 pub extern "C" fn bhc_set_singleton(value: i64) -> *mut u8 {
-    let mut s = BTreeSet::new();
+    let mut s = RtsSet::new();
     s.insert(Key::of(value));
-    Box::into_raw(Box::new(s)) as *mut u8
+    new_object(s)
 }
 
 /// Check if set is empty.
@@ -614,7 +766,7 @@ pub unsafe extern "C" fn bhc_set_null(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 1;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     if s.is_empty() {
         1
     } else {
@@ -634,7 +786,7 @@ pub unsafe extern "C" fn bhc_set_size(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     s.len() as i64
 }
 
@@ -650,7 +802,7 @@ pub unsafe extern "C" fn bhc_set_member(value: i64, set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     if s.contains(&Key::of(value)) {
         1
     } else {
@@ -669,12 +821,12 @@ pub unsafe extern "C" fn bhc_set_member(value: i64, set_ptr: *mut u8) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_insert(value: i64, set_ptr: *mut u8) -> *mut u8 {
     let mut s = if set_ptr.is_null() {
-        BTreeSet::new()
+        RtsSet::new()
     } else {
-        (*(set_ptr as *const RtsSet)).clone()
+        (*payload::<RtsSet>(set_ptr)).clone()
     };
     s.insert(Key::of(value));
-    Box::into_raw(Box::new(s)) as *mut u8
+    new_object(s)
 }
 
 /// Delete a value from the set. Returns a new set (COW).
@@ -690,9 +842,9 @@ pub unsafe extern "C" fn bhc_set_delete(value: i64, set_ptr: *mut u8) -> *mut u8
     if set_ptr.is_null() {
         return bhc_set_empty();
     }
-    let mut s = (*(set_ptr as *const RtsSet)).clone();
+    let mut s = (*payload::<RtsSet>(set_ptr)).clone();
     s.remove(&Key::of(value));
-    Box::into_raw(Box::new(s)) as *mut u8
+    new_object(s)
 }
 
 /// Union of two sets. Returns a new set.
@@ -706,18 +858,18 @@ pub unsafe extern "C" fn bhc_set_delete(value: i64, set_ptr: *mut u8) -> *mut u8
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_union(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     let s1 = if set1.is_null() {
-        BTreeSet::new()
+        RtsSet::new()
     } else {
-        (*(set1 as *const RtsSet)).clone()
+        (*payload::<RtsSet>(set1)).clone()
     };
-    let empty = BTreeSet::new();
+    let empty = RtsSet::new();
     let s2 = if set2.is_null() {
         &empty
     } else {
-        &*(set2 as *const RtsSet)
+        &*payload::<RtsSet>(set2)
     };
-    let result: BTreeSet<Key> = s1.union(s2).cloned().collect();
-    Box::into_raw(Box::new(result)) as *mut u8
+    let result: RtsSet = s1.union(s2).cloned().collect();
+    new_object(result)
 }
 
 /// Intersection of two sets. Returns a new set.
@@ -733,10 +885,10 @@ pub unsafe extern "C" fn bhc_set_intersection(set1: *mut u8, set2: *mut u8) -> *
     if set1.is_null() || set2.is_null() {
         return bhc_set_empty();
     }
-    let s1 = &*(set1 as *const RtsSet);
-    let s2 = &*(set2 as *const RtsSet);
-    let result: BTreeSet<Key> = s1.intersection(s2).cloned().collect();
-    Box::into_raw(Box::new(result)) as *mut u8
+    let s1 = &*payload::<RtsSet>(set1);
+    let s2 = &*payload::<RtsSet>(set2);
+    let result: RtsSet = s1.intersection(s2).cloned().collect();
+    new_object(result)
 }
 
 /// Difference of two sets. Returns a new set.
@@ -753,12 +905,12 @@ pub unsafe extern "C" fn bhc_set_difference(set1: *mut u8, set2: *mut u8) -> *mu
         return bhc_set_empty();
     }
     if set2.is_null() {
-        return Box::into_raw(Box::new((*(set1 as *const RtsSet)).clone())) as *mut u8;
+        return new_object((*payload::<RtsSet>(set1)).clone());
     }
-    let s1 = &*(set1 as *const RtsSet);
-    let s2 = &*(set2 as *const RtsSet);
-    let result: BTreeSet<Key> = s1.difference(s2).cloned().collect();
-    Box::into_raw(Box::new(result)) as *mut u8
+    let s1 = &*payload::<RtsSet>(set1);
+    let s2 = &*payload::<RtsSet>(set2);
+    let result: RtsSet = s1.difference(s2).cloned().collect();
+    new_object(result)
 }
 
 /// Check if set1 is a subset of set2.
@@ -777,8 +929,8 @@ pub unsafe extern "C" fn bhc_set_is_subset_of(set1: *mut u8, set2: *mut u8) -> i
     if set2.is_null() {
         return 0;
     }
-    let s1 = &*(set1 as *const RtsSet);
-    let s2 = &*(set2 as *const RtsSet);
+    let s1 = &*payload::<RtsSet>(set1);
+    let s2 = &*payload::<RtsSet>(set2);
     if s1.is_subset(s2) {
         1
     } else {
@@ -802,8 +954,8 @@ pub unsafe extern "C" fn bhc_set_is_proper_subset_of(set1: *mut u8, set2: *mut u
     if set2.is_null() {
         return 0;
     }
-    let s1 = &*(set1 as *const RtsSet);
-    let s2 = &*(set2 as *const RtsSet);
+    let s1 = &*payload::<RtsSet>(set1);
+    let s2 = &*payload::<RtsSet>(set2);
     if s1.is_subset(s2) && s1.len() < s2.len() {
         1
     } else {
@@ -823,7 +975,7 @@ pub unsafe extern "C" fn bhc_set_elem_count(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     s.len() as i64
 }
 
@@ -840,7 +992,7 @@ pub unsafe extern "C" fn bhc_set_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     s.iter().nth(index as usize).map(|k| k.raw).unwrap_or(0)
 }
 
@@ -858,13 +1010,10 @@ pub unsafe extern "C" fn bhc_map_to_assoc_list(map_ptr: *mut u8) -> *mut u8 {
     if map_ptr.is_null() {
         return list;
     }
-    let m = &*(map_ptr as *const RtsMap);
-    for (k, v) in m.iter().rev() {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let pair = std::alloc::alloc(layout);
-        *(pair as *mut i64) = 0;
-        *(pair.add(8) as *mut *mut u8) = k.raw as *mut u8;
-        *(pair.add(16) as *mut *mut u8) = *v;
+    let m = &*payload::<RtsMap>(map_ptr);
+    for (k, v) in m.iter_rev() {
+        let pair =
+            bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::TUPLE, &[k.raw as *mut u8, *v]);
         list = seq_cons_cell(pair, list);
     }
     list
@@ -882,8 +1031,8 @@ pub unsafe extern "C" fn bhc_set_to_list(set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
         return list;
     }
-    let s = &*(set_ptr as *const RtsSet);
-    for k in s.iter().rev() {
+    let s = &*payload::<RtsSet>(set_ptr);
+    for k in s.iter_rev() {
         list = seq_cons_cell(k.raw as *mut u8, list);
     }
     list
@@ -901,7 +1050,7 @@ pub unsafe extern "C" fn bhc_set_find_min(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
+    let s = &*payload::<RtsSet>(set_ptr);
     s.iter().next().map(|k| k.raw).unwrap_or(0)
 }
 
@@ -917,8 +1066,8 @@ pub unsafe extern "C" fn bhc_set_find_max(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
         return 0;
     }
-    let s = &*(set_ptr as *const RtsSet);
-    s.iter().next_back().map(|k| k.raw).unwrap_or(0)
+    let s = &*payload::<RtsSet>(set_ptr);
+    s.last().map(|k| k.raw).unwrap_or(0)
 }
 
 /// Delete the minimum element. Returns a new set.
@@ -934,9 +1083,9 @@ pub unsafe extern "C" fn bhc_set_delete_min(set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
         return bhc_set_empty();
     }
-    let mut s = (*(set_ptr as *const RtsSet)).clone();
+    let mut s = (*payload::<RtsSet>(set_ptr)).clone();
     s.pop_first();
-    Box::into_raw(Box::new(s)) as *mut u8
+    new_object(s)
 }
 
 /// Delete the maximum element. Returns a new set.
@@ -952,9 +1101,9 @@ pub unsafe extern "C" fn bhc_set_delete_max(set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
         return bhc_set_empty();
     }
-    let mut s = (*(set_ptr as *const RtsSet)).clone();
+    let mut s = (*payload::<RtsSet>(set_ptr)).clone();
     s.pop_last();
-    Box::into_raw(Box::new(s)) as *mut u8
+    new_object(s)
 }
 
 // ========================================================================
@@ -1304,24 +1453,20 @@ pub unsafe extern "C" fn bhc_intset_elem_at(set_ptr: *mut u8, index: i64) -> i64
 
 /// Allocate a nil cons cell `[i64 tag=0]` (24 bytes, matching the cons layout).
 fn seq_nil() -> *mut u8 {
+    // A nil the size of a cons cell, as it has always been allocated here.
+    // SAFETY: the two padding words are never read.
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 0;
-        cell
+        bhc_rts_alloc::object::alloc_con(
+            bhc_rts_alloc::object::NIL,
+            &[std::ptr::null_mut(), std::ptr::null_mut()],
+        )
     }
 }
 
 /// Allocate a cons cell `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
 fn seq_cons_cell(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
-        let cell = std::alloc::alloc(layout);
-        *(cell as *mut i64) = 1;
-        *(cell.add(8) as *mut *mut u8) = head;
-        *(cell.add(16) as *mut *mut u8) = tail;
-        cell
-    }
+    // SAFETY: forwarded to the caller.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 /// Walk a Seq (cons list) into a Vec of its element pointers.
@@ -1331,9 +1476,9 @@ fn seq_cons_cell(head: *mut u8, tail: *mut u8) -> *mut u8 {
 unsafe fn seq_to_vec(seq_ptr: *mut u8) -> Vec<*mut u8> {
     let mut v = Vec::new();
     let mut cur = seq_ptr;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
-        v.push(*(cur.add(8) as *const *mut u8));
-        cur = *(cur.add(16) as *const *mut u8);
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
+        v.push(bhc_rts_alloc::object::field(cur, 0));
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     v
 }
@@ -1357,12 +1502,12 @@ unsafe fn seq_nth(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
     }
     let mut cur = seq_ptr;
     let mut i = idx;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
         if i == 0 {
-            return *(cur.add(8) as *const *mut u8);
+            return bhc_rts_alloc::object::field(cur, 0);
         }
         i -= 1;
-        cur = *(cur.add(16) as *const *mut u8);
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     ptr::null_mut()
 }
@@ -1385,7 +1530,7 @@ pub extern "C" fn bhc_seq_singleton(elem: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         1
     } else {
         0
@@ -1400,9 +1545,9 @@ pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
 pub unsafe extern "C" fn bhc_seq_length(seq_ptr: *mut u8) -> i64 {
     let mut n = 0i64;
     let mut cur = seq_ptr;
-    while !cur.is_null() && *(cur as *const i64) != 0 {
+    while !cur.is_null() && bhc_rts_alloc::object::tag(cur) != 0 {
         n += 1;
-        cur = *(cur.add(16) as *const *mut u8);
+        cur = bhc_rts_alloc::object::field(cur, 1);
     }
     n
 }
@@ -1576,7 +1721,7 @@ pub extern "C" fn bhc_seq_replicate(n: i64, elem: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         0
     } else {
         1
@@ -1590,10 +1735,10 @@ pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
 /// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         ptr::null_mut()
     } else {
-        *(seq_ptr.add(8) as *const *mut u8)
+        bhc_rts_alloc::object::field(seq_ptr, 0)
     }
 }
 
@@ -1603,10 +1748,10 @@ pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         seq_nil()
     } else {
-        *(seq_ptr.add(16) as *const *mut u8)
+        bhc_rts_alloc::object::field(seq_ptr, 1)
     }
 }
 
@@ -1616,7 +1761,7 @@ pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
 /// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+    if seq_ptr.is_null() || bhc_rts_alloc::object::tag(seq_ptr) == 0 {
         0
     } else {
         1

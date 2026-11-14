@@ -6,10 +6,11 @@
 //! # Representation
 //!
 //! ```text
-//! [u64 data_ptr][u64 offset][u64 byte_len][...bytes...]
+//! [i64 kind][u64 data_ptr][u64 offset][u64 byte_len][...bytes...]
 //! ```
 //!
-//! The header is 24 bytes. `data_ptr` points to the start of the
+//! The header is 32 bytes and is stated in `bhc_rts_alloc::object`, which
+//! this module reads and writes it through. `data_ptr` points to the start of the
 //! byte buffer (which may be shared across slices). This enables
 //! zero-copy slicing and allows Text.Encoding to share the byte
 //! buffer directly between Text and ByteString.
@@ -17,8 +18,10 @@
 use std::alloc::{self, Layout};
 use std::ptr;
 
-/// Header: data_ptr (8) + offset (8) + byte_len (8) = 24 bytes.
-const HEADER_SIZE: usize = 24;
+use bhc_rts_alloc::object;
+
+/// The header before a bytestring's own bytes.
+const HEADER_SIZE: usize = object::BYTES_HEADER;
 
 // ============================================================
 // Internal helpers
@@ -26,17 +29,17 @@ const HEADER_SIZE: usize = 24;
 
 /// Read the data pointer from a ByteString header.
 unsafe fn bs_data_ptr(bs: *const u8) -> *const u8 {
-    *(bs as *const *const u8)
+    object::bytes_buffer(bs)
 }
 
 /// Read the byte offset from a ByteString header.
 unsafe fn bs_offset(bs: *const u8) -> usize {
-    *((bs as *const u64).add(1)) as usize
+    object::bytes_offset(bs)
 }
 
 /// Read the byte length from a ByteString header.
 unsafe fn bs_byte_len(bs: *const u8) -> usize {
-    *((bs as *const u64).add(2)) as usize
+    object::bytes_len(bs)
 }
 
 /// Get a slice view of the ByteString's active bytes.
@@ -56,13 +59,9 @@ pub(crate) fn alloc_bs_from_bytes(bytes: &[u8]) -> *mut u8 {
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        // data_ptr = ptr + HEADER_SIZE
+        // The bytes follow the header, and the header points at them.
         let data_start = ptr.add(HEADER_SIZE);
-        (ptr as *mut *mut u8).write(data_start);
-        // offset = 0
-        (ptr as *mut u64).add(1).write(0);
-        // byte_len = bytes.len()
-        (ptr as *mut u64).add(2).write(bytes.len() as u64);
+        object::init_bytes(ptr, data_start, 0, bytes.len());
         // Copy data
         if !bytes.is_empty() {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_start, bytes.len());
@@ -79,9 +78,7 @@ fn alloc_bs_slice(source_data_ptr: *const u8, offset: usize, byte_len: usize) ->
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        (ptr as *mut *const u8).write(source_data_ptr);
-        (ptr as *mut u64).add(1).write(offset as u64);
-        (ptr as *mut u64).add(2).write(byte_len as u64);
+        object::init_bytes(ptr, source_data_ptr, offset, byte_len);
         ptr
     }
 }
@@ -118,16 +115,15 @@ pub extern "C" fn bhc_bs_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let byte_val = head_raw as i64 as u8;
             result.push(byte_val);
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -517,17 +513,16 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     let mut current = path_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let codepoint = head_raw as i64;
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -535,7 +530,24 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     }
     match std::fs::read(&path_str) {
         Ok(bytes) => alloc_bs_from_bytes(&bytes),
-        Err(_) => bhc_bs_empty(),
+        Err(e) => crate::io_error::raise(&path_str, "openBinaryFile", &e),
+    }
+}
+
+/// Write a ByteString's bytes to stdout as they are, followed by a newline
+/// when `newline` is non-zero (`Data.ByteString.Char8.putStrLn`).
+///
+/// Through the same handle `putStrLn` prints to, so output stays in order.
+#[no_mangle]
+pub extern "C" fn bhc_bs_put(bs: *const u8, newline: i64) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if !bs.is_null() {
+        // A closed stdout is not this function's to report.
+        let _ = out.write_all(unsafe { bs_bytes(bs) });
+    }
+    if newline != 0 {
+        let _ = out.write_all(b"\n");
     }
 }
 
@@ -551,17 +563,16 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
     let mut current = path_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let codepoint = head_raw as i64;
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -572,7 +583,9 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
     } else {
         unsafe { bs_bytes(bs) }
     };
-    let _ = std::fs::write(&path_str, bytes);
+    if let Err(e) = std::fs::write(&path_str, bytes) {
+        crate::io_error::raise(&path_str, "withBinaryFile", &e);
+    }
 }
 
 // ============================================================

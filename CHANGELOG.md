@@ -6,7 +6,262 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `(**)`, `(^^)` and `realToFrac`, which aborted as stubs, and the Prelude's
+  `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`,
+  `atanh`, `logBase`, `isNaN` and `isInfinite`, which were not in scope.
+- `putStr` and `putStrLn` for `Data.ByteString` and `Data.ByteString.Char8`
+  (the bytes as they are, to stdout), and `map` for both.
+- `Numeric.showFFloat`, `showHex` and `showOct`, which aborted as stubs.
+  `showFFloat` rounds the shortest decimal digits as GHC does (half to even
+  when exactly half).
+- `Text.Printf.printf` with a literal format string: `%d %s %c %f %x %%`,
+  precision, width and the `-`/`0` flags, as an `IO` action or a `String`.
+  A computed format, `%e` and `%g` are still unimplemented.
+- Release archives include `bhci`, the REPL that `bhc repl` starts, and `bhi`,
+  the IR inspector; the install script and the Homebrew formula install them
+  (#50).
+- The release workflow updates the Homebrew formula in `arcanist-sh/homebrew-tap`
+  (`scripts/homebrew-formula.sh`), which installs every `libbhc_*.a` instead of
+  only the RTS (#47). It needs a `HOMEBREW_TAP_TOKEN` secret, and prints the
+  formula to apply by hand without one.
+
+### Added
+
+- `unsafePerformIO`, `unsafeDupablePerformIO`, `Debug.Trace.trace` and
+  `traceIO` run; they were stubs that aborted. `trace` writes its message to
+  stderr before its value is evaluated.
+- `traceShow`, `traceShowId`, `traceM` and `traceShowM` run too, defined as
+  in base through `trace` and `show`, so a user type's derived `Show` works.
+- An E2E fixture may give an `expected_stderr.txt`, checked like
+  `expected.txt`.
+
 ### Fixed
+
+- Negating a `Double` held in a variable (`negate x`, `-x`), and `signum` of
+  one, did integer arithmetic on the double's bits: `negate 1.5` was `-3.0`.
+  `abs` had the same fault for a lambda parameter.
+- `fromIntegral`, `toInteger`, `(/)`, `negate`, `abs` and `signum` passed as
+  function values at `Double` (`map fromIntegral xs`, `foldr (/) 1 xs`,
+  `map negate xs`) did not convert or used integer arithmetic (#100, native
+  only; the WebAssembly backend still rejects `fromIntegral` as a value).
+- `floor`, `ceiling`, `round` and `truncate` at `Integer` crashed (the
+  machine word was taken for a bignum), and would have saturated at 64 bits;
+  they build the `Integer` from the double.
+- In a module that defines its own `show` (or any other Prelude name), the
+  qualified `Prelude.show` resolved to the module's definition, so one
+  written in terms of the Prelude's called itself (#158).
+- A module's own `==`, `<`, `+` and other operators the backend implements
+  as primitives were ignored in favour of the primitive (#158).
+- Importing a module the compiler provides twice (`import Prelude hiding
+  (..)` with `import qualified Prelude`, or `Data.Set` both ways) logged
+  "circular import detected".
+- A `Float` returned from a function, or taken from a constructor field
+  through one, was `0.0`: the value is stored as 64 bits and only the low 32
+  were read. A `Float` inside a list, tuple, `Maybe` or a derived `Show` was
+  shown as `0.0` for the same reason (#156).
+- A `Float` below 0.1 or from 1.0e7 up was shown through its double
+  (`1.0e-3 :: Float` as `1.0000000474974513e-3`), and an integer literal at
+  `Float` inside a container as the float with the integer's bits.
+- An instance declared at `String` (`instance Convert Int String`) was not
+  found for `[Char]`, and the other way round (#108).
+- An associated type of an instance at `[a]` (`type Elem [a] = a`) did not
+  reduce at a concrete list, so a literal gave `No instance for Num (Elem
+  [Int])`; after one use at `[Int]` every use at another element type was a
+  type mismatch; and `print` of a value typed through the family showed
+  numbers or addresses (#108).
+- A module with a hand-written `Functor` (or `Show`, `Eq`, `Foldable`, …)
+  instance whose method matches on another type's constructors (`Just`,
+  `Nothing`) had those constructors taken for the instance's own type: every
+  later `fmap g (Just x)` in the module ran the user's instance and gave a
+  wrong result or crashed (#110).
+- Inside an instance method, a method of the same class used at another type
+  (`fmap g (p s)` at `Maybe` within `instance Functor Parser`) was resolved
+  to the enclosing instance.
+- `show`, `print`, `==`, `/=`, `<`, `<=`, `>`, `>=`, `max` and `min` used at
+  a function type are a type error (`No instance for Show (Int -> Int)`).
+  `print id` compiled and printed an empty line (#106).
+- `Data.ByteString.Char8`: every function aborted as an unimplemented stub.
+  `pack`, `unpack`, `length`, `null`, `empty`, `singleton`, `append`, `cons`,
+  `snoc`, `head`, `last`, `tail`, `init`, `take`, `drop`, `reverse`, `elem`,
+  `index`, `isPrefixOf`, `isSuffixOf`, `readFile` and `writeFile` are the
+  strict ByteString primitives at `Char`; `BC.putStrLn` was not exported
+  (#109).
+- `==` and `/=` on two ByteStrings compared their handles (always unequal),
+  and `show`/`print` of one printed the handle's contents.
+- `BC.snoc` had `cons`'s argument order and `BC.index` answered an `Int`.
+- An exception inside a container was shown as an address: `print r` for
+  `r :: Either ArithException Int` printed `Left 4387778608`, and likewise
+  for `IOException` and in lists, tuples and `Maybe` (#103).
+- `Data.Set`'s `map`, `insert`, `delete`, `union`, `intersection`,
+  `difference`, `isSubsetOf`, `isProperSubsetOf`, `deleteMin`, `deleteMax`
+  and `empty` had permissive types (`map :: (a -> b) -> a -> b`), so
+  `S.map (+ 1) s` was rejected with `No instance for Num (Set Int)` (#102).
+- `Set.filter`, `Map.filter` and `Map.filterWithKey` with a comparison as the
+  predicate (`S.filter (> 2) s`) crashed: the result of a comparison was
+  read as a `Bool` object.
+- `read`, `readMaybe` and `reads` at a data type that derives `Read`
+  (enumerations, constructors with fields, records, recursive and
+  parameterized types, newtypes), at tuples, nested lists, `Maybe`, `Either`,
+  `Integer`, `Bool`, `Ordering` and `()` aborted with `no parse` or read the
+  wrong thing; they parse what a derived `Read` accepts (#105, native only,
+  for types declared in the module being compiled).
+- `Data.Map` and `Data.Set` operations whose key is a lambda parameter
+  (`foldl' (\m w -> M.insertWith (+) w 1 m) M.empty ws`) compared `String`,
+  `Text` and enumeration keys by address, so equal keys were never merged or
+  found (#101).
+- Derived `Eq` and `Ord` on a recursive parameterized type (`data Tree a =
+  Leaf | Node (Tree a) a (Tree a)`) compared the subtrees by address, so two
+  equal trees built separately were unequal (#104).
+- `Data.Foldable`'s `for_`, `traverse_`, `foldl'` and `foldMap`, imported by
+  name, aborted as unimplemented stubs, on lists too.
+- `foldl`, `foldl'` and `foldMap` over a type with a derived `Foldable`, and
+  `mapM_ f =<< m` at one, walked the value as a list and crashed (#104).
+- `data T :: Type -> Type where ...`, a GADT declaration with a kind signature
+  in place of named parameters, is parsed (#107).
+- Ranges over a derived `Enum`: `[x ..]`, `[x, y ..]` and `[x, y .. z]`
+  step through the constructors (they were empty, one element, or a
+  crash).
+- `minBound`/`maxBound` at `Int`, the sized `Int`s and `Char` are their
+  real bounds; with one user `Bounded` type in the program,
+  `maxBound :: Int` was that type's last constructor.
+- `round` rounds half to even, as Haskell does (`round 2.5` is 2).
+
+- `import Data.Maybe` / `import Data.Either` keep the types of `lefts`,
+  `rights`, `partitionEithers`, `catMaybes`, `mapMaybe` and the rest;
+  `print (lefts es)` printed addresses.
+- `Data.Map.foldrWithKey`, `foldlWithKey`, `mapWithKey` and
+  `filterWithKey` have their real types; their results printed as
+  addresses.
+- `replicateM` works in any monad: in the list monad it is every
+  combination (`replicateM 2 "ab"` is `["aa","ab","ba","bb"]`); it was
+  typed at `IO` and printed nothing.
+
+- `nub`, `group`, `elem`, `notElem`, `delete`, `union` and `intersect` at
+  strings and at types with a derived `Eq` compare elements by content;
+  they compared addresses (`nub ["a", "b", "a"]` kept both `"a"`s).
+- A derived `Eq` compares a field of a ground type by that type:
+  `P 1 "a" == P 1 "a"` compared the strings' addresses and was `False`.
+- `xs \\ ys` removes the first equal element for each element of `ys`, as
+  `Data.List` does; it removed every occurrence.
+
+- `import Data.List` keeps the real types of `sort`, `sortBy`, `sortOn`,
+  `nub`, `group`, `isPrefixOf` and the other list functions it re-exports;
+  typed as placeholders, `print (sort xs)` at a user type printed
+  addresses.
+- `sort`, `maximum` and `minimum` at a type with a derived `Ord` use its
+  `compare`; they compared boxed values by address.
+- `comparing f` is `\a b -> compare (f a) (f b)` and `on op f` is
+  `\a b -> op (f a) (f b)`: `sortBy (comparing area)` with a `Double` key
+  was a type error, and ``groupBy ((==) `on` isDigit)`` crashed.
+- A `Map`/`Set` built from `String` keys computed at run time
+  (`M.fromListWith (+) [(w, 1) | w <- words s]`) merges equal keys.
+- An unannotated fractional value defaults to `Double`, as in Haskell, and
+  `show` of a `Float` narrows its value: `show 3.0` printed `"0"`, and
+  `show (sqrt 2)` and `show pi` printed garbage.
+
+- Prefix negation binds as Haskell's precedence 6: `-7 `mod` 3` is `-1`
+  and `-2 ^ 2` is `-4`; the minus applied to the first term only.
+
+- WebAssembly: `fromInteger` and `toInteger` are the identity (an `Integer`
+  is an `Int` there) instead of an unknown function giving 0, and
+  `fromIntegral` resolved at `Int -> Double` boxes the converted value, so a
+  let-bound `x = fromIntegral k` prints `10.0` rather than `0.0`.
+
+- `fromIntegral` from a machine integer to `Double`/`Float` converts the
+  value itself. It relied on a float operator seeing the call, so bound
+  first (`where x = fromIntegral k`, then `x / 4`), the integer's bits were
+  read as a double and printed `1.0e-323`.
+
+- `reads` at an enumeration with derived `Read` parses a constructor name
+  and returns the rest of the input: `reads "Green rest" :: [(Color,
+  String)]` is `[(Green," rest")]`. It read an `Int` and returned `[]`, so
+  pandoc's `readExtension` (`reads ("Ext_" ++ name)`) found nothing.
+
+- A local binding without a signature that converts a number,
+  `where w = fromInteger n` used as an `Int`, takes the type its use gives
+  it (the monomorphism restriction); the conversion compiled as the
+  identity and `w + 1` added 1 to the `Integer`'s address.
+
+- `import M (x)` warns when `M` does not export `x`
+  (``warning: module `M` does not export `x` ``); the name was dropped
+  silently. GHC rejects this. It stays a warning because some interfaces
+  bhc provides are not complete.
+
+- A top-level infix definition whose left operand is a constructor pattern,
+  `TagOpen n as ~== TagOpen p ps = …` (tagsoup's `~==`), parses; it was
+  "unexpected constructor, expected declaration". Under `BHC_IO_MODEL=eager`,
+  `==` on two pattern-bound `String`s in a function with a guarded clause
+  compared addresses; it is now typed from its operands.
+
+- `mask $ \restore -> …` and `uninterruptibleMask` under
+  `BHC_IO_MODEL=eager`: the body was called with its arguments swapped, so
+  it ran twice and `restore` crashed. It now runs once and `restore` returns
+  its action's result. The eager model still runs an IO action passed to a
+  function at the call, so the action given to `restore` runs masked.
+
+- WebAssembly: `show` of a `Maybe` that a call returns renders its payload by
+  type, so `lookup 2 [(1, "a"), (2, "b")]` shows `Just "b"` rather than an
+  address, and a negative payload is parenthesised. `fmap` over such a call
+  takes the `Maybe` arm instead of yielding `Nothing`.
+
+- `newMVar`, `putMVar`, `tryPutMVar`, `swapMVar` and `writeChan` no longer
+  evaluate the value they store, as in GHC: `newMVar (error "x")` crashed at
+  once. A stored computation runs when `takeMVar`, `readMVar`,
+  `tryTakeMVar` or `readChan` first reads it, in the reading thread.
+
+- A top-level list defined in terms of itself works: `ones = 1 : ones`
+  segfaulted, `nats = 0 : map (+ 1) nats` overflowed the stack, and
+  `fibs = 0 : 1 : zipWith (+) fibs (tail fibs)` crashed. Inside such a
+  definition, a constructor field that uses it is built lazily, a list
+  builtin defers a tail that is still being evaluated instead of reporting
+  `<<loop>>`, and a reference made once the list exists reads the shared
+  list, so `fibs !! n` takes linear time.
+
+- A top-level constant (CAF) is computed once and shared by every use, as in
+  GHC; it was recomputed at each use. A global `IORef` made with
+  `unsafePerformIO (newIORef …)` is now one `IORef`. Constants whose type is
+  or holds an IO action, or is unknown, are left as they were, and a CAF that
+  throws throws again at its next use. `BHC_NO_CAF_MEMO=1` turns sharing off.
+
+- Threads, `MVar`s and `Chan`s run under the eager IO model too
+  (`BHC_IO_MODEL=eager`), with preemption, `throwTo` and `killThread`; they
+  compiled to stubs that aborted. Under that model `>>=`, `>>` and `forever`
+  now stop at an exception, thrown or thrown to the thread, so a throw also
+  ends `forever`. `mask` with `restore` still does not run there (#91), and
+  WebAssembly has no threads yet; the compile-time warning now names only that
+  target (#75).
+
+- Under the eager IO model, a recursive `Monad m =>` function called at IO,
+  such as `cnt g n = cnt g (n - 1) >>= g`, gives its continuation the result
+  instead of a thunk's address. The recursive call was delayed because it
+  calls the function being defined; a call whose result type is `m a` (or a
+  bare type variable, which #64 covered only where Core kept the type) is no
+  longer delayed under that model, since a thunk cannot stand in for an
+  action's raw result there (#65).
+
+- On WebAssembly, a `Monad m =>` function called at IO runs: the backend
+  knows the IO dictionary's methods (`>>=`, `>>`, `fmap`, `<*>`, `pure`) as
+  values, tuple constructors up to 15 fields (dictionaries are tuples), and
+  shows a value typed `Maybe Int`. Before, the dictionary held zeros and the
+  program trapped (#65).
+
+- A thread in a long pure computation no longer keeps the other threads from
+  running: compiled code checks for preemption on function entry and at
+  allocations, where a timer asks for it once per 20 ms slice, so recursion
+  and loops that reach no IO step give way too. `killThread` reaches such a
+  thread at its next IO step. A thread that needs a thunk another thread is
+  evaluating waits for it instead of reporting `<<loop>>` (#75).
+
+- `SHA256SUMS.txt` lists bare archive names, so `shasum -a 256 -c
+  --ignore-missing SHA256SUMS.txt` works next to a download, and the install
+  script verifies the archive against it before unpacking (#46).
+
+- `mask` defers an exception thrown to a thread with `throwTo` or
+  `killThread` until the thread unmasks or blocks, and `uninterruptibleMask`
+  until it unmasks, as in GHC. `throwTo` waits until the exception is
+  delivered, and a forked thread starts in its parent's masking state (#75).
 
 - `mask $ \restore -> body` runs its body, `restore` runs its action, and an
   exception thrown inside `restore` reaches the caller. Under the default IO

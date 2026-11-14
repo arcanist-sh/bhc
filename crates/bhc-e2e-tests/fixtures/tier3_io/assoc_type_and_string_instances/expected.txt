@@ -1,0 +1,15 @@
+[1,2]
+[2]
+"xy"
+42
+7!
+2
+qq
+string abc
+string ab
+ints 6
+just string x
+just ints 9
+[1]
+"xy"
+[True]

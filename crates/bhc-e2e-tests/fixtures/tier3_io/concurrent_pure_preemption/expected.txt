@@ -1,0 +1,8 @@
+main ran during the loop
+loop done: 500000000500000000
+main ran during fib
+fib done: 102334155
+main ran during the fold
+fold done: 5000000050000000
+killed: thread killed
+end

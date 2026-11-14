@@ -112,8 +112,23 @@ fn well_known_constructors() -> FxHashMap<String, ConInfo> {
     // Tuples
     m.insert("(,)".to_string(), ConInfo { tag: 0, arity: 2 });
     m.insert("(,,)".to_string(), ConInfo { tag: 0, arity: 3 });
+    // Larger tuples, which class dictionaries are built from (the
+    // `Applicative` dictionary has five fields).
+    for arity in 4..=MAX_TUPLE_ARITY {
+        let name = format!("({})", ",".repeat(arity - 1));
+        m.insert(
+            name,
+            ConInfo {
+                tag: 0,
+                arity: arity as u32,
+            },
+        );
+    }
     m
 }
+
+/// The largest tuple constructor the backend knows.
+const MAX_TUPLE_ARITY: usize = 15;
 
 /// Starting offset for user string data in linear memory.
 ///
@@ -138,6 +153,7 @@ pub fn lower_core_module(
     wasm: &mut WasmModule,
     runtime: &RuntimeIndices,
 ) -> WasmResult<u32> {
+    let core = &restore_plain_read(core);
     // A WASI module has no C library to link a `foreign import` against: a
     // call compiled to the constant 0 with only a log warning (#41). Only the
     // C math functions the backend implements itself are accepted, and only
@@ -1689,7 +1705,10 @@ impl<'a> WasmLowering<'a> {
             let (h, _) = collect_app_spine(arg);
             if let Expr::Var(v, _) = h {
                 if returns_maybe_fn(strip_qualifier(v.name.as_str())) {
-                    return self.emit_show_maybe(arg, instrs, locals, local_count);
+                    let kind = maybe_payload_ty(arg)
+                        .and_then(|t| scalar_show_kind(&t))
+                        .unwrap_or(ElemKind::Int);
+                    return self.emit_show_maybe(arg, kind, instrs, locals, local_count);
                 }
                 // span/break/partition/splitAt return a 2-tuple of lists; the
                 // type is erased at the show site, so render it by walking the
@@ -1699,6 +1718,22 @@ impl<'a> WasmLowering<'a> {
                     "span" | "break" | "partition" | "splitAt"
                 ) {
                     return self.emit_show_tuple_of_lists(arg, instrs, locals, local_count);
+                }
+            }
+        }
+        // Any other value known to be a `Maybe` whose payload is a scalar (a
+        // call of a function returning one, `fmap` over one, a value typed
+        // `Maybe Int`) renders the same way. A `Just` applied to a literal
+        // field is left to the structural path below.
+        if !is_maybe_expr(arg) {
+            if let Some(payload) = maybe_payload_ty(arg) {
+                let kind = match scalar_show_kind(&payload) {
+                    Some(kind) => Some(kind),
+                    None if matches!(payload, Ty::Error | Ty::Var(_)) => Some(ElemKind::Int),
+                    None => None,
+                };
+                if let Some(kind) = kind {
+                    return self.emit_show_maybe(arg, kind, instrs, locals, local_count);
                 }
             }
         }
@@ -1840,11 +1875,14 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
-    /// Show a runtime `Maybe Int` value: `Nothing` (value < HEAP_BASE) or
-    /// `Just <n>` (a heap `[tag|field]`, field at offset 4).
+    /// Show a runtime `Maybe` of a scalar: `Nothing` (value < HEAP_BASE) or
+    /// `Just <x>` (a heap `[tag|field]`, field at offset 4), the field
+    /// rendered as `kind`. A negative number is parenthesised, as `show`
+    /// does at precedence 11.
     fn emit_show_maybe(
         &mut self,
         arg: &Expr,
+        kind: ElemKind,
         instrs: &mut Vec<WasmInstr>,
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
@@ -1852,7 +1890,8 @@ impl<'a> WasmLowering<'a> {
         let nothing = self.intern_pstr("Nothing") as i32;
         let just = self.intern_pstr("Just ");
         let v = *local_count;
-        *local_count += 1;
+        let field = *local_count + 1;
+        *local_count += 2;
         self.lower_expr(arg, instrs, locals, local_count, false)?;
         instrs.push(WasmInstr::LocalSet(v));
         instrs.push(WasmInstr::LocalGet(v));
@@ -1865,10 +1904,106 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::I32Const(just as i32));
         instrs.push(WasmInstr::LocalGet(v));
         instrs.push(WasmInstr::I32Load(2, 4));
-        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+        instrs.push(WasmInstr::LocalSet(field));
+        self.emit_show_elem(kind, field, true, instrs, local_count);
         instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
         instrs.push(WasmInstr::End);
         Ok(())
+    }
+
+    /// Push `show` of the scalar in local `value`, rendered as `kind`. With
+    /// `as_field`, a negative number is parenthesised (`Just (-3)`).
+    fn emit_show_elem(
+        &mut self,
+        kind: ElemKind,
+        value: u32,
+        as_field: bool,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        match kind {
+            ElemKind::Int => {
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+                if as_field {
+                    self.emit_paren_if_negative(value, false, instrs, local_count);
+                }
+            }
+            ElemKind::Double => {
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
+                if as_field {
+                    self.emit_paren_if_negative(value, true, instrs, local_count);
+                }
+            }
+            ElemKind::Bool => {
+                let true_ptr = self.intern_pstr("True") as i32;
+                let false_ptr = self.intern_pstr("False") as i32;
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(true_ptr));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(false_ptr));
+                instrs.push(WasmInstr::End);
+            }
+            ElemKind::Str => {
+                // The value as a flat `pstr` (nil is "", a cons `[Char]` is
+                // converted), then shown quoted.
+                let empty = self.intern_pstr("") as i32;
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::I32Eqz);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(empty));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+                instrs.push(WasmInstr::I32And);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::LocalGet(value));
+                instrs.push(WasmInstr::Else);
+                self.emit_charlist_to_pstr(value, instrs, local_count);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
+            }
+        }
+    }
+
+    /// With a rendered number on the stack, wrap it in parentheses when the
+    /// number in local `value` (an `i32`, or a pointer to a boxed `f64`) is
+    /// negative.
+    fn emit_paren_if_negative(
+        &mut self,
+        value: u32,
+        is_double: bool,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let open = self.intern_pstr("(") as i32;
+        let close = self.intern_pstr(")") as i32;
+        let rendered = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(rendered));
+        instrs.push(WasmInstr::LocalGet(value));
+        if is_double {
+            instrs.push(WasmInstr::F64Load(3, 0));
+            instrs.push(WasmInstr::F64Const(0.0));
+            instrs.push(WasmInstr::F64Lt);
+        } else {
+            instrs.push(WasmInstr::I32Const(0));
+            instrs.push(WasmInstr::I32LtS);
+        }
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        instrs.push(WasmInstr::I32Const(open));
+        instrs.push(WasmInstr::LocalGet(rendered));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        instrs.push(WasmInstr::I32Const(close));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(rendered));
+        instrs.push(WasmInstr::End);
     }
 
     /// Emit `length arg`, handling both string representations: a marked `pstr`
@@ -2673,8 +2808,6 @@ impl<'a> WasmLowering<'a> {
         instrs: &mut Vec<WasmInstr>,
         local_count: &mut u32,
     ) {
-        let true_ptr = self.intern_pstr("True");
-        let false_ptr = self.intern_pstr("False");
         let concat = self.runtime.concat_str_idx;
 
         // acc = "["
@@ -2712,46 +2845,7 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalSet(head));
         // acc = acc ++ show(head)
         instrs.push(WasmInstr::LocalGet(acc));
-        match kind {
-            ElemKind::Int => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
-            }
-            ElemKind::Double => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::F64Load(3, 0));
-                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
-            }
-            ElemKind::Bool => {
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::I32Const(true_ptr as i32));
-                instrs.push(WasmInstr::Else);
-                instrs.push(WasmInstr::I32Const(false_ptr as i32));
-                instrs.push(WasmInstr::End);
-            }
-            ElemKind::Str => {
-                // The element as a flat `pstr` (nil is "", a cons `[Char]` is
-                // converted), then shown quoted.
-                let empty = self.intern_pstr("") as i32;
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::I32Eqz);
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::I32Const(empty));
-                instrs.push(WasmInstr::Else);
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::I32Load(2, 0));
-                instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
-                instrs.push(WasmInstr::I32And);
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                instrs.push(WasmInstr::LocalGet(head));
-                instrs.push(WasmInstr::Else);
-                self.emit_charlist_to_pstr(head, instrs, local_count);
-                instrs.push(WasmInstr::End);
-                instrs.push(WasmInstr::End);
-                instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
-            }
-        }
+        self.emit_show_elem(kind, head, false, instrs, local_count);
         instrs.push(WasmInstr::Call(concat));
         instrs.push(WasmInstr::LocalSet(acc));
         // first = 0; cur = cons.tail ([cur+8])
@@ -3694,7 +3788,7 @@ impl<'a> WasmLowering<'a> {
                     }
                 }
                 // 2. Maybe.
-                if is_maybe_expr(x) {
+                if maybe_payload_ty(x).is_some() {
                     let sym = Symbol::intern("__fmapMaybe");
                     return self.emit_known_call(sym, &[f, x], instrs, locals, local_count);
                 }
@@ -4784,9 +4878,38 @@ impl<'a> WasmLowering<'a> {
             // pass the value through unchanged (Int stays an i32; a Double stays
             // boxed). Float contexts intercept `fromIntegral` earlier and
             // convert with F64ConvertI32S instead.
-            Some("fromIntegral" | "GHC.Real.fromIntegral" | "Prelude.fromIntegral")
-                if !args.is_empty() =>
-            {
+            // Resolved at an integer to Double/Float (hir-to-core stamps the
+            // occurrence with its type): box the converted value. Passed
+            // through, `where x = fromIntegral k` then `show x` read the Int
+            // as a Double's address and printed 0.0.
+            Some(
+                "fromIntegral"
+                | "GHC.Real.fromIntegral"
+                | "Prelude.fromIntegral"
+                | "fromInteger"
+                | "GHC.Num.fromInteger",
+            ) if !args.is_empty() && func_expr_returns_floating(func_expr) => {
+                instrs.push(WasmInstr::I32Const(8));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                let ptr = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalTee(ptr));
+                self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64ConvertI32S);
+                instrs.push(WasmInstr::F64Store(3, 0));
+                instrs.push(WasmInstr::LocalGet(ptr));
+            }
+            // An Integer is an Int here, so the conversions between them are
+            // the identity (`fromInteger` was an unknown function, giving 0).
+            Some(
+                "fromIntegral"
+                | "GHC.Real.fromIntegral"
+                | "Prelude.fromIntegral"
+                | "fromInteger"
+                | "GHC.Num.fromInteger"
+                | "toInteger"
+                | "GHC.Real.toInteger",
+            ) if !args.is_empty() => {
                 self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
             }
             Some("realToFrac" | "GHC.Real.realToFrac") if !args.is_empty() => {
@@ -4920,7 +5043,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: >> (sequence) - evaluate both sides for effects
-            Some(">>" | "GHC.Base.>>") if args.len() == 2 => {
+            Some(">>" | "GHC.Base.>>" | "IO.>>") if args.len() == 2 => {
                 // Evaluate first action, drop result
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Drop);
@@ -4929,7 +5052,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: >>= (bind) - evaluate first, pass result to second
-            Some(">>=" | "GHC.Base.>>=") if args.len() == 2 => {
+            Some(">>=" | "GHC.Base.>>=" | "IO.>>=") if args.len() == 2 => {
                 // Check if the second argument is a lambda: >>= \x -> body
                 let second = peel_type_abstractions(args[1]);
                 if let Expr::Lam(var, body, _) = second {
@@ -4954,8 +5077,22 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: return / pure - just evaluate the argument
-            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure") if args.len() == 1 => {
+            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure" | "IO.pure")
+                if args.len() == 1 =>
+            {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+
+            // The IO `Functor`/`Applicative` methods, as a `Monad m =>`
+            // function called at IO reaches them through its dictionary (#65).
+            // An action's value is its result here, so both are application.
+            // Extra arguments (`IO.fmap g a b`, once `<*>` is unfolded) apply
+            // to the result.
+            Some("IO.fmap" | "IO.<*>") if args.len() >= 2 => {
+                let applied = args[1..]
+                    .iter()
+                    .fold(args[0].clone(), |f, a| papp(f, (*a).clone()));
+                self.lower_expr(&applied, instrs, locals, local_count, is_main)?;
             }
 
             // Monad-transformer eliminators (see rewrite_monad). The rewritten
@@ -5346,8 +5483,21 @@ impl<'a> WasmLowering<'a> {
                             instrs.push(WasmInstr::Drop);
                         }
                         instrs.push(WasmInstr::LocalGet(local_idx));
+                    } else if operator_arity(name).is_some_and(|arity| args.len() < arity) {
+                        // A builtin used as a value, partly applied (`IO.fmap
+                        // f` in a dictionary's `<$`): a closure waiting for
+                        // the rest, as for a user function.
+                        let arity = operator_arity(name).unwrap_or(args.len());
+                        return self.lower_partial_application(
+                            var,
+                            &args,
+                            arity,
+                            instrs,
+                            locals,
+                            local_count,
+                        );
                     } else {
-                        tracing::warn!(func = name, "unknown function, using 0");
+                        tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
                         for arg in &args {
                             self.lower_expr(arg, instrs, locals, local_count, false)?;
                             instrs.push(WasmInstr::Drop);
@@ -5355,7 +5505,7 @@ impl<'a> WasmLowering<'a> {
                         instrs.push(WasmInstr::I32Const(0));
                     }
                 } else {
-                    tracing::warn!(func = name, "unknown function, using 0");
+                    tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
                     for arg in &args {
                         self.lower_expr(arg, instrs, locals, local_count, false)?;
                         instrs.push(WasmInstr::Drop);
@@ -5977,6 +6127,24 @@ fn peel_head(expr: &Expr) -> &Expr {
             _ => return e,
         };
     }
+}
+
+/// Whether a call's head variable is typed with a `Double`/`Float` result
+/// once every arrow is applied (`fromIntegral :: Int -> Double`).
+fn func_expr_returns_floating(func_expr: &Expr) -> bool {
+    let Expr::Var(v, _) = func_expr else {
+        return false;
+    };
+    let mut ty = &v.ty;
+    while let Ty::Forall(_, body) = ty {
+        ty = body;
+    }
+    let mut arrows = 0;
+    while let Ty::Fun(_, r) = ty {
+        ty = r;
+        arrows += 1;
+    }
+    arrows > 0 && matches!(ty, Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float"))
 }
 
 /// If `expr` is `fromIntegral <value>` (possibly with leading dictionary
@@ -11235,6 +11403,98 @@ enum ElemKind {
     Str,
 }
 
+/// How to render a scalar of type `ty`, if it is one. `Char` is not: a list
+/// element walks it as an Int, but a `Maybe Char` is left to the structural
+/// path.
+fn scalar_show_kind(ty: &Ty) -> Option<ElemKind> {
+    match ty {
+        Ty::Con(c) => match c.name.as_str() {
+            "Int" | "Integer" | "Word" => Some(ElemKind::Int),
+            "Double" | "Float" => Some(ElemKind::Double),
+            "Bool" => Some(ElemKind::Bool),
+            "String" => Some(ElemKind::Str),
+            _ => None,
+        },
+        _ if is_string_ty(ty) => Some(ElemKind::Str),
+        _ => None,
+    }
+}
+
+/// Whether `ty` is `String`, spelled `[Char]`.
+fn is_string_ty(ty: &Ty) -> bool {
+    matches!(list_element_ty(ty), Some(Ty::Con(c)) if c.name.as_str() == "Char")
+}
+
+/// If `expr` is known to be a `Maybe`, its payload type, `Ty::Error` where
+/// that is erased. Known from the expression's own type; from the signature
+/// of the function a call applies; from the builtins that return one
+/// (`lookup`'s payload is its pairs' second component, `find`'s the list's
+/// element, `elemIndex`'s an Int); and through `fmap` over one.
+fn maybe_payload_ty(expr: &Expr) -> Option<Ty> {
+    fn maybe_arg(ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Forall(_, inner) => maybe_arg(inner),
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "Maybe") => {
+                Some(a.as_ref().clone())
+            }
+            _ => None,
+        }
+    }
+    let e = peel_head(expr);
+    if let Some(payload) = maybe_arg(&e.ty()) {
+        return Some(payload);
+    }
+    let (head, args) = collect_app_spine(e);
+    let Expr::Var(v, _) = peel_head(head) else {
+        return None;
+    };
+    let erased = || Ty::Error;
+    match strip_qualifier(v.name.as_str()) {
+        "Just" => return Some(args.first().map_or_else(erased, |a| a.ty())),
+        "Nothing" => return Some(Ty::Error),
+        "lookup" if args.len() == 2 => {
+            return Some(match list_element_ty(&args[1].ty()) {
+                Some(Ty::Tuple(parts)) if parts.len() == 2 => parts[1].clone(),
+                _ => Ty::Error,
+            });
+        }
+        "find" if args.len() == 2 => {
+            return Some(list_element_ty(&args[1].ty()).cloned().unwrap_or(Ty::Error));
+        }
+        "elemIndex" | "findIndex" if args.len() == 2 => {
+            return Some(Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Int"),
+                bhc_types::Kind::Star,
+            )));
+        }
+        "readMaybe" if args.len() == 1 => return Some(Ty::Error),
+        "fmap" | "<$>" if args.len() == 2 => {
+            maybe_payload_ty(args[1])?;
+            let mut f_ty = args[0].ty();
+            while let Ty::Forall(_, inner) = f_ty {
+                f_ty = *inner;
+            }
+            return Some(match f_ty {
+                Ty::Fun(_, result) => *result,
+                _ => Ty::Error,
+            });
+        }
+        _ => {}
+    }
+    // A call of a function whose signature returns a `Maybe`.
+    let mut ty = v.ty.clone();
+    while let Ty::Forall(_, inner) = ty {
+        ty = *inner;
+    }
+    for _ in &args {
+        match ty {
+            Ty::Fun(_, result) => ty = *result,
+            _ => return None,
+        }
+    }
+    maybe_arg(&ty)
+}
+
 /// If `ty` is a list type `[e]` whose element is a renderable scalar, return its
 /// element kind. Used to show runtime lists (e.g. `map`/`filter` results).
 fn list_elem_show_kind(ty: &Ty) -> Option<ElemKind> {
@@ -11316,6 +11576,10 @@ fn operator_arity(name: &str) -> Option<usize> {
         | "GHC.Classes.==" | "/=" | "GHC.Classes./=" | "<" | "GHC.Classes.<" | "<="
         | "GHC.Classes.<=" | ">" | "GHC.Classes.>" | ">=" | "GHC.Classes.>=" | "++"
         | "GHC.Base.++" => Some(2),
+        // The IO dictionary's methods, which a `Monad m =>` function called
+        // at IO selects as values (#65). `strip_qualifier` keeps symbolic
+        // names whole, so they are listed qualified.
+        "IO.>>=" | "IO.>>" | "IO.fmap" | "IO.<*>" => Some(2),
         "negate" | "GHC.Num.negate" => Some(1),
         // Enum/identity/char builtins usable as first-class function values.
         _ => match strip_qualifier(name) {
@@ -11428,6 +11692,102 @@ fn peel_lambdas(expr: &Expr) -> (Vec<&Var>, &Expr) {
     }
 
     (params, current)
+}
+
+/// The plain builtin a generic reader stands for: `$read_generic` is `read`.
+fn plain_reader_name(expr: &Expr) -> Option<&'static str> {
+    let Expr::Var(var, _) = expr else {
+        return None;
+    };
+    match var.name.as_str() {
+        "$read_generic" => Some("read"),
+        "$readMaybe_generic" => Some("readMaybe"),
+        "$reads_generic" => Some("reads"),
+        _ => None,
+    }
+}
+
+/// The module with every generic reader turned back into the plain builtin.
+///
+/// hir-to-core lowers `read` at a described type to `\s -> $read_generic
+/// "<description>" s` for the native runtime's reader (its `read_desc`). This
+/// backend has no such reader and recognizes `read` by name, also to decide
+/// how the result is shown, so it gets the builtin back: the lambda, or the
+/// reader applied to its description once the simplifier has reduced it.
+fn restore_plain_read(core: &CoreModule) -> CoreModule {
+    fn described(expr: &Expr) -> Option<(&'static str, Span)> {
+        let Expr::App(reader, description, span) = expr else {
+            return None;
+        };
+        matches!(description.as_ref(), Expr::Lit(Literal::String(_), _, _))
+            .then(|| plain_reader_name(reader))
+            .flatten()
+            .map(|name| (name, *span))
+    }
+    fn plain(name: &str, span: Span) -> Expr {
+        Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Error,
+                checked_ty: Ty::Error,
+            },
+            span,
+        )
+    }
+    fn expr(e: &mut Expr) {
+        if let Some((name, span)) = described(e) {
+            *e = plain(name, span);
+            return;
+        }
+        if let Expr::Lam(param, body, _) = e {
+            if let Expr::App(reader, arg, _) = body.as_ref() {
+                let applied_to_param = matches!(arg.as_ref(), Expr::Var(v, _) if v.id == param.id);
+                if let (Some((name, span)), true) = (described(reader), applied_to_param) {
+                    *e = plain(name, span);
+                    return;
+                }
+            }
+        }
+        match e {
+            Expr::App(f, a, _) => {
+                expr(f);
+                expr(a);
+            }
+            Expr::TyApp(inner, _, _)
+            | Expr::Lam(_, inner, _)
+            | Expr::TyLam(_, inner, _)
+            | Expr::Lazy(inner, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _) => expr(inner),
+            Expr::Let(b, body, _) => {
+                bind(b);
+                expr(body);
+            }
+            Expr::Case(scrutinee, alts, _, _) => {
+                expr(scrutinee);
+                for alt in alts {
+                    expr(&mut alt.rhs);
+                }
+            }
+            Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => {}
+        }
+    }
+    fn bind(b: &mut Bind) {
+        match b {
+            Bind::NonRec(_, rhs) => expr(rhs),
+            Bind::Rec(pairs) => {
+                for (_, rhs) in pairs {
+                    expr(rhs);
+                }
+            }
+        }
+    }
+    let mut module = core.clone();
+    for b in &mut module.bindings {
+        bind(b);
+    }
+    module
 }
 
 /// Collect the application spine: `f a1 a2 ... an` -> `(f, [a1, a2, ..., an])`.

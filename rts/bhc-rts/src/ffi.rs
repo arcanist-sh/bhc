@@ -3310,6 +3310,49 @@ fn throw_io_error(path: &str, operation: &str, error: &std::io::Error) -> *mut u
     ))
 }
 
+/// Whether an `IOException` is of a kind, for `isDoesNotExistError` and its
+/// siblings in `System.IO.Error`. Returns 1 or 0.
+///
+/// An `IOException` here is its message, worded as GHC words it
+/// (`<location>: <kind> (<detail>)`, or `user error (<text>)`), so the kind
+/// is read from the message.
+///
+/// `kind`: 0 does not exist, 1 already exists, 2 permission denied,
+/// 3 user error, 4 end of file, 5 resource exhausted, 6 resource busy,
+/// 7 illegal operation.
+#[no_mangle]
+pub extern "C" fn bhc_io_error_is(exc: *mut u8, kind: i64) -> i64 {
+    const PHRASES: [&str; 8] = [
+        "does not exist",
+        "already exists",
+        "permission denied",
+        "user error",
+        "end of file",
+        "resource exhausted",
+        "resource busy",
+        "illegal operation",
+    ];
+    let Some(phrase) = usize::try_from(kind).ok().and_then(|k| PHRASES.get(k)) else {
+        return 0;
+    };
+    if exc.is_null() || bhc_exc_get_tag(exc) != EXC_TAG_IO_EXCEPTION {
+        return 0;
+    }
+    let payload = bhc_exc_get_payload(exc);
+    if payload.is_null() {
+        return 0;
+    }
+    // SAFETY: an IO exception's payload is the NUL-terminated message
+    // `bhc_make_some_exception` was given (see `bhc_show_exception`).
+    let message = unsafe { CStr::from_ptr(payload as *const c_char) }.to_string_lossy();
+    // The kind is what stands before the parenthesised detail: at the start
+    // of the message, or after the `: ` that ends the location.
+    let Some(head) = message.split(" (").next() else {
+        return 0;
+    };
+    i64::from(head == *phrase || head.ends_with(&format!(": {phrase}")))
+}
+
 /// [`throw_io_error`] for a library that has only the OS error code: the
 /// text library, which does not link the runtime, is handed this function
 /// at startup (`bhc_text_set_io_error_hook`).

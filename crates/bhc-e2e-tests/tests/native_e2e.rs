@@ -2431,6 +2431,11 @@ fn test_tier4_foldl_map_lambda_numeric() {
 // writeFile/appendFile with computed strings, read back; `++` after a
 // computed String (#40).
 #[test]
+fn test_tier3_io_error_predicates_native() {
+    run_native_test("tier3_io/io_error_predicates", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_io_errors_native() {
     run_native_test("tier3_io/file_io_errors", Profile::Default);
 }

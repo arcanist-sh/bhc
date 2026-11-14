@@ -7317,6 +7317,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromException" => self.lower_builtin_from_exception(args[0]),
             "displayException" => self.lower_builtin_display_exception(args[0]),
             "userError" => self.lower_builtin_user_error(args[0]),
+            "isDoesNotExistError" => self.lower_builtin_io_error_pred(args[0], 0),
+            "isAlreadyExistsError" => self.lower_builtin_io_error_pred(args[0], 1),
+            "isPermissionError" => self.lower_builtin_io_error_pred(args[0], 2),
+            "isUserError" => self.lower_builtin_io_error_pred(args[0], 3),
+            "isEOFError" => self.lower_builtin_io_error_pred(args[0], 4),
+            "isFullError" => self.lower_builtin_io_error_pred(args[0], 5),
+            "isAlreadyInUseError" => self.lower_builtin_io_error_pred(args[0], 6),
+            "isIllegalOperation" => self.lower_builtin_io_error_pred(args[0], 7),
             "ErrorCall" => self.lower_builtin_error_call(args[0]),
             "ioError" => self.lower_builtin_throw(args[0]),
 
@@ -28366,6 +28374,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .map_err(|e| CodegenError::Internal(format!("odd: xor: {:?}", e)))?
         };
         self.allocate_bool_adt(tag, if want_even { "even" } else { "odd" })
+    }
+
+    /// A `System.IO.Error` predicate (`isDoesNotExistError`, …): whether the
+    /// `IOException` is of the runtime's kind number `kind`
+    /// (`bhc_io_error_is`).
+    fn lower_builtin_io_error_pred(
+        &mut self,
+        error_expr: &Expr,
+        kind: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let error = self
+            .lower_expr(error_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO error predicate: no value".to_string()))?;
+        let error = self.value_to_ptr(error)?;
+        let error = self.build_force(error.into())?;
+        let is_fn = match self.module.llvm_module().get_function("bhc_io_error_is") {
+            Some(f) => f,
+            None => self.module.llvm_module().add_function(
+                "bhc_io_error_is",
+                i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+                None,
+            ),
+        };
+        let flag = self
+            .builder()
+            .build_call(
+                is_fn,
+                &[error.into(), i64_type.const_int(kind, false).into()],
+                "io_error_is",
+            )
+            .map_err(|e| CodegenError::Internal(format!("IO error predicate call: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("IO error predicate: void".to_string()))?
+            .into_int_value();
+        self.allocate_bool_adt(flag, "io_error_is")
     }
 
     /// Allocate a Bool ADT with dynamic tag (0=False, 1=True).
@@ -65850,6 +65896,14 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "fromException" => Some(1),
         "displayException" => Some(1),
         "userError" => Some(1),
+        "isDoesNotExistError"
+        | "isAlreadyExistsError"
+        | "isPermissionError"
+        | "isUserError"
+        | "isEOFError"
+        | "isFullError"
+        | "isAlreadyInUseError"
+        | "isIllegalOperation" => Some(1),
         "ErrorCall" => Some(1),
         "ioError" => Some(1),
 

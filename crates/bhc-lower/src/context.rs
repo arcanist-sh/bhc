@@ -2639,7 +2639,21 @@ impl LowerContext {
     /// Returns true if a warning was emitted.
     pub fn warn_if_stub(&mut self, def_id: DefId, name: &str, span: Span) -> bool {
         if let Some(info) = self.defs.get(&def_id) {
-            if info.kind.is_stub() {
+            // Declared with the stubs of its module, but code generation
+            // implements it by name: the `System.IO.Error` predicates.
+            let implemented = info.kind == DefKind::StubValue
+                && matches!(
+                    name.rsplit('.').next().unwrap_or(name),
+                    "isDoesNotExistError"
+                        | "isAlreadyExistsError"
+                        | "isPermissionError"
+                        | "isUserError"
+                        | "isEOFError"
+                        | "isFullError"
+                        | "isAlreadyInUseError"
+                        | "isIllegalOperation"
+                );
+            if info.kind.is_stub() && !implemented {
                 let kind = match info.kind {
                     DefKind::StubValue => "function",
                     DefKind::StubType => "type",

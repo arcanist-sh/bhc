@@ -8035,6 +8035,23 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                     )
                 }
+                // The `System.IO.Error` predicates: IOError -> Bool. Their
+                // result type is what lets `show` and `&&` treat it as a Bool.
+                "isDoesNotExistError"
+                | "isAlreadyExistsError"
+                | "isPermissionError"
+                | "isUserError"
+                | "isEOFError"
+                | "isFullError"
+                | "isAlreadyInUseError"
+                | "isIllegalOperation"
+                    if def_info.kind == DefKind::StubValue =>
+                {
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                    )
+                }
                 "option" | "maybeReader" if def_info.kind == DefKind::StubValue => {
                     // option :: ReadM a -> Mod OptionFields a -> Parser a
                     // Needs at least a -> b -> c to avoid sharing

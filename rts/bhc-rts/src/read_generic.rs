@@ -713,7 +713,7 @@ unsafe fn build_string(text: &str) -> *mut u8 {
     unsafe {
         let mut list = alloc_nil();
         for ch in text.chars().rev() {
-            list = alloc_cons(ch as usize as *mut u8, list);
+            list = alloc_cons(bhc_rts_alloc::object::word_of_char(ch as u32), list);
         }
         list
     }
@@ -722,9 +722,9 @@ unsafe fn build_string(text: &str) -> *mut u8 {
 unsafe fn build(value: &Value) -> *mut u8 {
     unsafe {
         match value {
-            Value::Int(n) => *n as usize as *mut u8,
-            Value::Double(d) => d.to_bits() as usize as *mut u8,
-            Value::Char(c) => *c as usize as *mut u8,
+            Value::Int(n) => bhc_rts_alloc::object::word_of_int(*n),
+            Value::Double(d) => bhc_rts_alloc::object::word_of_double(*d),
+            Value::Char(c) => bhc_rts_alloc::object::word_of_char(*c as u32),
             Value::Integer(decimal) => match CString::new(decimal.as_str()) {
                 Ok(text) => bhc_integer_from_str(text.as_ptr()),
                 Err(_) => std::ptr::null_mut(),
@@ -756,7 +756,7 @@ unsafe fn string_cells(str_list: *mut u8) -> (Vec<*mut u8>, Vec<char>) {
         while tag(list) != 0 {
             cells.push(list);
             // A character is the code point itself, not a heap object.
-            let code = field(list, 0) as usize;
+            let code = bhc_rts_alloc::object::char_of(field(list, 0)) as usize;
             chars.push(
                 u32::try_from(code)
                     .ok()

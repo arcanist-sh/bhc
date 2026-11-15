@@ -576,8 +576,12 @@ fn new_box(kind: i64, payload: i64) -> *mut u8 {
 unsafe fn payload_of(word: *const u8, kind: i64) -> i64 {
     // SAFETY: the caller guarantees a box.
     let scalar = unsafe { &*word.cast::<ScalarBox>() };
-    debug_assert_eq!(
-        scalar.kind, kind,
+    // An `Int` and a `Char` are one number, and some runtime code serves
+    // both: a lazy range, a byte string packed from either. So either box
+    // is accepted where the other is expected.
+    let integral = |k: i64| k == BOXED_INT || k == BOXED_CHAR;
+    debug_assert!(
+        scalar.kind == kind || (integral(scalar.kind) && integral(kind)),
         "a value word is not the box its type says"
     );
     scalar.payload
@@ -935,6 +939,12 @@ mod tests {
             word_of_int(SMALL_INT_MAX + 1)
         );
         assert_eq!(word_of_char(0xe9), word_of_char(0xe9));
+        // An `Int` and a `Char` read each other's box.
+        // SAFETY: both words are boxes.
+        unsafe {
+            assert_eq!(char_of(word_of_int(0x41)), 0x41);
+            assert_eq!(int_of(word_of_char(0x263a)), 0x263a);
+        }
         assert_ne!(word_of_char(0x100), word_of_char(0x100));
         assert!(is_first_word(BOXED_INT) && is_first_word(BOXED_DOUBLE));
         // A generic comparison sees the scalar, in a box or not.

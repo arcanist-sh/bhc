@@ -462,7 +462,7 @@ fn format_ffloat(x: f64, decimals: Option<usize>) -> String {
 unsafe fn chars_onto(s: &str, tail: *mut u8) -> *mut u8 {
     let mut list = tail;
     for c in s.chars().rev() {
-        list = unsafe { alloc_cons(c as u32 as usize as *mut u8, list) };
+        list = unsafe { alloc_cons(object::word_of_char(c as u32), list) };
     }
     list
 }
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn bhc_show_ffloat(digits: *mut u8, x: f64, suffix: *mut u
         let decimals = if m.is_null() || object::tag(m) == 0 {
             None
         } else {
-            let field = object::field(m, 0) as i64;
+            let field = object::int_of(object::field(m, 0));
             Some(field.max(0) as usize)
         };
         chars_onto(&format_ffloat(x, decimals), suffix)
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn bhc_printf_pad(
         let mut chars: Vec<char> = Vec::new();
         let mut list = bhc_force(text);
         while object::tag(list) != 0 {
-            let c = object::field(list, 0) as usize as u32;
+            let c = object::char_of(object::field(list, 0));
             chars.push(char::from_u32(c).unwrap_or('?'));
             list = bhc_force(object::field(list, 1));
         }
@@ -2511,17 +2511,15 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
     unsafe {
         match type_tag {
             0 => {
-                // Int: pointer-as-integer
-                let val = ptr as i64;
+                // Int in a value word
+                let val = object::int_of(ptr);
                 format!("{}", val)
             }
             1 => {
-                // Double: interpret as f64 bits
-                let bits = ptr as i64;
-                let val = f64::from_bits(bits as u64);
-                format_double(val)
+                // Double in a value word
+                format_double(object::double_of(ptr))
             }
-            2 => format_float(float_from_word(ptr as u64)),
+            2 => format_float(float_of(ptr)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers
@@ -2535,7 +2533,7 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
             }
             4 => {
                 // Char: stored as u32 via int-to-ptr
-                let c = ptr as u32;
+                let c = object::char_of(ptr);
                 if let Some(ch) = char::from_u32(c) {
                     hs_show_char(ch)
                 } else {
@@ -2548,8 +2546,9 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 hs_show_string(&s)
             }
             _ => {
-                // Default: treat as Int
-                let val = ptr as i64;
+                // Default: the number the word stands for, a scalar or an
+                // address.
+                let val = object::order_key(ptr);
                 format!("{}", val)
             }
         }
@@ -2619,7 +2618,7 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
             }
             // Cons: head at +8, tail at +16
             let head = object::field(list_ptr, 0).cast_const();
-            let char_val = head as u32;
+            let char_val = object::char_of(head);
             if let Some(ch) = char::from_u32(char_val) {
                 result.push(ch);
             }
@@ -2808,6 +2807,21 @@ pub struct ShowTypeDesc {
 /// whose upper half is clear cannot be such a double unless it is zero (the
 /// double of any non-zero `f32` has exponent bits there), so that one is
 /// taken as raw `f32` bits.
+/// The `Float` in a value word. Boxed, a `Float` travels as a `Double`;
+/// raw, it is one of the two bit patterns [`float_from_word`] tells apart.
+///
+/// # Safety
+///
+/// `word` must hold a `Float`.
+unsafe fn float_of(word: *const u8) -> f32 {
+    if object::boxed() {
+        // SAFETY: in boxed mode the caller guarantees a box.
+        unsafe { object::double_of(word) as f32 }
+    } else {
+        float_from_word(word as u64)
+    }
+}
+
 fn float_from_word(bits: u64) -> f32 {
     if bits >> 32 == 0 {
         f32::from_bits(bits as u32)
@@ -2822,14 +2836,13 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
         match desc.tag {
             0 => {
                 // Int: pointer-as-integer
-                format!("{}", ptr as i64)
+                format!("{}", object::int_of(ptr))
             }
             1 => {
-                // Double: interpret as f64 bits
-                let val = f64::from_bits(ptr as u64);
-                format_double(val)
+                // Double in a value word
+                format_double(object::double_of(ptr))
             }
-            2 => format_float(float_from_word(ptr as u64)),
+            2 => format_float(float_of(ptr)),
             3 => {
                 // Bool: 0=False, 1=True — either boxed, or the tag itself
                 // as a tagged immediate (what a comparison or `elem` answers
@@ -2843,7 +2856,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             }
             4 => {
                 // Char: stored as u32 via int-to-ptr
-                let c = ptr as u32;
+                let c = object::char_of(ptr);
                 if let Some(ch) = char::from_u32(c) {
                     hs_show_char(ch)
                 } else {
@@ -2914,7 +2927,7 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 let result = show_fn(std::ptr::null(), ptr);
                 read_char_list(result)
             }
-            18 => format!("{}", ptr as i64),
+            18 => format!("{}", object::order_key(ptr)),
             20 => {
                 let text = bhc_show_exception(bhc_force(ptr as *mut u8));
                 if text.is_null() {
@@ -3473,7 +3486,10 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
             cells.push(list);
             list = bhc_force(field(list, 1));
         }
-        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let chars: Vec<i64> = cells
+            .iter()
+            .map(|&c| i64::from(object::char_of(field(c, 0))))
+            .collect();
         let is_space = |c: i64| c == 32 || c == 9 || c == 10 || c == 13;
         let mut i = 0;
         while i < chars.len() && is_space(chars[i]) {
@@ -3499,7 +3515,7 @@ pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
         } else {
             alloc_nil()
         };
-        let pair = object::alloc_con(object::TUPLE, &[n as *mut u8, rest]);
+        let pair = object::alloc_con(object::TUPLE, &[object::word_of_int(n), rest]);
         alloc_cons(pair, alloc_nil())
     }
 }
@@ -3526,7 +3542,10 @@ pub unsafe extern "C" fn bhc_reads_enum(str_list: *mut u8, names: *const c_char)
             cells.push(list);
             list = bhc_force(field(list, 1));
         }
-        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let chars: Vec<i64> = cells
+            .iter()
+            .map(|&c| i64::from(object::char_of(field(c, 0))))
+            .collect();
         let as_char = |c: i64| u32::try_from(c).ok().and_then(char::from_u32);
         let mut i = 0;
         while i < chars.len() && as_char(chars[i]).is_some_and(char::is_whitespace) {
@@ -5274,7 +5293,7 @@ unsafe fn alloc_hs_string(s: &str) -> *mut u8 {
     unsafe {
         let mut list = alloc_nil();
         for ch in s.chars().rev() {
-            list = alloc_cons(ch as u32 as usize as *mut u8, list);
+            list = alloc_cons(object::word_of_char(ch as u32), list);
         }
         list
     }
@@ -6178,7 +6197,7 @@ fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
             let cur = *(env as *const i64);
             let step = *(env.add(8) as *const i64);
             alloc_cons(
-                cur as usize as *mut u8,
+                object::word_of_int(cur),
                 int_enum_thunk(cur.wrapping_add(step), step),
             )
         }
@@ -6199,7 +6218,7 @@ fn int_enum_thunk(next: i64, step: i64) -> *mut u8 {
 pub extern "C" fn bhc_enum_from_step_int(from: i64, step: i64) -> *mut u8 {
     unsafe {
         alloc_cons(
-            from as usize as *mut u8,
+            object::word_of_int(from),
             int_enum_thunk(from.wrapping_add(step), step),
         )
     }

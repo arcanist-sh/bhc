@@ -742,7 +742,39 @@ pub unsafe extern "C" fn bhc_panic(msg: *const c_char) -> ! {
         let cstr = unsafe { CStr::from_ptr(msg) };
         cstr.to_str().unwrap_or("BHC runtime panic").to_string()
     };
-    panic!("{}", message);
+    fatal(&message)
+}
+
+/// End the program with a one-line message and status 1.
+///
+/// This used to be a Rust `panic!`. A panic cannot unwind out of a function
+/// compiled code calls, so the process aborted with status 134 after a
+/// backtrace of some thirty runtime frames, and the message was a line
+/// somewhere above it (#99). The form here is that of an uncaught Haskell
+/// exception: the program's name, then the message.
+///
+/// A backtrace is still printed when `RUST_BACKTRACE` asks for one.
+fn fatal(message: &str) -> ! {
+    use std::io::Write;
+    // What the program printed so far comes first.
+    let _ = std::io::stdout().flush();
+    let program = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
+    // Code generation's stand-in for a function bhc does not implement.
+    let missing = message
+        .strip_prefix("stub: ")
+        .and_then(|rest| rest.strip_suffix(" not implemented"));
+    match missing {
+        Some(name) => eprintln!(
+            "{program}: `{name}` is not implemented by bhc; \
+             the compiler warned about it when this program was built"
+        ),
+        None => eprintln!("{program}: {message}"),
+    }
+    let bt = std::backtrace::Backtrace::capture();
+    if bt.status() == std::backtrace::BacktraceStatus::Captured {
+        eprintln!("stack backtrace:\n{bt}");
+    }
+    std::process::exit(1);
 }
 
 /// Runtime error - same as panic but named for Haskell compatibility.

@@ -7022,9 +7022,10 @@ pub extern "C" fn bhc_box_double(bits: i64) -> *mut u8 {
 /// The scalar in a value word in boxed mode, as its bits: the `Int`, the
 /// code point, or the bits of the `Double` in the box.
 ///
-/// A constructor is read as its tag and any other object as its address:
-/// generated code reads words of types it does not know this way, to
-/// branch on a `Bool` or to compare two values by identity.
+/// Any other object is read as its address. Generated code reads words of
+/// types it does not know this way to compare two values, and for a value
+/// that is not a scalar that has always been a comparison of identity:
+/// reading a constructor as its tag made any two `Str`s equal.
 ///
 /// # Safety
 ///
@@ -7042,13 +7043,32 @@ pub unsafe extern "C" fn bhc_unbox(word: *const u8) -> i64 {
             object::BOXED_INT | object::BOXED_CHAR | object::BOXED_DOUBLE => {
                 *word.cast::<i64>().add(1)
             }
-            // A constructor of an enumeration, read as its number (`Bool`
-            // as 0/1, which generated code does to branch on it).
-            tag if tag >= 0 => tag,
-            // Any other object, read as a number: its address, which is what
-            // the word was before boxing and what a comparison of two such
-            // values (`ThreadId`s, handles) has always compared.
             _ => word as i64,
+        }
+    }
+}
+
+/// The tag of a value of an enumeration (`Bool`, `Ordering`, a type whose
+/// constructors carry nothing) in boxed mode: the constructor's tag, or the
+/// number in the box generated code made from a comparison.
+///
+/// # Safety
+///
+/// `word` must be null or point to a heap object.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_enum_tag(word: *const u8) -> i64 {
+    use bhc_rts_alloc::object;
+    if word.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller guarantees a heap object; a thunk is forced first.
+    unsafe {
+        let word = bhc_force(word.cast_mut()).cast_const();
+        match object::tag(word) {
+            object::BOXED_INT | object::BOXED_CHAR | object::BOXED_DOUBLE => {
+                *word.cast::<i64>().add(1)
+            }
+            tag => tag,
         }
     }
 }

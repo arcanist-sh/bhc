@@ -7149,7 +7149,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // the constructor, or to the box of a 0/1 that generated code made
         // from a comparison. The runtime reads either.
         if bhc_types::boxed_values() {
-            return self.scalar_from_word(bool_ptr, "nullary_tag");
+            return self.word_bits(bool_ptr, "nullary_tag");
         }
         let tm = self.type_mapper();
         let i64_type = tm.i64_type();
@@ -50766,7 +50766,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("text_foldl: no text".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let init_int = self.coerce_to_int(init)?;
+        // The accumulator is a value word, of whatever type the fold is at.
+        let init_int = self.value_word_bits(init)?;
         let text_ptr = self.value_to_ptr(text)?;
         let rts_fn = self
             .functions
@@ -50788,7 +50789,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("text_foldl: returned void".to_string()))?;
-        Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+        Ok(Some(self.word_from_bits(result.into_int_value())?.into()))
     }
 
     /// Text ternary: (ptr, ptr, ptr) -> ptr (e.g. text_replace)
@@ -60134,7 +60135,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// immediate tag" and uses as it is.
     fn word_bits(&self, word: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
         if bhc_types::boxed_values() {
-            return self.scalar_from_word(word, label);
+            let i64_ty = self.type_mapper().i64_type();
+            let ptr_ty = self.type_mapper().ptr_type();
+            let function = self.module.get_function("bhc_enum_tag").unwrap_or_else(|| {
+                self.module
+                    .add_function("bhc_enum_tag", i64_ty.fn_type(&[ptr_ty.into()], false))
+            });
+            return Ok(self
+                .builder()
+                .build_call(function, &[word.into()], label)
+                .map_err(|e| CodegenError::Internal(format!("failed to read a tag: {e:?}")))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("tag read returned no value".to_string()))?
+                .into_int_value());
         }
         self.builder()
             .build_ptr_to_int(word, self.type_mapper().i64_type(), label)

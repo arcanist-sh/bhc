@@ -25,3 +25,5 @@ main = do
   print (BS.unpack "AB", BS.null "", BS.null "x")
   -- Literals at the other string types are unchanged.
   print (T.length ("text" :: T.Text), length ("string" :: String))
+  -- `compare` with a literal operand: the literal is a Text too.
+  print (compare ("a" :: T.Text) "b", compare ("b" :: T.Text) "a", compare ("a" :: T.Text) "a", ("a" :: T.Text) < "b")

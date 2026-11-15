@@ -29213,11 +29213,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 || self.is_string_type(t)
                 || self.is_text_type(t)
         }) {
+            // `compare` does not make its operands agree in the type
+            // checker, so under OverloadedStrings one can be a `Text` and
+            // the other a string literal that was left a `[Char]`. Pack the
+            // literal: handed to the Text comparison as it is, a cons cell
+            // would be read as a Text.
+            let span = bhc_span::Span::default();
+            let as_operand = |this: &Self, operand: &Expr| -> Expr {
+                if this.is_text_type(&ty) && matches!(operand, Expr::Lit(Literal::String(_), _, _))
+                {
+                    let pack = Var {
+                        name: Symbol::intern("Data.Text.pack"),
+                        id: VarId::new(0),
+                        ty: Ty::Error,
+                        checked_ty: Ty::Error,
+                    };
+                    Expr::App(
+                        Box::new(Expr::Var(pack, span)),
+                        Box::new(operand.clone()),
+                        span,
+                    )
+                } else {
+                    operand.clone()
+                }
+            };
+            let (a_operand, b_operand) = (as_operand(self, a_expr), as_operand(self, b_expr));
             let a_val = self
-                .lower_expr(a_expr)?
+                .lower_expr(&a_operand)?
                 .ok_or_else(|| CodegenError::Internal("compare: no lhs".to_string()))?;
             let b_val = self
-                .lower_expr(b_expr)?
+                .lower_expr(&b_operand)?
                 .ok_or_else(|| CodegenError::Internal("compare: no rhs".to_string()))?;
             let tag = self.ord_by_type(&ty, a_val, b_val)?;
             return self.allocate_ordering_adt(tag, "compare_by_contents");

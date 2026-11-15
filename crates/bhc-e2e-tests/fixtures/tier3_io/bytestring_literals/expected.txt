@@ -7,3 +7,4 @@ bytes
 argument!
 ([65,66],True,False)
 (4,6)
+(LT,GT,EQ,True)

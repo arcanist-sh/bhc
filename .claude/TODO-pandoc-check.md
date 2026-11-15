@@ -381,13 +381,13 @@ bare src:                 79 passed, 89 failed, 53 skipped  (of 221 modules)
 +pandoc-types package-dir: 82 passed, 84 failed, 55 skipped
 ```
 
-Reproduce (Pandoc tree `/Users/zara/Development/pandoc-3.6.4`, pandoc-types
-`/Users/zara/Development/pandoc-types-1.23.1`):
+Reproduce (Pandoc tree `~/Development/pandoc-3.6.4`, pandoc-types
+`~/Development/pandoc-types-1.23.1`):
 
 ```
 BHC=<bhc-repo>/target/debug/bhc
-PT=/Users/zara/Development/pandoc-types-1.23.1/src
-P=/Users/zara/Development/pandoc-3.6.4/src
+PT=~/Development/pandoc-types-1.23.1/src
+P=~/Development/pandoc-3.6.4/src
 LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 $BHC check "$P" 2>/dev/null | tail -1               # 79
 LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 $BHC --package-dir "$PT" check "$P" 2>/dev/null | tail -1  # 82
 ```
@@ -461,7 +461,7 @@ types (cascade from their defining module failing).
 ### P1 — pandoc-types (`Text.Pandoc.Definition`) — IN PROGRESS (2026-07-02)
 Approach that works: `bhc check --package-dir <pandoc-types>/src <pandoc>/src`
 (package-dir modules resolve imports but aren't scored). Fetched pandoc-types
-1.23.1 from Hackage to `/Users/zara/Development/pandoc-types-1.23.1`.
+1.23.1 from Hackage to `~/Development/pandoc-types-1.23.1`.
 
 Blockers found + resolved so this loads:
 - `Definition` imports `Paths_pandoc_types` (Cabal autogen module) → stubbed a

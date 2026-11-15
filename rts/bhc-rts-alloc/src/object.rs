@@ -682,9 +682,13 @@ pub fn word_of_double(value: f64) -> *mut u8 {
 ///
 /// In raw mode that is the word itself, which is the scalar for an `Int`
 /// or a `Char` and an address for anything else: such code has always
-/// ordered boxed values by address. In boxed mode it is the payload of a
-/// box and the address of anything else, so the same code gives the same
+/// ordered boxed values by address. In boxed mode it is what a box holds
+/// and the address of anything else, so the same code gives the same
 /// answers.
+///
+/// A boxed `Double` gives a number that orders as the double does. In raw
+/// mode a `Double` is its bits, which nothing here can tell from an
+/// `Int`, and the bits of negative doubles order backwards (#157).
 ///
 /// # Safety
 ///
@@ -698,7 +702,17 @@ pub unsafe fn order_key(word: *const u8) -> i64 {
     // SAFETY: in boxed mode a non-null value word points to a heap object.
     unsafe {
         match tag(word) {
-            BOXED_INT | BOXED_CHAR | BOXED_DOUBLE => (*word.cast::<ScalarBox>()).payload,
+            BOXED_INT | BOXED_CHAR => (*word.cast::<ScalarBox>()).payload,
+            BOXED_DOUBLE => {
+                // Sign-magnitude to two's complement: flip the magnitude
+                // bits of a negative double so that more negative is less.
+                let bits = (*word.cast::<ScalarBox>()).payload;
+                if bits < 0 {
+                    bits ^ i64::MAX
+                } else {
+                    bits
+                }
+            }
             _ => word as i64,
         }
     }
@@ -931,6 +945,13 @@ mod tests {
             let object = nil();
             assert_eq!(order_key(object), object as i64);
             assert_eq!(order_key(std::ptr::null()), 0);
+            // Doubles order as numbers, negatives included.
+            let ordered = [f64::NEG_INFINITY, -2.5, -0.5, 0.0, 1.5, f64::INFINITY];
+            let keys: Vec<i64> = ordered
+                .iter()
+                .map(|d| order_key(word_of_double(*d)))
+                .collect();
+            assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
             assert!(bool_of(word_of_bool(true)) && !bool_of(word_of_bool(false)));
             assert_eq!(tag(word_of_bool(true)), 1);
         }

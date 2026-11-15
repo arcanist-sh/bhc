@@ -114,7 +114,14 @@ impl Ord for Key {
     fn cmp(&self, other: &Self) -> Ordering {
         match (&self.content, &other.content) {
             (Some(a), Some(b)) => a.cmp(b).then(self.raw.cmp(&other.raw)),
-            (None, None) => self.raw.cmp(&other.raw),
+            // Keys without content order as the scalars they are (an `Int`,
+            // a `Char`), or by address. `order_key` is that number: the
+            // word itself, or in boxed mode what the box holds.
+            // SAFETY: a key is a value word codegen passed.
+            (None, None) => unsafe {
+                bhc_rts_alloc::object::order_key(self.raw as *const u8)
+                    .cmp(&bhc_rts_alloc::object::order_key(other.raw as *const u8))
+            },
             (None, Some(_)) => Ordering::Less,
             (Some(_), None) => Ordering::Greater,
         }
@@ -183,7 +190,8 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
         if tag != 1 {
             break;
         }
-        let head = unsafe { bhc_rts_alloc::object::field(p, 0) } as u64 as u32;
+        // SAFETY: an element of a `[Char]` is a `Char` in a value word.
+        let head = unsafe { bhc_rts_alloc::object::char_of(bhc_rts_alloc::object::field(p, 0)) };
         if let Some(ch) = char::from_u32(head) {
             let mut buf = [0u8; 4];
             out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
@@ -380,7 +388,10 @@ pub unsafe extern "C" fn bhc_map_eq(map1: *mut u8, map2: *mut u8, value_eq: *mut
             return false;
         }
         if value_eq.is_null() {
-            return v1 == v2;
+            // SAFETY: a map's values are value words.
+            return unsafe {
+                bhc_rts_alloc::object::order_key(*v1) == bhc_rts_alloc::object::order_key(*v2)
+            };
         }
         // SAFETY: the caller guarantees a closure of two arguments.
         unsafe {

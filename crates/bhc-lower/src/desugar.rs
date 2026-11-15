@@ -163,7 +163,13 @@ fn desugar_do_stmts(
     lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
 ) -> hir::Expr {
     match stmts {
-        [] => hir::Expr::Error(span),
+        // The statements ran out after a `x <- e` or a `let`: the block has
+        // no result. It used to compile, and the program stopped with a
+        // pattern match failure where the block ended.
+        [] => {
+            ctx.error(crate::LowerError::DoWithoutResult { span });
+            hir::Expr::Error(span)
+        }
 
         // Final statement must be an expression (Qualifier)
         [ast::Stmt::Qualifier(e, _)] => lower_expr(ctx, e),

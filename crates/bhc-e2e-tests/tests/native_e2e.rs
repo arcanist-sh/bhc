@@ -73,6 +73,14 @@ fn test_rejected_ordering_constructor_mismatched() {
 }
 
 #[test]
+fn test_rejected_do_ends_in_let() {
+    expect_rejected(
+        "do_ends_in_let.hs",
+        "the last statement in a `do` block must be an expression",
+    );
+}
+
+#[test]
 fn test_rejected_sum_string() {
     expect_rejected("sum_string.hs", "No instance for `Num Char`");
 }

@@ -120,6 +120,13 @@ pub enum LowerError {
         span: Span,
     },
 
+    /// A `do` block that ends in a binding or a `let`: it has no result.
+    #[error("the last statement in a `do` block must be an expression")]
+    DoWithoutResult {
+        /// Source location of the block.
+        span: Span,
+    },
+
     /// Multiple errors collected during lowering.
     #[error("{}", display_multiple(.0))]
     Multiple(Vec<LowerError>),

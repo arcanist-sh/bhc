@@ -45156,7 +45156,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
-        let mapped_int = self.coerce_to_int(mapped_val)?;
+        let mapped_int = self.value_word_bits(mapped_val)?;
         let acc_ptr = acc_phi.as_basic_value().into_pointer_value();
         let new_set = self
             .builder()
@@ -47844,7 +47844,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
 
         // Convert new key back to i64 for map insert
-        let new_key_int = self.coerce_to_int(new_key)?;
+        let new_key_int = self.value_word_bits(new_key)?;
         let val_ptr = self.value_to_ptr(val)?;
         let acc_ptr = acc_phi.as_basic_value().into_pointer_value();
         let new_map = self

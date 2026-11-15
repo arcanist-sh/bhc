@@ -576,13 +576,16 @@ fn new_box(kind: i64, payload: i64) -> *mut u8 {
 unsafe fn payload_of(word: *const u8, kind: i64) -> i64 {
     // SAFETY: the caller guarantees a box.
     let scalar = unsafe { &*word.cast::<ScalarBox>() };
-    // An `Int` and a `Char` are one number, and some runtime code serves
-    // both: a lazy range, a byte string packed from either. So either box
-    // is accepted where the other is expected.
-    let integral = |k: i64| k == BOXED_INT || k == BOXED_CHAR;
+    // Any scalar box is accepted where another is expected. An `Int` and a
+    // `Char` are one number, and some runtime code serves both: a lazy
+    // range, a byte string packed from either. And generated code does not
+    // always know a scalar's type where it boxes it: the bits of a `Double`
+    // that went through integer code (`negate` of a literal) arrive in an
+    // `Int` box. The payload is the scalar's bits whichever box holds it.
+    let _ = kind;
     debug_assert!(
-        scalar.kind == kind || (integral(scalar.kind) && integral(kind)),
-        "a value word is not the box its type says"
+        matches!(scalar.kind, BOXED_INT | BOXED_CHAR | BOXED_DOUBLE),
+        "a value word is not a scalar box"
     );
     scalar.payload
 }

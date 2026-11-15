@@ -54064,20 +54064,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::App(f, _, _) => Self::is_user_adt_expr(f, constructor_metadata).or_else(|| {
                 // A call of a function whose declared result is a user type
                 // (`mk 5` with `mk :: Int -> D`).
+                // The result of THIS call: one arrow per argument applied.
+                // Reading on to the end of the type took a partial
+                // application for its final result, so `key a` with
+                // `key :: a -> b -> Bool` was a `Bool` and an `==` on two
+                // such calls was compiled as a comparison of Bools, which
+                // read an Int operand as a heap object.
+                let mut applied = 1;
                 let mut head = f.as_ref();
                 while let Expr::App(g, _, _) = head {
                     head = g.as_ref();
+                    applied += 1;
                 }
                 let Expr::Var(var, _) = head else {
                     return None;
                 };
                 let mut t = &var.ty;
-                loop {
+                while applied > 0 {
                     match t {
                         Ty::Forall(_, body) => t = body,
-                        Ty::Fun(_, r) => t = r,
-                        _ => break,
+                        Ty::Fun(_, r) => {
+                            t = r;
+                            applied -= 1;
+                        }
+                        _ => return None,
                     }
+                }
+                while let Ty::Forall(_, body) = t {
+                    t = body;
                 }
                 let Ty::Con(c) = t else {
                     return None;

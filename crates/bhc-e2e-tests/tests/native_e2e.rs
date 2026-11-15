@@ -2483,6 +2483,16 @@ fn test_tier3_thread_id_equality_native() {
 }
 
 #[test]
+fn test_tier3_with_file_native() {
+    run_native_test("tier3_io/with_file", Profile::Default);
+}
+
+#[test]
+fn test_tier3_on_predicate_native() {
+    run_native_test("tier3_io/on_predicate", Profile::Default);
+}
+
+#[test]
 fn test_tier3_prelude_constructor_ordering_native() {
     run_native_test("tier3_io/prelude_constructor_ordering", Profile::Default);
 }

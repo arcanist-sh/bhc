@@ -3376,6 +3376,15 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::fun(maybe_a, Ty::Var(a.clone()))),
                     )
                 }
+                // fromJust :: Maybe a -> a. Without a scheme its result had
+                // no type: `print (fromJust (Just 'x'))` printed 120.
+                "fromJust" => {
+                    let maybe_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(maybe_a, Ty::Var(a.clone())))
+                }
                 // either :: (a -> c) -> (b -> c) -> Either a b -> c
                 "either" => {
                     let either_ab = Ty::App(
@@ -8352,6 +8361,10 @@ impl TyCtxt {
                         | "last"
                         | "fst"
                         | "snd"
+                        // `import Data.Function (on)`, exact. (A saturated or
+                        // partial use is desugared before this; the scheme
+                        // types `on` passed as a value.)
+                        | "on"
                         // `import Data.List` re-exports these with their exact
                         // builtin schemes. Typed fresh, `print (sort xs)` at a
                         // user type could not see the element type and
@@ -8390,6 +8403,7 @@ impl TyCtxt {
                         | "catMaybes"
                         | "mapMaybe"
                         | "fromMaybe"
+                        | "fromJust"
                         | "listToMaybe"
                         | "maybeToList"
                         | "isJust"

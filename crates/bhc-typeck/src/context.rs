@@ -1468,6 +1468,12 @@ impl TyCtxt {
                 // Bool constructors
                 "True" | "False" => Scheme::mono(self.builtins.bool_ty.clone()),
 
+                // Ordering constructors. Without a scheme here each was one
+                // type variable for the whole module: `max LT 3` and
+                // `[LT, 'a']` compiled, and `print (max LT EQ)` printed an
+                // address, the argument's type unknown.
+                "LT" | "EQ" | "GT" => Scheme::mono(self.builtins.ordering_ty.clone()),
+
                 // Maybe constructors
                 "Nothing" => {
                     // Nothing :: Maybe a
@@ -8289,6 +8295,19 @@ impl TyCtxt {
                         // OverloadedStrings `compare t "b"` at `Text` left
                         // the literal a `[Char]` (#97).
                         | "compare"
+                        // `a -> a -> a`, `t a -> a`, `[a] -> a` and the pair
+                        // projections are exact too. Typed fresh, the result
+                        // had no type: `print (max LT EQ)`, `print (head
+                        // [GT, LT])` and `print (fst (EQ, 1))` printed an
+                        // address, and `max 'a' True` compiled.
+                        | "max"
+                        | "min"
+                        | "maximum"
+                        | "minimum"
+                        | "head"
+                        | "last"
+                        | "fst"
+                        | "snd"
                         // `import Data.List` re-exports these with their exact
                         // builtin schemes. Typed fresh, `print (sort xs)` at a
                         // user type could not see the element type and

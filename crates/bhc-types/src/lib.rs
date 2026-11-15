@@ -64,6 +64,22 @@ pub use dyn_tensor::{dyn_tensor_of, dyn_tensor_tycon, shape_witness_of, shape_wi
 pub use nat::TyNat;
 pub use ty_list::TyList;
 
+/// The value representation, fixed once per process; see [`boxed_values`].
+static BOXED_VALUES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether a scalar in a value word is boxed (`BHC_VALUE_REP=boxed`, #94).
+///
+/// By default an `Int`, `Char` or `Double` in a lifted position (a
+/// constructor field, a list element, an argument of an unknown call) is the
+/// scalar's own bits in the word, which nothing at run time can tell from a
+/// pointer. Boxed, the word points to a `{kind, payload}` object. The
+/// compiled program tells the runtime libraries which it was built with at
+/// startup. Native code only; experimental until the suites pass under it.
+#[must_use]
+pub fn boxed_values() -> bool {
+    *BOXED_VALUES.get_or_init(|| matches!(std::env::var("BHC_VALUE_REP").as_deref(), Ok("boxed")))
+}
+
 /// The IO model, fixed once per process; see [`io_closure_mode`].
 static IO_CLOSURE_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 

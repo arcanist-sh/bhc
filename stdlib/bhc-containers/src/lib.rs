@@ -1803,3 +1803,12 @@ pub unsafe extern "C" fn bhc_seq_viewr_init(seq_ptr: *mut u8) -> *mut u8 {
         vec_to_seq(&v[..v.len() - 1])
     }
 }
+
+/// Tell this library how the program holds scalars in value words: nonzero
+/// for boxed (#94). Called once by the compiled program's `main`, before
+/// any Haskell code runs. Each runtime library has its own copy of the
+/// switch.
+#[no_mangle]
+pub extern "C" fn bhc_containers_set_value_rep(boxed: i32) {
+    bhc_rts_alloc::object::set_boxed(boxed != 0);
+}

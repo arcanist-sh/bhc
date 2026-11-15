@@ -753,10 +753,15 @@ pub fn word_of_bool(value: bool) -> *mut u8 {
 pub unsafe fn bool_of(word: *const u8) -> bool {
     let bits = word as usize;
     if bits <= 1 {
-        bits != 0
-    } else {
-        // SAFETY: the caller guarantees a `Bool` constructor.
-        unsafe { tag(word) != 0 }
+        return bits != 0;
+    }
+    // SAFETY: the caller guarantees a `Bool` constructor, or, in boxed
+    // mode, the box of the 0/1 that generated code makes from a comparison.
+    unsafe {
+        match tag(word) {
+            BOXED_INT | BOXED_CHAR => (*word.cast::<ScalarBox>()).payload != 0,
+            constructor => constructor != 0,
+        }
     }
 }
 

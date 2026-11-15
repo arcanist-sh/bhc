@@ -260,6 +260,27 @@ impl<'ctx> LlvmModule<'ctx> {
                 CodegenError::Internal(format!("failed to set the IO error hook: {e:?}"))
             })?;
 
+        // Tell each runtime library how this program holds scalars in value
+        // words (#94). Only a program built for boxed values says anything:
+        // the libraries start in the raw representation.
+        if bhc_types::boxed_values() {
+            let set_rep_type = void_type.fn_type(&[i32_type.into()], false);
+            for library in ["rts", "base", "containers", "text"] {
+                let set_rep = self.module.add_function(
+                    &format!("bhc_{library}_set_value_rep"),
+                    set_rep_type,
+                    None,
+                );
+                self.builder
+                    .build_call(set_rep, &[i32_type.const_int(1, false).into()], "")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!(
+                            "failed to set the value representation: {e:?}"
+                        ))
+                    })?;
+            }
+        }
+
         // Run the body, and wait for it.
         let body_ptr = body_fn.as_global_value().as_pointer_value();
         self.builder

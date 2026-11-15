@@ -22,3 +22,12 @@
 pub mod char; // Unicode primitives - actually needed
 pub mod list; // List RTS operations (sort, nub, group, etc.)
 pub mod string; // String RTS operations (lines, words, etc.)
+
+/// Tell this library how the program holds scalars in value words: nonzero
+/// for boxed (#94). Called once by the compiled program's `main`, before
+/// any Haskell code runs. Each runtime library has its own copy of the
+/// switch.
+#[no_mangle]
+pub extern "C" fn bhc_base_set_value_rep(boxed: i32) {
+    bhc_rts_alloc::object::set_boxed(boxed != 0);
+}

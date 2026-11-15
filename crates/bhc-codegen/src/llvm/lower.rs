@@ -6125,7 +6125,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_bit_cast(f64_val, self.type_mapper().i64_type(), "float_bits")
                     .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
                     .into_int_value();
-                self.word_from_scalar(bits, "box_float")
+                self.word_from_double_bits(bits)
             }
             _ => Err(CodegenError::Unsupported(
                 "cannot box this value type".to_string(),
@@ -7135,6 +7135,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         bool_ptr: PointerValue<'ctx>,
         max_immediate: u64,
     ) -> CodegenResult<IntValue<'ctx>> {
+        // Built for boxed values there is no immediate: the word points to
+        // the constructor, or to the box of a 0/1 that generated code made
+        // from a comparison. The runtime reads either.
+        if bhc_types::boxed_values() {
+            return self.scalar_from_word(bool_ptr, "nullary_tag");
+        }
         let tm = self.type_mapper();
         let i64_type = tm.i64_type();
 
@@ -43975,7 +43981,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("map_singleton: no value".to_string()))?;
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let kind = self.container_key_kind(Some(key_expr), None);
         let key_int = self.canonical_container_key(key_int, kind)?;
         let val_ptr = self.value_to_ptr(val)?;
@@ -44051,7 +44057,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_member: no map".to_string()))?;
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -44126,7 +44132,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         map_val: BasicValueEnum<'ctx>,
         kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
         self.emit_container_canon(map_ptr, kind, false)?;
@@ -44172,7 +44178,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_fwd: no map".to_string()))?;
         let default_ptr = self.value_to_ptr(default)?;
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -44222,7 +44228,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         map_val: BasicValueEnum<'ctx>,
         kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let key_int = self.canonical_container_key(key_int, kind)?;
         let val_ptr = self.value_to_ptr(val)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -44257,7 +44263,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_delete: no map".to_string()))?;
-        let key_int = self.coerce_to_int(key)?;
+        let key_int = self.value_word_bits(key)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -45134,7 +45140,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         // Call closure: fn_ptr(closure, elem)
         let mapped_val = self
@@ -45287,7 +45293,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         // Call predicate: fn_ptr(closure, elem)
         let pred_result = self
@@ -45477,7 +45483,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         let acc_val = acc_phi.as_basic_value();
         let new_acc = self
@@ -45602,7 +45608,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         let acc_val = acc_phi.as_basic_value();
         let new_acc = self
@@ -45758,7 +45764,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
         // Convert key i64 to ptr for closure call
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         // Call closure: fn_ptr(closure, key_ptr, val)
         let mapped_val = self
@@ -45930,7 +45936,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         // Call predicate: fn_ptr(closure, key_ptr, val) -> Bool (tag 0=False, 1=True)
         let pred_result = self
@@ -46348,7 +46354,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         // Call function: fn_ptr(closure, key_ptr, val) -> Maybe b
         let maybe_result = self
@@ -46546,7 +46552,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         // Call closure: fn_ptr(closure, acc, key_ptr, val)
         let acc_val = acc_phi.as_basic_value();
@@ -46707,7 +46713,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         // Call closure: fn_ptr(closure, key_ptr, val, acc)
         let acc_val = acc_phi.as_basic_value();
@@ -47467,7 +47473,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_insertWith: no map".to_string()))?;
 
-        let key_int = self.coerce_to_int(key_val)?;
+        let key_int = self.value_word_bits(key_val)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let new_ptr = self.value_to_ptr(new_val)?;
@@ -47600,7 +47606,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_adjust: no map".to_string()))?;
 
-        let key_int = self.coerce_to_int(key_val)?;
+        let key_int = self.value_word_bits(key_val)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -47823,7 +47829,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
 
         // Convert key i64 to ptr, call closure(key_ptr) -> new_key_ptr
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
         let new_key = self
             .builder()
             .build_indirect_call(
@@ -47985,7 +47991,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Pair is an ADT with (key, value)
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
         let val_ptr = self.extract_adt_field(head_ptr, 2, 1)?;
-        let key_int = self.coerce_to_int(key_ptr.into())?;
+        let key_int = self.value_word_bits(key_ptr.into())?;
         let key_int = self.canonical_container_key(key_int, kind)?;
 
         // Lookup key in current map
@@ -48566,7 +48572,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         let pred_result = self
             .builder()
@@ -48687,7 +48693,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_update: no map".to_string()))?;
 
-        let key_int = self.coerce_to_int(key_val)?;
+        let key_int = self.value_word_bits(key_val)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -48850,7 +48856,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_alter: no map".to_string()))?;
 
-        let key_int = self.coerce_to_int(key_val)?;
+        let key_int = self.value_word_bits(key_val)?;
         let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -49099,7 +49105,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("val_at: void".to_string()))?;
 
         // Build a (key, value) pair as a 2-tuple ADT (tag=0, arity=2)
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
         let pair = self.alloc_adt(0, 2)?;
         self.store_adt_field(pair, 2, 0, key_ptr.into())?;
         self.store_adt_field(pair, 2, 1, val_ptr)?;
@@ -49223,7 +49229,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
         let val_ptr = self.extract_adt_field(head_ptr, 2, 1)?;
 
-        let key_int = self.coerce_to_int(key_ptr.into())?;
+        let key_int = self.value_word_bits(key_ptr.into())?;
         let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = map_phi.as_basic_value().into_pointer_value();
 
@@ -49338,7 +49344,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("void".to_string()))?
             .into_int_value();
-        let key_ptr = self.int_to_ptr(key_i64)?;
+        let key_ptr = self.word_from_bits(key_i64)?;
 
         let new_acc = self.build_cons(key_ptr.into(), acc_phi.as_basic_value())?;
         let new_idx = self
@@ -49487,7 +49493,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let val = self
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("set_singleton: no value".to_string()))?;
-        let val_int = self.coerce_to_int(val)?;
+        let val_int = self.value_word_bits(val)?;
         let kind = self.container_key_kind(Some(val_expr), None);
         let val_int = self.canonical_container_key(val_int, kind)?;
         let rts_fn = self
@@ -49562,7 +49568,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let set_val = self
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_member: no set".to_string()))?;
-        let val_int = self.coerce_to_int(val)?;
+        let val_int = self.value_word_bits(val)?;
         let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
         let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
@@ -49593,7 +49599,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let set_val = self
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_insert: no set".to_string()))?;
-        let val_int = self.coerce_to_int(val)?;
+        let val_int = self.value_word_bits(val)?;
         let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
         let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
@@ -49624,7 +49630,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let set_val = self
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_delete: no set".to_string()))?;
-        let val_int = self.coerce_to_int(val)?;
+        let val_int = self.value_word_bits(val)?;
         let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
         let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
@@ -49857,7 +49863,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("elem_at: void".to_string()))?
             .into_int_value();
-        let elem_ptr = self.int_to_ptr(elem_i64)?;
+        let elem_ptr = self.word_from_bits(elem_i64)?;
 
         let new_acc = self.build_cons(elem_ptr.into(), acc_phi.as_basic_value())?;
         let new_idx = self
@@ -49971,7 +49977,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
         let tail_ptr = self.extract_list_tail(cur_ptr)?;
 
-        let elem_int = self.coerce_to_int(head_ptr.into())?;
+        let elem_int = self.value_word_bits(head_ptr.into())?;
         let elem_int = self.canonical_container_key(elem_int, kind)?;
         let set_ptr = set_phi.as_basic_value().into_pointer_value();
 
@@ -59972,15 +59978,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // `inttoptr` and `ptrtoint` appear nowhere else in this file (a test
     // holds that), so the representation can be changed here.
 
-    /// A scalar as a value word. Today: the scalar's own bits.
+    /// A scalar as a value word: the scalar's own bits, or, built for boxed
+    /// values, a box holding it. A float's bits are boxed as a `Double`
+    /// through [`Self::f64_to_ptr`]; everything else here is integral.
     fn word_from_scalar(
         &self,
         scalar: IntValue<'ctx>,
         label: &str,
     ) -> CodegenResult<PointerValue<'ctx>> {
+        if bhc_types::boxed_values() {
+            return self.boxed_scalar("bhc_box_int", scalar, label);
+        }
         self.builder()
             .build_int_to_ptr(scalar, self.type_mapper().ptr_type(), label)
             .map_err(|e| CodegenError::Internal(format!("failed to box a scalar: {e:?}")))
+    }
+
+    /// The bits of a `Double` as a value word.
+    fn word_from_double_bits(&self, bits: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        if bhc_types::boxed_values() {
+            return self.boxed_scalar("bhc_box_double", bits, "box_float");
+        }
+        self.word_from_scalar(bits, "box_float")
+    }
+
+    /// Call the runtime's `boxer` on `scalar`, widened to an `i64`.
+    fn boxed_scalar(
+        &self,
+        boxer: &str,
+        scalar: IntValue<'ctx>,
+        label: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        let ptr_ty = self.type_mapper().ptr_type();
+        let internal = |e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("failed to box a scalar: {e:?}"))
+        };
+        let width = scalar.get_type().get_bit_width();
+        let scalar = if width == 64 {
+            scalar
+        } else if width == 1 {
+            self.builder()
+                .build_int_z_extend(scalar, i64_ty, "box_widen")
+                .map_err(|e| internal(&e))?
+        } else if width < 64 {
+            self.builder()
+                .build_int_s_extend(scalar, i64_ty, "box_widen")
+                .map_err(|e| internal(&e))?
+        } else {
+            self.builder()
+                .build_int_truncate(scalar, i64_ty, "box_narrow")
+                .map_err(|e| internal(&e))?
+        };
+        let function = self.module.get_function(boxer).unwrap_or_else(|| {
+            self.module
+                .add_function(boxer, ptr_ty.fn_type(&[i64_ty.into()], false))
+        });
+        Ok(self
+            .builder()
+            .build_call(function, &[scalar.into()], label)
+            .map_err(|e| internal(&e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("boxing returned no value".to_string()))?
+            .into_pointer_value())
     }
 
     /// The scalar a value word holds, as an `i64`. Today: the word's bits.
@@ -59999,6 +60060,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         int_ty: inkwell::types::IntType<'ctx>,
         label: &str,
     ) -> CodegenResult<IntValue<'ctx>> {
+        if bhc_types::boxed_values() {
+            let i64_ty = self.type_mapper().i64_type();
+            let ptr_ty = self.type_mapper().ptr_type();
+            let internal = |e: &dyn std::fmt::Debug| {
+                CodegenError::Internal(format!("failed to unbox a scalar: {e:?}"))
+            };
+            let function = self.module.get_function("bhc_unbox").unwrap_or_else(|| {
+                self.module
+                    .add_function("bhc_unbox", i64_ty.fn_type(&[ptr_ty.into()], false))
+            });
+            let bits = self
+                .builder()
+                .build_call(function, &[word.into()], label)
+                .map_err(|e| internal(&e))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("unboxing returned no value".to_string()))?
+                .into_int_value();
+            let width = int_ty.get_bit_width();
+            return if width == 64 {
+                Ok(bits)
+            } else if width < 64 {
+                self.builder()
+                    .build_int_truncate(bits, int_ty, "unbox_narrow")
+                    .map_err(|e| internal(&e))
+            } else {
+                self.builder()
+                    .build_int_s_extend(bits, int_ty, "unbox_widen")
+                    .map_err(|e| internal(&e))
+            };
+        }
         self.builder()
             .build_ptr_to_int(word, int_ty, label)
             .map_err(|e| CodegenError::Internal(format!("failed to unbox a scalar: {e:?}")))
@@ -60007,10 +60099,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// The raw bits of a value word, to tell how the value is represented
     /// (a `Bool` arrives as the tag itself or as a pointer to its object).
     /// These are the call sites that know both representations.
+    ///
+    /// Built for boxed values there is one representation, a pointer, and
+    /// this answers the constructor's tag (or the 0/1 in the box generated
+    /// code made from a comparison), which every caller takes as "an
+    /// immediate tag" and uses as it is.
     fn word_bits(&self, word: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
+        if bhc_types::boxed_values() {
+            return self.scalar_from_word(word, label);
+        }
         self.builder()
             .build_ptr_to_int(word, self.type_mapper().i64_type(), label)
             .map_err(|e| CodegenError::Internal(format!("failed to read a word: {e:?}")))
+    }
+
+    /// A value word as an `i64`, for the runtime functions that take a
+    /// value in an integer parameter (a container key or element): the
+    /// word itself, never the scalar in it. Unboxed, it is the scalar's
+    /// bits either way; built for boxed values, a scalar is boxed first and
+    /// the box's address is passed.
+    fn value_word_bits(&self, value: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        if !bhc_types::boxed_values() {
+            return self.coerce_to_int(value);
+        }
+        let word = self.value_to_ptr(value)?;
+        self.builder()
+            .build_ptr_to_int(word, self.type_mapper().i64_type(), "word_bits")
+            .map_err(|e| CodegenError::Internal(format!("failed to pass a word: {e:?}")))
+    }
+
+    /// The value word a runtime function returned in an integer result (a
+    /// container key or element): the inverse of [`Self::value_word_bits`].
+    /// The bits are the word, in either representation.
+    fn word_from_bits(&self, bits: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        self.builder()
+            .build_int_to_ptr(bits, self.type_mapper().ptr_type(), "word")
+            .map_err(|e| CodegenError::Internal(format!("failed to take a word: {e:?}")))
     }
 
     /// Convert an integer to a pointer (boxing).
@@ -60025,7 +60149,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_bit_cast(float_val, self.type_mapper().i64_type(), "float_bits")
             .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
             .into_int_value();
-        self.word_from_scalar(bits, "box_float")
+        self.word_from_double_bits(bits)
     }
 
     /// Convert a pointer to an integer (unbox).

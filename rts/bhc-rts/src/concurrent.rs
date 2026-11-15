@@ -711,10 +711,14 @@ pub extern "C" fn bhc_my_thread_id() -> *mut u8 {
 /// `threadDelay`: sleep for at least `micros`, letting other threads run. A
 /// delay of 0 gives way to every thread that is ready.
 #[no_mangle]
-pub extern "C" fn bhc_thread_delay(micros: i64) {
+pub extern "C" fn bhc_thread_delay(micros: *const u8) {
     if crate::ffi::exception_pending() {
         return;
     }
+    // The delay arrives as a value word: generated code passes the `Int`
+    // argument as it holds it.
+    // SAFETY: `threadDelay`'s argument is an `Int`.
+    let micros = unsafe { bhc_rts_alloc::object::int_of(micros) };
     let me = me();
     let mut guard = lock();
     let wake_at = Instant::now() + Duration::from_micros(micros.max(0).unsigned_abs());

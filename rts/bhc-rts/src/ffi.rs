@@ -2635,7 +2635,14 @@ unsafe fn nullary_tag(ptr: *const u8, max_tag: usize) -> i64 {
         #[allow(clippy::cast_possible_wrap)]
         return raw as i64;
     }
-    unsafe { object::tag(ptr) }
+    // In boxed mode the tag that generated code computed (the 0/1 of a
+    // comparison) arrives in an `Int` box.
+    unsafe {
+        match object::tag(ptr) {
+            object::BOXED_INT | object::BOXED_CHAR => *ptr.cast::<i64>().add(1),
+            tag => tag,
+        }
+    }
 }
 
 /// Read a [Char] linked list into a Rust String.
@@ -6984,5 +6991,64 @@ mod ffloat_tests {
         assert_eq!(format_ffloat(2.35, Some(1)), "2.4");
         assert_eq!(format_ffloat(0.5, Some(0)), "0");
         assert_eq!(format_ffloat(2.5, Some(0)), "2");
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Value representation (#94)
+// ----------------------------------------------------------------------------
+
+/// Tell the runtime how the program holds scalars in value words: nonzero
+/// for boxed. Called once by the compiled program's `main`, before any
+/// Haskell code runs.
+#[no_mangle]
+pub extern "C" fn bhc_rts_set_value_rep(boxed: i32) {
+    bhc_rts_alloc::object::set_boxed(boxed != 0);
+}
+
+/// The value word for an `Int` (or a `Char`, as its code point) in boxed
+/// mode. Generated code calls this only when built for boxed values.
+#[no_mangle]
+pub extern "C" fn bhc_box_int(value: i64) -> *mut u8 {
+    bhc_rts_alloc::object::word_of_int(value)
+}
+
+/// The value word for a `Double`, given its bits, in boxed mode.
+#[no_mangle]
+pub extern "C" fn bhc_box_double(bits: i64) -> *mut u8 {
+    bhc_rts_alloc::object::word_of_double(f64::from_bits(bits as u64))
+}
+
+/// The scalar in a value word in boxed mode, as its bits: the `Int`, the
+/// code point, or the bits of the `Double` in the box.
+///
+/// A constructor is read as its tag and any other object as its address:
+/// generated code reads words of types it does not know this way, to
+/// branch on a `Bool` or to compare two values by identity.
+///
+/// # Safety
+///
+/// `word` must be null or point to a heap object.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_unbox(word: *const u8) -> i64 {
+    use bhc_rts_alloc::object;
+    if word.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller guarantees a heap object; a thunk is forced first.
+    unsafe {
+        let word = bhc_force(word.cast_mut()).cast_const();
+        match object::tag(word) {
+            object::BOXED_INT | object::BOXED_CHAR | object::BOXED_DOUBLE => {
+                *word.cast::<i64>().add(1)
+            }
+            // A constructor of an enumeration, read as its number (`Bool`
+            // as 0/1, which generated code does to branch on it).
+            tag if tag >= 0 => tag,
+            // Any other object, read as a number: its address, which is what
+            // the word was before boxing and what a comparison of two such
+            // values (`ThreadId`s, handles) has always compared.
+            _ => word as i64,
+        }
     }
 }

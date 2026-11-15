@@ -2461,6 +2461,11 @@ fn test_tier3_thread_id_equality_native() {
 }
 
 #[test]
+fn test_tier3_incomplete_patterns_native() {
+    run_native_test("tier3_io/incomplete_patterns", Profile::Default);
+}
+
+#[test]
 fn test_tier3_file_io_errors_native() {
     run_native_test("tier3_io/file_io_errors", Profile::Default);
 }

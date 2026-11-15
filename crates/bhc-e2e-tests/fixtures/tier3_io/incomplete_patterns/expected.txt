@@ -1,0 +1,9 @@
+(1,2,5,9,"two",1,0)
+f (C 7): pattern match failure
+g Nothing: pattern match failure
+h []: pattern match failure
+k 3: pattern match failure
+c 'b': pattern match failure
+s "maybe": pattern match failure
+case B of A: pattern match failure
+([1,2],4,[1,3])

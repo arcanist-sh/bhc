@@ -1383,6 +1383,22 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
                     binders: vec![],
                     rhs: def_rhs,
                 });
+            } else {
+                // No clause covers the rest: a value that reaches here must
+                // fail. Without an alternative for it the case had only the
+                // branches that were written, and code generation runs the
+                // last of them for a value that matches none: `f (C 7)` with
+                // clauses for `A` and `B` answered as `f B`, and `k 3` with
+                // clauses for 1 and 2 as `k 2`. The compiler warned and the
+                // program went on with a wrong value.
+                let uncovered = alts_leave_values_uncovered(ctx, &alts);
+                if uncovered {
+                    alts.push(Alt {
+                        con: AltCon::Default,
+                        binders: vec![],
+                        rhs: make_pattern_error(span),
+                    });
+                }
             }
 
             // If no default and no branches, generate error
@@ -1399,6 +1415,30 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
         }
 
         DecisionTree::Fail(span) => Ok(make_pattern_error(span)),
+    }
+}
+
+/// Whether some value of the scrutinee's type matches none of `alts`: there
+/// is no default, and a constructor of the type has no alternative, or the
+/// alternatives are literals (which never cover their type).
+///
+/// Such a case needs an alternative that fails. Code generation runs the
+/// last alternative for a value that matches none.
+pub(crate) fn alts_leave_values_uncovered(ctx: &LowerContext, alts: &[Alt]) -> bool {
+    if alts.iter().any(|alt| matches!(alt.con, AltCon::Default)) {
+        return false;
+    }
+    match alts.first().map(|alt| &alt.con) {
+        Some(AltCon::DataCon(first)) => {
+            let all = ctx.constructors_for_type_name(first.ty_con.name);
+            all.iter().any(|(_, name, _)| {
+                !alts
+                    .iter()
+                    .any(|alt| matches!(&alt.con, AltCon::DataCon(dc) if dc.name == *name))
+            })
+        }
+        Some(AltCon::Lit(_)) => true,
+        _ => false,
     }
 }
 

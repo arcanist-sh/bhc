@@ -10566,6 +10566,15 @@ fn lower_case(
             let core_alt = lower_pat_to_alt(ctx, &alt.pat, rhs, span)?;
             core_alts.push(core_alt);
         }
+        // A value that matches no alternative must fail: `case B of A -> 0`
+        // was 0, the only alternative there was.
+        if crate::pattern::alts_leave_values_uncovered(ctx, &core_alts) {
+            core_alts.push(core::Alt {
+                con: core::AltCon::Default,
+                binders: vec![],
+                rhs: crate::pattern::make_pattern_error(span),
+            });
+        }
         return Ok(core::Expr::Case(
             Box::new(scrutinee_core),
             core_alts,

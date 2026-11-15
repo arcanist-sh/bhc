@@ -6330,9 +6330,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Whether values of `ty` are ordered by their contents rather than by
     /// the word that represents them: lists and strings, tuples, `Text`,
-    /// `Integer`, `Double` and `Float`.
+    /// `Integer`, `Double` and `Float`, and the Prelude's constructor types
+    /// (`Bool`, `Ordering`, `Maybe`, `Either`), whose word is an address.
     fn is_ordered_by_contents(&self, ty: &Ty) -> bool {
         matches!(ty, Ty::Tuple(_))
+            || self.is_ordered_by_constructors(ty)
             || self.is_list_type(ty)
             || self.is_string_type(ty)
             || self.is_text_type(ty)
@@ -6442,6 +6444,57 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 };
                 self.lower_list_ordering(l, r, elem)
             }
+            t if self.is_unit_type(t) => Ok(i64_ty.const_int(1, false)),
+            t if self.is_bool_type(t) || Self::is_ordering_type(t) => {
+                // Constructors in declaration order: the tags order them.
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                self.ord_of_constructor_tags(l, r)
+            }
+            t if self.is_maybe_type(t).is_some() || self.is_either_type(t).is_some() => {
+                // The constructors that carry a value, by tag.
+                let payloads: Vec<(u64, Ty)> = match (self.is_maybe_type(t), self.is_either_type(t))
+                {
+                    (Some(a), _) => vec![(1, a.clone())],
+                    (_, Some((a, b))) => vec![(0, a.clone()), (1, b.clone())],
+                    _ => Vec::new(),
+                };
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                self.ord_of_sum(l, r, &payloads)
+            }
+            Ty::Con(con)
+                if self
+                    .derived_compare_fns
+                    .get(con.name.as_str())
+                    .is_some_and(|id| self.functions.contains_key(id)) =>
+            {
+                // A type with a derived `Ord`, inside a tuple, list, `Maybe`
+                // or `Either`: its `$derived_compare_T(env, lhs, rhs)`.
+                let cmp_fn = self
+                    .derived_compare_fns
+                    .get(con.name.as_str())
+                    .and_then(|id| self.functions.get(id))
+                    .copied()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("ordering: derived compare vanished".to_string())
+                    })?;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let null = self.type_mapper().ptr_type().const_null();
+                let ordering = self
+                    .builder()
+                    .build_call(cmp_fn, &[null.into(), l.into(), r.into()], "derived_ord")
+                    .map_err(|e| internal("derived compare", &e))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("ordering: derived compare void".to_string())
+                    })?;
+                let ordering = self.value_to_ptr(ordering)?;
+                let ordering = self.build_force(ordering.into())?.into_pointer_value();
+                self.extract_adt_tag(ordering)
+            }
             t if self.is_integer_type(t) => {
                 // bhc_integer_compare answers the Ordering tag.
                 let cmp_fn = *self.functions.get(&VarId::new(1000617)).ok_or_else(|| {
@@ -6488,6 +6541,122 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.ordering_tag(is_lt, is_gt)
             }
         }
+    }
+
+    /// Whether `ty` is one of the Prelude's constructor types with an `Ord`
+    /// instance: `Bool`, `Ordering`, `Maybe` or `Either`.
+    fn is_ordered_by_constructors(&self, ty: &Ty) -> bool {
+        self.is_bool_type(ty)
+            || Self::is_ordering_type(ty)
+            || self.is_maybe_type(ty).is_some()
+            || self.is_either_type(ty).is_some()
+    }
+
+    /// Whether `ty` is `Ordering`.
+    fn is_ordering_type(ty: &Ty) -> bool {
+        matches!(ty, Ty::Con(con) if con.name.as_str() == "Ordering")
+    }
+
+    /// The `Ordering` tag of two evaluated constructor values by their
+    /// constructor tags alone: declaration order.
+    fn ord_of_constructor_tags(
+        &mut self,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let l = self.extract_adt_tag(lhs)?;
+        let r = self.extract_adt_tag(rhs)?;
+        let is_lt = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, l, r, "tag_lt")
+            .map_err(|e| CodegenError::Internal(format!("tag ordering: {e:?}")))?;
+        let is_gt = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::SGT, l, r, "tag_gt")
+            .map_err(|e| CodegenError::Internal(format!("tag ordering: {e:?}")))?;
+        self.ordering_tag(is_lt, is_gt)
+    }
+
+    /// The `Ordering` tag of two evaluated values of a sum type whose
+    /// constructors carry at most one value (`Maybe`, `Either`): the
+    /// constructors in declaration order, and two values of the same
+    /// constructor by what they carry. `payloads` gives, for each constructor
+    /// that carries a value, its tag and that value's type.
+    fn ord_of_sum(
+        &mut self,
+        lhs: PointerValue<'ctx>,
+        rhs: PointerValue<'ctx>,
+        payloads: &[(u64, Ty)],
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        let internal = |step: &str, e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("sum ordering: {step}: {e:?}"))
+        };
+        let by_tags = self.ord_of_constructor_tags(lhs, rhs)?;
+        let tag = self.extract_adt_tag(lhs)?;
+        let start = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("sum ordering: no block".to_string()))?;
+        let current_fn = start
+            .get_parent()
+            .ok_or_else(|| CodegenError::Internal("sum ordering: no function".to_string()))?;
+        let same = self.llvm_ctx.append_basic_block(current_fn, "sum_ord_same");
+        let done = self.llvm_ctx.append_basic_block(current_fn, "sum_ord_done");
+        let same_constructor = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                by_tags,
+                i64_ty.const_int(1, false),
+                "sum_ord_same_constructor",
+            )
+            .map_err(|e| internal("compare", &e))?;
+        self.builder()
+            .build_conditional_branch(same_constructor, same, done)
+            .map_err(|e| internal("branch", &e))?;
+
+        let mut incoming: Vec<(IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            vec![(by_tags, start)];
+        let blocks: Vec<_> = payloads
+            .iter()
+            .map(|(constructor, _)| {
+                (
+                    i64_ty.const_int(*constructor, false),
+                    self.llvm_ctx
+                        .append_basic_block(current_fn, "sum_ord_payload"),
+                )
+            })
+            .collect();
+        self.builder().position_at_end(same);
+        // A constructor that carries nothing: equal.
+        self.builder()
+            .build_switch(tag, done, &blocks)
+            .map_err(|e| internal("switch", &e))?;
+        incoming.push((by_tags, same));
+        for ((_, payload_ty), (_, block)) in payloads.iter().zip(&blocks) {
+            self.builder().position_at_end(*block);
+            let l = self.extract_adt_field(lhs, 1, 0)?;
+            let r = self.extract_adt_field(rhs, 1, 0)?;
+            let ordering = self.ord_by_type(payload_ty, l.into(), r.into())?;
+            let end = self
+                .builder()
+                .get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("sum ordering: no block".to_string()))?;
+            self.builder()
+                .build_unconditional_branch(done)
+                .map_err(|e| internal("branch", &e))?;
+            incoming.push((ordering, end));
+        }
+        self.builder().position_at_end(done);
+        let result = self
+            .builder()
+            .build_phi(i64_ty, "sum_ord")
+            .map_err(|e| internal("phi", &e))?;
+        for (value, block) in &incoming {
+            result.add_incoming(&[(value, *block)]);
+        }
+        Ok(result.as_basic_value().into_int_value())
     }
 
     /// The lexicographic ordering of two lists, as an `Ordering` tag: the
@@ -29212,6 +29381,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 || self.is_list_type(t)
                 || self.is_string_type(t)
                 || self.is_text_type(t)
+                || self.is_ordered_by_constructors(t)
         }) {
             // `compare` does not make its operands agree in the type
             // checker, so under OverloadedStrings one can be a `Text` and
@@ -31604,6 +31774,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // that 2-tuples use (`build_show_descriptor` makes it an N-tuple).
         if Self::tuple_n_con_args(expr).is_some() || Self::tuple_n_types(&expr.ty()).is_some() {
             return Some((ShowCoerce::Tuple2Of, 1000096, "show_tuple2"));
+        }
+        // An expression typed `Ordering`, whatever its shape: `max LT EQ` and
+        // `head [GT, LT]` fell through to the Int path and printed an address.
+        if Self::is_ordering_type(&expr.ty()) {
+            return Some((ShowCoerce::Ordering, 1000098, "show_ordering"));
         }
         match expr {
             // String literal
@@ -35428,6 +35603,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         b_expr: &Expr,
         want_max: bool,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // `Bool`, `Ordering`, `Maybe`, `Either`: by constructor, then by
+        // what it carries. Their words are addresses too.
+        let operand_ty = match &self.current_builtin_ty {
+            Ty::Fun(a, _) if self.is_ordered_by_constructors(a) => Some(a.as_ref().clone()),
+            _ => [a_expr.ty(), b_expr.ty()]
+                .into_iter()
+                .find(|t| self.is_ordered_by_constructors(t)),
+        };
+        if let Some(ty) = operand_ty {
+            let lhs = self
+                .lower_expr(a_expr)?
+                .ok_or_else(|| CodegenError::Internal("min/max: no lhs".to_string()))?;
+            let rhs = self
+                .lower_expr(b_expr)?
+                .ok_or_else(|| CodegenError::Internal("min/max: no rhs".to_string()))?;
+            let tag = self.ord_by_type(&ty, lhs, rhs)?;
+            let gt = self.type_mapper().i64_type().const_int(2, false);
+            let a_le_b = self
+                .builder()
+                .build_int_compare(inkwell::IntPredicate::NE, tag, gt, "minmax_a_le_b")
+                .map_err(|e| CodegenError::Internal(format!("min/max le: {:?}", e)))?;
+            let (on_le, on_gt) = if want_max { (rhs, lhs) } else { (lhs, rhs) };
+            let selected = self
+                .builder()
+                .build_select(a_le_b, on_le, on_gt, "minmax_sel")
+                .map_err(|e| CodegenError::Internal(format!("min/max select: {:?}", e)))?;
+            return Ok(Some(selected));
+        }
         let adt_type = Self::is_user_adt_expr(a_expr, &self.constructor_metadata)
             .or_else(|| Self::is_user_adt_expr(b_expr, &self.constructor_metadata));
         let Some(type_name) = adt_type else {
@@ -60025,15 +60228,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
 
                 // `<`, `<=`, `>`, `>=` on tuples: by the first component that
-                // differs. They compared the two boxes' addresses.
+                // differs. They compared the two boxes' addresses. The same
+                // for `Bool`, `Ordering`, `Maybe` and `Either`: by constructor,
+                // then by what the constructor carries.
                 if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+                    let by_contents = |this: &Self, t: &Ty| {
+                        matches!(t, Ty::Tuple(_)) || this.is_ordered_by_constructors(t)
+                    };
                     let tuple_ty = match op_ty {
-                        Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Tuple(_)) => {
-                            Some(a.as_ref().clone())
-                        }
+                        Ty::Fun(a, _) if by_contents(self, a) => Some(a.as_ref().clone()),
                         _ => [args[0].ty(), args[1].ty()]
                             .into_iter()
-                            .find(|t| matches!(t, Ty::Tuple(_)))
+                            .find(|t| by_contents(self, t))
                             // Types erased (eager model): a literal tuple on
                             // either side still gives the components.
                             .or_else(|| args.iter().find_map(|a| self.literal_tuple_ty(a))),

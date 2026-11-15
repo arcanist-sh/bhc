@@ -65,6 +65,28 @@ fn test_rejected_compare_mismatched() {
 }
 
 #[test]
+fn test_rejected_ordering_constructor_mismatched() {
+    expect_rejected(
+        "ordering_constructor_mismatched.hs",
+        "type mismatch: expected `Ordering`, found `Char`",
+    );
+}
+
+#[test]
+fn test_rejected_sum_string() {
+    expect_rejected("sum_string.hs", "No instance for `Num Char`");
+}
+
+#[test]
+fn test_rejected_arithmetic_not_numbers() {
+    let file = "arithmetic_not_numbers.hs";
+    expect_rejected(file, "No instance for `Num Char`");
+    expect_rejected(file, "No instance for `Num Bool`");
+    expect_rejected(file, "No instance for `Num (");
+    expect_rejected(file, "No instance for `Integral Char`");
+}
+
+#[test]
 fn test_rejected_show_tuple_section() {
     expect_rejected("show_tuple_section.hs", "No instance for `Show (");
 }
@@ -2458,6 +2480,16 @@ fn test_tier3_container_equality_native() {
 #[test]
 fn test_tier3_thread_id_equality_native() {
     run_native_test("tier3_io/thread_id_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_prelude_constructor_ordering_native() {
+    run_native_test("tier3_io/prelude_constructor_ordering", Profile::Default);
+}
+
+#[test]
+fn test_tier3_user_num_instance_native() {
+    run_native_test("tier3_io/user_num_instance", Profile::Default);
 }
 
 #[test]

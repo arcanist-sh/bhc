@@ -2483,6 +2483,11 @@ fn test_tier3_thread_id_equality_native() {
 }
 
 #[test]
+fn test_tier3_max_min_compare_by_contents_native() {
+    run_native_test("tier3_io/max_min_compare_by_contents", Profile::Default);
+}
+
+#[test]
 fn test_tier3_with_file_native() {
     run_native_test("tier3_io/with_file", Profile::Default);
 }

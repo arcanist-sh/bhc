@@ -6463,22 +6463,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let r = as_ptr(self, rhs)?;
                 self.ord_of_sum(l, r, &payloads)
             }
-            Ty::Con(con)
-                if self
-                    .derived_compare_fns
-                    .get(con.name.as_str())
-                    .is_some_and(|id| self.functions.contains_key(id)) =>
-            {
-                // A type with a derived `Ord`, inside a tuple, list, `Maybe`
-                // or `Either`: its `$derived_compare_T(env, lhs, rhs)`.
-                let cmp_fn = self
-                    .derived_compare_fns
-                    .get(con.name.as_str())
-                    .and_then(|id| self.functions.get(id))
-                    .copied()
-                    .ok_or_else(|| {
-                        CodegenError::Internal("ordering: derived compare vanished".to_string())
-                    })?;
+            t if self.derived_ord_function(t).is_some() => {
+                // A type with a derived `Ord` (`Color`, `Tree Int`): its
+                // `$derived_compare_T(env, lhs, rhs)`.
+                let cmp_fn = self.derived_ord_function(t).ok_or_else(|| {
+                    CodegenError::Internal("ordering: derived compare vanished".to_string())
+                })?;
                 let l = as_ptr(self, lhs)?;
                 let r = as_ptr(self, rhs)?;
                 let null = self.type_mapper().ptr_type().const_null();
@@ -6550,6 +6540,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             || Self::is_ordering_type(ty)
             || self.is_maybe_type(ty).is_some()
             || self.is_either_type(ty).is_some()
+    }
+
+    /// The derived `compare` of the data type at the head of `ty`, if it has
+    /// one in this module.
+    fn derived_ord_function(&self, ty: &Ty) -> Option<FunctionValue<'ctx>> {
+        let mut head = ty;
+        while let Ty::App(f, _) = head {
+            head = f.as_ref();
+        }
+        let Ty::Con(con) = head else {
+            return None;
+        };
+        // Only `(env, lhs, rhs)`: a hand-written instance's `compare` is
+        // registered here too, and one that takes dictionaries has more
+        // parameters.
+        self.derived_compare_fns
+            .get(con.name.as_str())
+            .and_then(|id| self.functions.get(id))
+            .copied()
+            .filter(|function| function.count_params() == 3)
     }
 
     /// Whether `ty` is `Ordering`.
@@ -29376,11 +29386,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // A type ordered by its contents: lists and strings, tuples, Text.
         // The fallback below compares two words, which for these is two
         // addresses (`compare "b" "a"` was LT).
+        // Or a data type with a derived `Ord`, when neither operand names a
+        // constructor (`compare t u` on two variables): the fallback
+        // compared the two objects' addresses.
+        let by_contents = |this: &Self, t: &Ty| {
+            this.is_ordered_by_contents(t) || this.derived_ord_function(t).is_some()
+        };
         let operand_ty = match &self.current_builtin_ty {
-            Ty::Fun(a, _) if self.is_ordered_by_contents(a) => Some(a.as_ref().clone()),
+            Ty::Fun(a, _) if by_contents(self, a) => Some(a.as_ref().clone()),
             _ => [a_expr.ty(), b_expr.ty()]
                 .into_iter()
-                .find(|t| self.is_ordered_by_contents(t)),
+                .find(|t| by_contents(self, t)),
         };
         if let Some(ty) = operand_ty.filter(|t| {
             matches!(t, Ty::Tuple(_))
@@ -29388,6 +29404,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 || self.is_string_type(t)
                 || self.is_text_type(t)
                 || self.is_ordered_by_constructors(t)
+                || self.derived_ord_function(t).is_some()
         }) {
             // `compare` does not make its operands agree in the type
             // checker, so under OverloadedStrings one can be a `Text` and
@@ -35609,13 +35626,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         b_expr: &Expr,
         want_max: bool,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // `Bool`, `Ordering`, `Maybe`, `Either`: by constructor, then by
-        // what it carries. Their words are addresses too.
+        // A type ordered by its contents (a string, list, tuple, `Text`,
+        // `Integer`, `Double`, `Bool`, `Ordering`, `Maybe`, `Either`): the
+        // word is an address, or bits that do not order as the value does.
         let operand_ty = match &self.current_builtin_ty {
-            Ty::Fun(a, _) if self.is_ordered_by_constructors(a) => Some(a.as_ref().clone()),
+            Ty::Fun(a, _) if self.is_ordered_by_contents(a) => Some(a.as_ref().clone()),
             _ => [a_expr.ty(), b_expr.ty()]
                 .into_iter()
-                .find(|t| self.is_ordered_by_constructors(t)),
+                .find(|t| self.is_ordered_by_contents(t)),
         };
         if let Some(ty) = operand_ty {
             let lhs = self
@@ -35630,6 +35648,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .builder()
                 .build_int_compare(inkwell::IntPredicate::NE, tag, gt, "minmax_a_le_b")
                 .map_err(|e| CodegenError::Internal(format!("min/max le: {:?}", e)))?;
+            // One operand may be an unboxed scalar and the other a value
+            // word (`max x 1.0` with `x` a variable): select between words.
+            let (lhs, rhs) = if lhs.get_type() == rhs.get_type() {
+                (lhs, rhs)
+            } else {
+                (
+                    self.value_to_ptr(lhs)?.into(),
+                    self.value_to_ptr(rhs)?.into(),
+                )
+            };
             let (on_le, on_gt) = if want_max { (rhs, lhs) } else { (lhs, rhs) };
             let selected = self
                 .builder()

@@ -1,0 +1,7 @@
+6
+one
+two
+three
+partial
+caught: user error (inside)
+open failed: True

@@ -1412,6 +1412,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         if let Some(op) = bytestring_class_op(ctx, name.as_str(), def_ref.span) {
             return Ok(op);
         }
+        if matches!(v.name.as_str(), "withFile" | "System.IO.withFile") {
+            return Ok(with_file(ctx, def_ref.span));
+        }
         // `Data.ByteString.Char8` is the strict ByteString at `Char`: a
         // character and a byte are both the machine word, so the function is
         // the strict primitive of the same name. The type checker has given
@@ -5671,6 +5674,34 @@ fn lower_generated_traversal(
         Box::new(core::Expr::Lam(ignored, Box::new(unit), span)),
         span,
     )))
+}
+
+/// `System.IO.withFile`, as Core:
+///
+/// ```text
+/// withFile = \path mode action -> bracket (openFile path mode) hClose action
+/// ```
+///
+/// It had a type and no implementation, so a program that used it stopped
+/// at the call. `bracket` closes the handle whether the action returns or
+/// throws.
+fn with_file(ctx: &mut LowerContext, span: Span) -> core::Expr {
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let path = ctx.fresh_var("$wf_path", Ty::Error, span);
+    let mode = ctx.fresh_var("$wf_mode", Ty::Error, span);
+    let action = ctx.fresh_var("$wf_action", Ty::Error, span);
+    let open = app(app(nullary_var("openFile", span), var(&path)), var(&mode));
+    let body = app(
+        app(
+            app(nullary_var("bracket", span), open),
+            nullary_var("hClose", span),
+        ),
+        var(&action),
+    );
+    [action, mode, path].into_iter().fold(body, |inner, param| {
+        core::Expr::Lam(param, Box::new(inner), span)
+    })
 }
 
 fn nullary_var(name: &str, span: Span) -> core::Expr {

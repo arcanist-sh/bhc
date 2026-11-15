@@ -76,6 +76,28 @@
 //! [`MAP`] and [`SET`], like the objects above. A file handle is behind
 //! [`HANDLE`]; its layout is in the `handle` module.
 //!
+//! # Scalars in a value word
+//!
+//! A value word is a constructor field, a captured value, a list element, a
+//! container key: any word that may hold a value of any type. An `Int`, a
+//! `Char` or a `Double` in such a word is held in one of two ways, chosen
+//! for the whole program ([`set_boxed`]):
+//!
+//! - **raw**, the way it has always been: the scalar's bits are the word.
+//!   Nothing at run time tells such a word from a pointer.
+//! - **boxed** (#94): the word points to a box.
+//!
+//! ```text
+//! word 0        BOXED_INT, BOXED_CHAR or BOXED_DOUBLE
+//! word 1        the scalar: an i64, a code point, or an f64's bits
+//! ```
+//!
+//! Code that reads or writes a scalar in a value word goes through
+//! [`int_of`]/[`word_of_int`] and their `Char` and `Double` relatives,
+//! which do the right thing in either mode. A `Float` travels as a
+//! `Double`. Small `Int`s and Latin-1 `Char`s have static boxes, so the
+//! common values cost no allocation.
+//!
 //! # Allocation
 //!
 //! Constructors built here come from the system allocator, as they did at
@@ -84,7 +106,7 @@
 //! allocates.
 
 use std::alloc::{alloc, Layout};
-use std::sync::atomic::{AtomicI64, AtomicPtr};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
 
 /// The size of a word: the tag and each field take one.
 pub const WORD: usize = 8;
@@ -467,6 +489,193 @@ pub unsafe fn bytes_len(object: *const u8) -> usize {
     unsafe { object.cast::<usize>().add(3).read() }
 }
 
+/// Word 0 of a boxed `Int` (or any of the sized integers).
+pub const BOXED_INT: i64 = -32;
+/// Word 0 of a boxed `Char`.
+pub const BOXED_CHAR: i64 = -33;
+/// Word 0 of a boxed `Double` (or `Float`).
+pub const BOXED_DOUBLE: i64 = -34;
+
+/// Whether scalars in value words are boxed. Raw until the program says
+/// otherwise.
+///
+/// Each library that links this crate has its own copy when the libraries
+/// are shared objects, so each is told separately at startup.
+static BOXED: AtomicBool = AtomicBool::new(false);
+
+/// Choose how this library holds scalars in value words. Called once, at
+/// startup, before any Haskell code runs.
+pub fn set_boxed(boxed: bool) {
+    BOXED.store(boxed, Ordering::Release);
+}
+
+/// Whether scalars in value words are boxed.
+#[inline]
+#[must_use]
+pub fn boxed() -> bool {
+    BOXED.load(Ordering::Relaxed)
+}
+
+/// The least `Int` with a static box.
+pub const SMALL_INT_MIN: i64 = -16;
+/// The greatest `Int` with a static box.
+pub const SMALL_INT_MAX: i64 = 255;
+
+/// A box: kind and payload. `repr(C)` so that it is the two words above.
+#[repr(C)]
+struct ScalarBox {
+    kind: i64,
+    payload: i64,
+}
+
+const SMALL_INT_COUNT: usize = (SMALL_INT_MAX - SMALL_INT_MIN + 1) as usize;
+
+/// The boxes of the small `Int`s, `SMALL_INT_MIN` first.
+static SMALL_INTS: [ScalarBox; SMALL_INT_COUNT] = {
+    let mut boxes = [const {
+        ScalarBox {
+            kind: BOXED_INT,
+            payload: 0,
+        }
+    }; SMALL_INT_COUNT];
+    let mut index = 0;
+    while index < SMALL_INT_COUNT {
+        boxes[index].payload = SMALL_INT_MIN + index as i64;
+        index += 1;
+    }
+    boxes
+};
+
+/// The boxes of the Latin-1 `Char`s, by code point.
+static LATIN1_CHARS: [ScalarBox; 256] = {
+    let mut boxes = [const {
+        ScalarBox {
+            kind: BOXED_CHAR,
+            payload: 0,
+        }
+    }; 256];
+    let mut index = 0;
+    while index < 256 {
+        boxes[index].payload = index as i64;
+        index += 1;
+    }
+    boxes
+};
+
+/// Allocate a box. Never freed, like every other object here.
+fn new_box(kind: i64, payload: i64) -> *mut u8 {
+    Box::into_raw(Box::new(ScalarBox { kind, payload })).cast::<u8>()
+}
+
+/// The payload of the box `word` points to.
+///
+/// # Safety
+///
+/// `word` must point to an evaluated box of kind `kind`.
+#[inline]
+unsafe fn payload_of(word: *const u8, kind: i64) -> i64 {
+    // SAFETY: the caller guarantees a box.
+    let scalar = unsafe { &*word.cast::<ScalarBox>() };
+    debug_assert_eq!(
+        scalar.kind, kind,
+        "a value word is not the box its type says"
+    );
+    scalar.payload
+}
+
+/// The `Int` in a value word.
+///
+/// # Safety
+///
+/// `word` must hold an `Int`: its bits in raw mode, an evaluated box in
+/// boxed mode.
+#[inline]
+#[must_use]
+pub unsafe fn int_of(word: *const u8) -> i64 {
+    if boxed() {
+        // SAFETY: in boxed mode the caller guarantees a box.
+        unsafe { payload_of(word, BOXED_INT) }
+    } else {
+        word as i64
+    }
+}
+
+/// The value word for an `Int`.
+#[inline]
+#[must_use]
+pub fn word_of_int(value: i64) -> *mut u8 {
+    if !boxed() {
+        return value as *mut u8;
+    }
+    if (SMALL_INT_MIN..=SMALL_INT_MAX).contains(&value) {
+        let index = (value - SMALL_INT_MIN) as usize;
+        return std::ptr::addr_of!(SMALL_INTS[index])
+            .cast::<u8>()
+            .cast_mut();
+    }
+    new_box(BOXED_INT, value)
+}
+
+/// The `Char` in a value word, as its code point.
+///
+/// # Safety
+///
+/// `word` must hold a `Char`: its code point in raw mode, an evaluated box
+/// in boxed mode.
+#[inline]
+#[must_use]
+pub unsafe fn char_of(word: *const u8) -> u32 {
+    if boxed() {
+        // SAFETY: in boxed mode the caller guarantees a box.
+        unsafe { payload_of(word, BOXED_CHAR) as u32 }
+    } else {
+        word as usize as u32
+    }
+}
+
+/// The value word for a `Char`, given its code point.
+#[inline]
+#[must_use]
+pub fn word_of_char(code_point: u32) -> *mut u8 {
+    if !boxed() {
+        return code_point as usize as *mut u8;
+    }
+    if let Some(latin1) = LATIN1_CHARS.get(code_point as usize) {
+        return std::ptr::addr_of!(*latin1).cast::<u8>().cast_mut();
+    }
+    new_box(BOXED_CHAR, i64::from(code_point))
+}
+
+/// The `Double` in a value word.
+///
+/// # Safety
+///
+/// `word` must hold a `Double`: its bits in raw mode, an evaluated box in
+/// boxed mode.
+#[inline]
+#[must_use]
+pub unsafe fn double_of(word: *const u8) -> f64 {
+    let bits = if boxed() {
+        // SAFETY: in boxed mode the caller guarantees a box.
+        unsafe { payload_of(word, BOXED_DOUBLE) }
+    } else {
+        word as i64
+    };
+    f64::from_bits(bits as u64)
+}
+
+/// The value word for a `Double`.
+#[inline]
+#[must_use]
+pub fn word_of_double(value: f64) -> *mut u8 {
+    let bits = value.to_bits() as i64;
+    if boxed() {
+        new_box(BOXED_DOUBLE, bits)
+    } else {
+        bits as *mut u8
+    }
+}
+
 /// One more than the largest constructor tag [`is_first_word`] accepts. A
 /// type has far fewer constructors; a larger word 0 is an address or a
 /// number, not a tag.
@@ -492,6 +701,9 @@ pub const fn is_first_word(word: i64) -> bool {
             | MAP
             | SET
             | HANDLE
+            | BOXED_INT
+            | BOXED_CHAR
+            | BOXED_DOUBLE
     )
 }
 
@@ -586,6 +798,66 @@ mod tests {
         for word in [0x1_0000_0000, TAG_LIMIT, -5, -15, -25] {
             assert!(!is_first_word(word), "{word}");
         }
+    }
+
+    #[test]
+    fn scalars_in_value_words_in_both_modes() {
+        // The mode is one flag for the process, so both halves are in one
+        // test; nothing else in this crate's tests reads it.
+        let ints = [0, 1, -1, 255, 256, -16, -17, i64::MAX, i64::MIN];
+        let chars = [0u32, 0x41, 0xff, 0x100, 0x1f600];
+        let doubles = [0.0, -0.0, 1.5, -2.5, f64::INFINITY, f64::MIN_POSITIVE];
+
+        // Raw: the word is the scalar's bits.
+        assert!(!boxed());
+        assert_eq!(word_of_int(42) as usize, 42);
+        assert_eq!(word_of_char(0x41) as usize, 0x41);
+        assert_eq!(word_of_double(1.5) as usize as u64, 1.5f64.to_bits());
+        // SAFETY: each word was made for the type it is read at.
+        unsafe {
+            for n in ints {
+                assert_eq!(int_of(word_of_int(n)), n);
+            }
+            for c in chars {
+                assert_eq!(char_of(word_of_char(c)), c);
+            }
+            for d in doubles {
+                assert_eq!(double_of(word_of_double(d)).to_bits(), d.to_bits());
+            }
+        }
+
+        // Boxed: the word points to a box that says what it holds.
+        set_boxed(true);
+        // SAFETY: as above; and each word is a pointer to a box.
+        unsafe {
+            for n in ints {
+                let word = word_of_int(n);
+                assert_eq!(tag(word), BOXED_INT);
+                assert_eq!(int_of(word), n);
+            }
+            for c in chars {
+                let word = word_of_char(c);
+                assert_eq!(tag(word), BOXED_CHAR);
+                assert_eq!(char_of(word), c);
+            }
+            for d in doubles {
+                let word = word_of_double(d);
+                assert_eq!(tag(word), BOXED_DOUBLE);
+                assert_eq!(double_of(word).to_bits(), d.to_bits());
+            }
+        }
+        // Small values share one static box; others are allocated.
+        assert_eq!(word_of_int(7), word_of_int(7));
+        assert_eq!(word_of_int(SMALL_INT_MIN), word_of_int(SMALL_INT_MIN));
+        assert_eq!(word_of_int(SMALL_INT_MAX), word_of_int(SMALL_INT_MAX));
+        assert_ne!(
+            word_of_int(SMALL_INT_MAX + 1),
+            word_of_int(SMALL_INT_MAX + 1)
+        );
+        assert_eq!(word_of_char(0xe9), word_of_char(0xe9));
+        assert_ne!(word_of_char(0x100), word_of_char(0x100));
+        assert!(is_first_word(BOXED_INT) && is_first_word(BOXED_DOUBLE));
+        set_boxed(false);
     }
 
     #[test]

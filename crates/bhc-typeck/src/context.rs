@@ -8283,6 +8283,12 @@ impl TyCtxt {
                         // was unknown and `print (foldM f z xs)` at `Maybe`
                         // printed an address.
                         | "foldM"
+                        // `compare :: a -> a -> Ordering` is exact. Typed
+                        // fresh, its two arguments did not have to agree:
+                        // `compare (3 :: Int) "x"` compiled, and under
+                        // OverloadedStrings `compare t "b"` at `Text` left
+                        // the literal a `[Char]` (#97).
+                        | "compare"
                         // `import Data.List` re-exports these with their exact
                         // builtin schemes. Typed fresh, `print (sort xs)` at a
                         // user type could not see the element type and

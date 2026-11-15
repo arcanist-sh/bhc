@@ -60,6 +60,11 @@ fn test_rejected_show_function() {
 }
 
 #[test]
+fn test_rejected_compare_mismatched() {
+    expect_rejected("compare_mismatched.hs", "type mismatch: expected `Int`");
+}
+
+#[test]
 fn test_rejected_show_tuple_section() {
     expect_rejected("show_tuple_section.hs", "No instance for `Show (");
 }

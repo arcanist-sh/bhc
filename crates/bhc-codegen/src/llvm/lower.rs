@@ -60023,6 +60023,130 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to box a scalar: {e:?}")))
     }
 
+    /// The scalar in a value word, built for boxed values: the payload of a
+    /// box, or what the runtime's `bhc_unbox` makes of anything else (a
+    /// thunk to force, an object read as its address, null).
+    ///
+    /// The test for a box is a function of the module, marked to be inlined,
+    /// and not blocks at the call site: callers hold on to the block they
+    /// are in across a conversion, for a phi they build afterwards.
+    fn unboxed_bits(&self, word: PointerValue<'ctx>, label: &str) -> CodegenResult<IntValue<'ctx>> {
+        let helper = self.unbox_helper()?;
+        Ok(self
+            .builder()
+            .build_call(helper, &[word.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox a scalar: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("unboxing returned no value".to_string()))?
+            .into_int_value())
+    }
+
+    /// The module's `i64 __bhc_unbox(ptr)`: the payload of a box read in
+    /// place, the runtime's `bhc_unbox` for anything else.
+    fn unbox_helper(&self) -> CodegenResult<FunctionValue<'ctx>> {
+        use bhc_rts_alloc::object::{BOXED_DOUBLE, BOXED_INT};
+        const NAME: &str = "__bhc_unbox";
+        if let Some(helper) = self.module.get_function(NAME) {
+            return Ok(helper);
+        }
+        let i64_ty = self.type_mapper().i64_type();
+        let ptr_ty = self.type_mapper().ptr_type();
+        let internal = |e: &dyn std::fmt::Debug| {
+            CodegenError::Internal(format!("failed to build the unbox helper: {e:?}"))
+        };
+        let fn_type = i64_ty.fn_type(&[ptr_ty.into()], false);
+        let runtime = self
+            .module
+            .get_function("bhc_unbox")
+            .unwrap_or_else(|| self.module.add_function("bhc_unbox", fn_type));
+        let helper = self.module.add_internal_function(NAME, fn_type);
+        let always_inline = self.llvm_ctx.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"),
+            0,
+        );
+        helper.add_attribute(inkwell::attributes::AttributeLoc::Function, always_inline);
+        let word = helper
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::Internal("unbox helper: no parameter".to_string()))?
+            .into_pointer_value();
+
+        let saved = self.builder().get_insert_block();
+        let entry = self.llvm_ctx.append_basic_block(helper, "entry");
+        let non_null = self.llvm_ctx.append_basic_block(helper, "non_null");
+        let boxed = self.llvm_ctx.append_basic_block(helper, "box");
+        let other = self.llvm_ctx.append_basic_block(helper, "other");
+
+        self.builder().position_at_end(entry);
+        let is_null = self
+            .builder()
+            .build_is_null(word, "is_null")
+            .map_err(|e| internal(&e))?;
+        self.builder()
+            .build_conditional_branch(is_null, other, non_null)
+            .map_err(|e| internal(&e))?;
+
+        // The box kinds are consecutive: BOXED_DOUBLE ..= BOXED_INT.
+        self.builder().position_at_end(non_null);
+        let kind = self
+            .builder()
+            .build_load(i64_ty, word, "kind")
+            .map_err(|e| internal(&e))?
+            .into_int_value();
+        let offset = self
+            .builder()
+            .build_int_sub(
+                kind,
+                i64_ty.const_int(BOXED_DOUBLE as u64, true),
+                "kind_offset",
+            )
+            .map_err(|e| internal(&e))?;
+        let is_box = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::ULE,
+                offset,
+                i64_ty.const_int((BOXED_INT - BOXED_DOUBLE) as u64, false),
+                "is_box",
+            )
+            .map_err(|e| internal(&e))?;
+        self.builder()
+            .build_conditional_branch(is_box, boxed, other)
+            .map_err(|e| internal(&e))?;
+
+        self.builder().position_at_end(boxed);
+        // SAFETY: a box is two words, kind then payload.
+        let payload_slot = unsafe {
+            self.builder()
+                .build_gep(i64_ty, word, &[i64_ty.const_int(1, false)], "payload_slot")
+                .map_err(|e| internal(&e))?
+        };
+        let payload = self
+            .builder()
+            .build_load(i64_ty, payload_slot, "payload")
+            .map_err(|e| internal(&e))?;
+        self.builder()
+            .build_return(Some(&payload))
+            .map_err(|e| internal(&e))?;
+
+        self.builder().position_at_end(other);
+        let from_runtime = self
+            .builder()
+            .build_call(runtime, &[word.into()], "from_runtime")
+            .map_err(|e| internal(&e))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("unbox helper: no value".to_string()))?;
+        self.builder()
+            .build_return(Some(&from_runtime))
+            .map_err(|e| internal(&e))?;
+
+        if let Some(block) = saved {
+            self.builder().position_at_end(block);
+        }
+        Ok(helper)
+    }
+
     /// The bits of a `Double` as a value word.
     fn word_from_double_bits(&self, bits: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
         if bhc_types::boxed_values() {
@@ -60091,22 +60215,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<IntValue<'ctx>> {
         if bhc_types::boxed_values() {
             let i64_ty = self.type_mapper().i64_type();
-            let ptr_ty = self.type_mapper().ptr_type();
             let internal = |e: &dyn std::fmt::Debug| {
                 CodegenError::Internal(format!("failed to unbox a scalar: {e:?}"))
             };
-            let function = self.module.get_function("bhc_unbox").unwrap_or_else(|| {
-                self.module
-                    .add_function("bhc_unbox", i64_ty.fn_type(&[ptr_ty.into()], false))
-            });
-            let bits = self
-                .builder()
-                .build_call(function, &[word.into()], label)
-                .map_err(|e| internal(&e))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("unboxing returned no value".to_string()))?
-                .into_int_value();
+            let bits = self.unboxed_bits(word, label)?;
             let width = int_ty.get_bit_width();
             return if width == 64 {
                 Ok(bits)

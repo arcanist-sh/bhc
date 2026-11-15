@@ -123,11 +123,13 @@ pub struct TyCtxt {
     /// must not generalize (see the monomorphism restriction in `infer`).
     pub(crate) numeric_conversion_defs: rustc_hash::FxHashSet<DefId>,
 
-    /// The builtin operations of `Show`, `Eq` and `Ord` whose schemes carry
-    /// no class constraint (`show :: a -> String`), with their class.
-    pub(crate) class_op_defs: FxHashMap<DefId, &'static str>,
-    /// For each occurrence of one of those, the type its first argument was
-    /// instantiated at, checked once the module is solved
+    /// The builtin operations of `Show`, `Eq`, `Ord` and the numeric classes
+    /// whose schemes carry no class constraint (`show :: a -> String`), with
+    /// their class and whether the class applies to the result rather than
+    /// the first argument (`sum :: t a -> a`).
+    pub(crate) class_op_defs: FxHashMap<DefId, (&'static str, bool)>,
+    /// For each occurrence of one of those, the type the class applies to,
+    /// checked once the module is solved
     /// ([`Self::check_class_ops_not_at_functions`]).
     pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
 
@@ -453,7 +455,8 @@ impl TyCtxt {
         self.constraints.extend(new_constraints);
     }
 
-    /// Reject `show`, `print`, `==`, `<`, … used at a function type.
+    /// Reject `show`, `print`, `==`, `<`, … used at a function type, and
+    /// arithmetic used at a type that is plainly not a number.
     ///
     /// The builtin schemes of these operations have no class constraint
     /// (`show :: a -> String`), so nothing else objects to `print id` or to
@@ -462,24 +465,60 @@ impl TyCtxt {
     /// one case that can never have an instance. It sees the type an
     /// occurrence ends up at in this module; a function reaching `show`
     /// through another polymorphic function is not caught.
+    ///
+    /// The arithmetic schemes are as loose (`(+) :: a -> a -> a`,
+    /// `sum :: t a -> a`), so `sum "abc"` and `'a' + 'b'` compiled and
+    /// added character codes. `Char`, `Bool`, `()`, a tuple and a list have
+    /// no numeric instance unless the program declares one.
     pub fn check_class_ops_not_at_functions(&mut self) {
         for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
             let operand = self.subst.apply(&operand);
-            if !matches!(operand, Ty::Fun(..)) {
+            let is_function = matches!(operand, Ty::Fun(..));
+            if !is_function && !self.is_plainly_not_numeric(class, &operand) {
                 continue;
             }
             // A function type is printed in its own parentheses.
             let shown = crate::diagnostics::pretty_ty(&operand);
-            let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
-                .with_label(
-                    self.full_span(span),
+            let shown = if matches!(operand, Ty::App(..)) {
+                format!("({shown})")
+            } else {
+                shown
+            };
+            let (label, note) = if is_function {
+                (
                     format!("used here at the function type `{shown}`"),
+                    format!("a function has no `{class}` instance; maybe an argument is missing"),
                 )
-                .with_note(format!(
-                    "a function has no `{class}` instance; maybe an argument is missing"
-                ));
+            } else {
+                (
+                    format!("used here at the type `{shown}`"),
+                    format!("`{shown}` is not a number: it has no `{class}` instance"),
+                )
+            };
+            let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                .with_label(self.full_span(span), label)
+                .with_note(note);
             self.emit_error(diag);
         }
+    }
+
+    /// Whether `ty` is a builtin type with no instance of the numeric class
+    /// `class`, and the program declares none for it.
+    fn is_plainly_not_numeric(&self, class: &str, ty: &Ty) -> bool {
+        if !matches!(class, "Num" | "Fractional" | "Integral") {
+            return false;
+        }
+        let not_a_number = match ty {
+            Ty::Tuple(_) | Ty::List(_) => true,
+            Ty::Con(con) => matches!(con.name.as_str(), "Char" | "Bool" | "()"),
+            _ => false,
+        };
+        // `Integral` and `Fractional` operations are also `Num` ones; an
+        // instance of any of them is the program saying the type is a number.
+        not_a_number
+            && !["Num", "Fractional", "Integral"]
+                .iter()
+                .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
     }
 
     /// Solve collected constraints using instance resolution.
@@ -2535,9 +2574,14 @@ impl TyCtxt {
             })
             .filter_map(|(id, d)| {
                 let class = match d.name.as_str() {
-                    "show" | "print" => "Show",
-                    "==" | "/=" => "Eq",
-                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => "Ord",
+                    "show" | "print" => ("Show", false),
+                    "==" | "/=" => ("Eq", false),
+                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => ("Ord", false),
+                    "maximum" | "minimum" => ("Ord", true),
+                    "+" | "-" | "*" | "negate" | "abs" | "signum" => ("Num", false),
+                    "sum" | "product" => ("Num", true),
+                    "/" | "recip" => ("Fractional", false),
+                    "fromIntegral" | "toInteger" => ("Integral", false),
                     _ => return None,
                 };
                 Some((*id, class))

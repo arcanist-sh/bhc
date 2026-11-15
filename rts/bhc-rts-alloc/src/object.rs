@@ -676,6 +676,72 @@ pub fn word_of_double(value: f64) -> *mut u8 {
     }
 }
 
+/// A value word as a number to order or compare by, for code that handles
+/// values of a type it does not know: the generic `sort`, `nub`, `group`
+/// and the like.
+///
+/// In raw mode that is the word itself, which is the scalar for an `Int`
+/// or a `Char` and an address for anything else: such code has always
+/// ordered boxed values by address. In boxed mode it is the payload of a
+/// box and the address of anything else, so the same code gives the same
+/// answers.
+///
+/// # Safety
+///
+/// In boxed mode `word` must be null or point to a heap object.
+#[inline]
+#[must_use]
+pub unsafe fn order_key(word: *const u8) -> i64 {
+    if !boxed() || word.is_null() {
+        return word as i64;
+    }
+    // SAFETY: in boxed mode a non-null value word points to a heap object.
+    unsafe {
+        match tag(word) {
+            BOXED_INT | BOXED_CHAR | BOXED_DOUBLE => (*word.cast::<ScalarBox>()).payload,
+            _ => word as i64,
+        }
+    }
+}
+
+/// The two constructors of `Bool`, as objects.
+static BOOLS: [i64; 2] = [0, 1];
+
+/// The value word for a `Bool`.
+///
+/// In raw mode this is the tag itself, 0 or 1, which code that returns a
+/// `Bool` from the runtime has always used and [`bool_of`] reads. In boxed
+/// mode it is the `False` or `True` object.
+#[inline]
+#[must_use]
+pub fn word_of_bool(value: bool) -> *mut u8 {
+    if boxed() {
+        std::ptr::addr_of!(BOOLS[usize::from(value)])
+            .cast::<u8>()
+            .cast_mut()
+    } else {
+        usize::from(value) as *mut u8
+    }
+}
+
+/// The `Bool` in a value word: the tag itself (0 or 1), or a `Bool`
+/// object. Both occur in raw mode; an address is never 0 or 1.
+///
+/// # Safety
+///
+/// `word` must be 0, 1 or point to an evaluated `Bool` constructor.
+#[inline]
+#[must_use]
+pub unsafe fn bool_of(word: *const u8) -> bool {
+    let bits = word as usize;
+    if bits <= 1 {
+        bits != 0
+    } else {
+        // SAFETY: the caller guarantees a `Bool` constructor.
+        unsafe { tag(word) != 0 }
+    }
+}
+
 /// One more than the largest constructor tag [`is_first_word`] accepts. A
 /// type has far fewer constructors; a larger word 0 is an address or a
 /// number, not a tag.
@@ -857,7 +923,24 @@ mod tests {
         assert_eq!(word_of_char(0xe9), word_of_char(0xe9));
         assert_ne!(word_of_char(0x100), word_of_char(0x100));
         assert!(is_first_word(BOXED_INT) && is_first_word(BOXED_DOUBLE));
+        // A generic comparison sees the scalar, in a box or not.
+        // SAFETY: the words are boxes or a constructor object.
+        unsafe {
+            assert_eq!(order_key(word_of_int(1_000)), 1_000);
+            assert_eq!(order_key(word_of_char(0x263a)), 0x263a);
+            let object = nil();
+            assert_eq!(order_key(object), object as i64);
+            assert_eq!(order_key(std::ptr::null()), 0);
+            assert!(bool_of(word_of_bool(true)) && !bool_of(word_of_bool(false)));
+            assert_eq!(tag(word_of_bool(true)), 1);
+        }
         set_boxed(false);
+        // SAFETY: raw words are never dereferenced by `order_key`.
+        unsafe {
+            assert_eq!(order_key(word_of_int(1_000)), 1_000);
+            assert_eq!(word_of_bool(true) as usize, 1);
+            assert!(bool_of(word_of_bool(true)) && !bool_of(word_of_bool(false)));
+        }
     }
 
     #[test]

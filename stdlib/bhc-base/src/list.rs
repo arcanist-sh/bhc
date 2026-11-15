@@ -42,12 +42,7 @@ unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
 /// or Bool ADT (heap pointer with tag 0=False, 1=True from even, odd, etc.).
 /// Heap pointers are always >> 1 so we can distinguish the two representations.
 unsafe fn extract_bool(val: *mut u8) -> bool {
-    let v = val as usize;
-    if v <= 1 {
-        v != 0
-    } else {
-        get_tag(val) != 0
-    }
+    bhc_rts_alloc::object::bool_of(val)
 }
 
 /// Call a 2-arg equality closure and extract the Bool result.
@@ -137,7 +132,7 @@ unsafe fn vec_to_list(slice: &[*mut u8]) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
     let mut vec = list_to_vec(list);
-    vec.sort_by_key(|&e| e as i64);
+    vec.sort_by_key(|&e| bhc_rts_alloc::object::order_key(e));
     vec_to_list(&vec)
 }
 
@@ -211,7 +206,10 @@ pub unsafe extern "C" fn bhc_list_extreme_by(
 pub unsafe extern "C" fn bhc_list_nub(list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
     let mut seen = HashSet::new();
-    let deduped: Vec<*mut u8> = vec.into_iter().filter(|&e| seen.insert(e as i64)).collect();
+    let deduped: Vec<*mut u8> = vec
+        .into_iter()
+        .filter(|&e| seen.insert(bhc_rts_alloc::object::order_key(e)))
+        .collect();
     vec_to_list(&deduped)
 }
 
@@ -233,7 +231,9 @@ pub unsafe extern "C" fn bhc_list_group(list: *mut u8) -> *mut u8 {
     let mut current_group: Vec<*mut u8> = vec![vec[0]];
 
     for &elem in &vec[1..] {
-        if elem as i64 == *current_group.last().unwrap() as i64 {
+        if bhc_rts_alloc::object::order_key(elem)
+            == bhc_rts_alloc::object::order_key(*current_group.last().unwrap())
+        {
             current_group.push(elem);
         } else {
             groups.push(std::mem::take(&mut current_group));
@@ -334,7 +334,7 @@ pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mu
         .iter()
         .map(|&elem| {
             let key = fn_ptr(key_fn, elem);
-            (key as i64, elem)
+            (bhc_rts_alloc::object::order_key(key), elem)
         })
         .collect();
     decorated.sort_by_key(|&(k, _)| k);
@@ -554,8 +554,12 @@ pub unsafe extern "C" fn bhc_list_difference_by(
 unsafe extern "C" fn char_list_eq_code(_closure: *mut u8, a: *mut u8, b: *mut u8) -> *mut u8 {
     let a = list_to_vec(bhc_prelude::force_heap_object(a));
     let b = list_to_vec(bhc_prelude::force_heap_object(b));
-    let equal = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| *x as i64 == *y as i64);
-    usize::from(equal) as *mut u8
+    use bhc_rts_alloc::object;
+    let equal = a.len() == b.len()
+        && a.iter()
+            .zip(&b)
+            .all(|(x, y)| object::char_of(*x) == object::char_of(*y));
+    object::word_of_bool(equal)
 }
 
 /// A closure comparing `[Char]` values, for the `*_by` list functions at
@@ -593,7 +597,7 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -
         }
         let p_head = get_field(p, 0);
         let l_head = get_field(l, 0);
-        if p_head as i64 != l_head as i64 {
+        if bhc_rts_alloc::object::order_key(p_head) != bhc_rts_alloc::object::order_key(l_head) {
             return alloc_nothing();
         }
         p = bhc_prelude::force_heap_object(get_field(p, 1));
@@ -613,10 +617,10 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
-    let v = val as i64;
+    let v = bhc_rts_alloc::object::order_key(val);
     let pos = vec
         .iter()
-        .position(|&e| (e as i64) > v)
+        .position(|&e| bhc_rts_alloc::object::order_key(e) > v)
         .unwrap_or(vec.len());
     let mut result = vec;
     result.insert(pos, val);
@@ -697,7 +701,7 @@ pub extern "C" fn bhc_enum_from_to_double(from: f64, to: f64) -> *mut u8 {
     let mut elems: Vec<*mut u8> = Vec::new();
     let mut x = from;
     while x <= limit {
-        elems.push(x.to_bits() as usize as *mut u8);
+        elems.push(bhc_rts_alloc::object::word_of_double(x));
         x += 1.0;
     }
     unsafe { vec_to_list(&elems) }
@@ -708,12 +712,18 @@ mod tests {
     use super::*;
 
     unsafe fn make_list(elems: &[i64]) -> *mut u8 {
-        let ptrs: Vec<*mut u8> = elems.iter().map(|&v| v as *mut u8).collect();
+        let ptrs: Vec<*mut u8> = elems
+            .iter()
+            .map(|&v| bhc_rts_alloc::object::word_of_int(v))
+            .collect();
         vec_to_list(&ptrs)
     }
 
     unsafe fn collect_i64(list: *mut u8) -> Vec<i64> {
-        list_to_vec(list).into_iter().map(|p| p as i64).collect()
+        list_to_vec(list)
+            .into_iter()
+            .map(|p| bhc_rts_alloc::object::int_of(p))
+            .collect()
     }
 
     unsafe fn collect_nested(list: *mut u8) -> Vec<Vec<i64>> {

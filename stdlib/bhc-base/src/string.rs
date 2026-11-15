@@ -52,14 +52,15 @@ unsafe fn vec_to_list(slice: &[*mut u8]) -> *mut u8 {
 // Character helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the codepoint from a boxed character (pointer IS the value).
+/// The code point of a `Char` held in a value word (a list element).
 fn char_val(c: *mut u8) -> i64 {
-    c as i64
+    // SAFETY: every caller passes an element of a `[Char]`.
+    i64::from(unsafe { bhc_rts_alloc::object::char_of(c) })
 }
 
-/// Box a codepoint as a character pointer.
+/// The value word for a `Char`, given its code point.
 fn box_char(cp: i64) -> *mut u8 {
-    cp as *mut u8
+    bhc_rts_alloc::object::word_of_char(cp as u32)
 }
 
 /// Test whether a codepoint is whitespace (space, tab, newline, CR).
@@ -297,7 +298,10 @@ pub unsafe extern "C" fn bhc_read_int_list(str_list: *mut u8) -> *mut u8 {
     let trimmed = s.trim();
     match parse_list(trimmed, |e| e.parse::<i64>().ok()) {
         Some(ints) => {
-            let elems: Vec<*mut u8> = ints.into_iter().map(|n| n as *mut u8).collect();
+            let elems: Vec<*mut u8> = ints
+                .into_iter()
+                .map(bhc_rts_alloc::object::word_of_int)
+                .collect();
             vec_to_list(&elems)
         }
         None => read_no_parse(trimmed),
@@ -317,7 +321,7 @@ pub unsafe extern "C" fn bhc_read_double_list(str_list: *mut u8) -> *mut u8 {
         Some(doubles) => {
             let elems: Vec<*mut u8> = doubles
                 .into_iter()
-                .map(|d| d.to_bits() as usize as *mut u8)
+                .map(bhc_rts_alloc::object::word_of_double)
                 .collect();
             vec_to_list(&elems)
         }
@@ -344,8 +348,11 @@ pub unsafe extern "C" fn bhc_try_read_int(str_list: *mut u8) -> *mut u8 {
     let trimmed = s.trim();
     match trimmed.parse::<i64>() {
         Ok(n) => {
-            // Just n: tag=1, 1 field (the Int as int-as-pointer)
-            bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::JUST, &[n as *mut u8])
+            // Just n: tag=1, 1 field (the Int in a value word)
+            bhc_rts_alloc::object::alloc_con(
+                bhc_rts_alloc::object::JUST,
+                &[bhc_rts_alloc::object::word_of_int(n)],
+            )
         }
         Err(_) => {
             // Nothing: tag=0, 0 fields
@@ -378,7 +385,10 @@ mod tests {
     fn read_lists() {
         unsafe {
             let ints = bhc_read_int_list(make_string(" [1, -2,3] "));
-            let ints: Vec<i64> = list_to_vec(ints).into_iter().map(|p| p as i64).collect();
+            let ints: Vec<i64> = list_to_vec(ints)
+                .into_iter()
+                .map(|p| bhc_rts_alloc::object::int_of(p))
+                .collect();
             assert_eq!(ints, [1, -2, 3]);
             assert!(list_to_vec(bhc_read_int_list(make_string("[]"))).is_empty());
             let ds = bhc_read_double_list(make_string("[0.5,2]"));
@@ -556,7 +566,7 @@ mod tests {
             let s = make_string("123");
             let result = bhc_try_read_int(s);
             assert_eq!(get_tag(result), 1); // Just
-            let val = get_field(result, 0) as i64;
+            let val = bhc_rts_alloc::object::int_of(get_field(result, 0));
             assert_eq!(val, 123);
         }
     }
@@ -576,7 +586,7 @@ mod tests {
             let s = make_string("-42");
             let result = bhc_try_read_int(s);
             assert_eq!(get_tag(result), 1); // Just
-            let val = get_field(result, 0) as i64;
+            let val = bhc_rts_alloc::object::int_of(get_field(result, 0));
             assert_eq!(val, -42);
         }
     }

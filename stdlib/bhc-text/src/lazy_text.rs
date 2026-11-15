@@ -137,8 +137,8 @@ pub extern "C" fn bhc_lazy_text_unpack(lazy: *const u8) -> *mut u8 {
         let chars: Vec<char> = s.chars().collect();
         let mut list = alloc_nil();
         for &c in chars.iter().rev() {
-            let char_val = c as i64;
-            let cons = bhc_rts_alloc::object::cons(char_val as *mut u8, list);
+            let cons =
+                bhc_rts_alloc::object::cons(bhc_rts_alloc::object::word_of_char(c as u32), list);
             list = cons;
         }
         list

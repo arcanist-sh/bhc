@@ -121,7 +121,8 @@ pub extern "C" fn bhc_bs_pack(list_ptr: *const u8) -> *mut u8 {
             }
             // Cons: tag == 1, fields at offset 8
             let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
-            let byte_val = head_raw as i64 as u8;
+            // A byte: a `Word8`, or a `Char` for `Char8.pack`.
+            let byte_val = object::order_key(head_raw) as u8;
             result.push(byte_val);
             current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
@@ -518,7 +519,7 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
                 break;
             }
             let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
-            let codepoint = head_raw as i64;
+            let codepoint = i64::from(object::char_of(head_raw));
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }
@@ -568,7 +569,7 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
                 break;
             }
             let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
-            let codepoint = head_raw as i64;
+            let codepoint = i64::from(object::char_of(head_raw));
             if let Some(c) = char::from_u32(codepoint as u32) {
                 path_str.push(c);
             }

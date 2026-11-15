@@ -81,7 +81,7 @@ unsafe fn extract_path(path_ptr: *const u8) -> String {
             break;
         }
         let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
-        let codepoint = head_raw as i64;
+        let codepoint = i64::from(bhc_rts_alloc::object::char_of(head_raw));
         if let Some(c) = char::from_u32(codepoint as u32) {
             path_str.push(c);
         }
@@ -416,7 +416,12 @@ pub extern "C" fn bhc_lazy_bs_filter(
         let all_bytes = flatten_to_bytes(lazy);
         let filtered: Vec<u8> = all_bytes
             .iter()
-            .filter(|&&b| crate::text::pred_holds(fn_ptr(env_ptr, b as i64)))
+            .filter(|&&b| {
+                crate::text::pred_holds(fn_ptr(
+                    env_ptr,
+                    bhc_rts_alloc::object::word_of_int(i64::from(b)) as i64,
+                ))
+            })
             .copied()
             .collect();
         if filtered.is_empty() {
@@ -584,9 +589,11 @@ pub extern "C" fn bhc_lazy_bs_char8_unpack(lazy: *const u8) -> *mut u8 {
         // Build cons-list from end
         let mut list = alloc_nil();
         for &b in bytes.iter().rev() {
-            // Char is stored as tagged int (codepoint as pointer)
-            let char_val = b as i64;
-            let cons = bhc_rts_alloc::object::cons(char_val as *mut u8, list);
+            // A Char in a value word
+            let cons = bhc_rts_alloc::object::cons(
+                bhc_rts_alloc::object::word_of_char(u32::from(b)),
+                list,
+            );
             list = cons;
         }
         list
@@ -679,7 +686,10 @@ pub extern "C" fn bhc_lazy_bs_char8_drop_while(
         let bytes = flatten_to_bytes(lazy);
         let mut skip = 0;
         for &b in &bytes {
-            if crate::text::pred_holds(fn_ptr(env_ptr, b as i64)) {
+            if crate::text::pred_holds(fn_ptr(
+                env_ptr,
+                bhc_rts_alloc::object::word_of_int(i64::from(b)) as i64,
+            )) {
                 skip += 1;
             } else {
                 break;

@@ -27,7 +27,7 @@ unsafe fn chars_from_list(mut ptr: *const u8) -> String {
             break; // Nil
         }
         let head_raw = bhc_rts_alloc::object::field(ptr, 0) as *const u8;
-        let codepoint = head_raw as i64;
+        let codepoint = i64::from(bhc_rts_alloc::object::char_of(head_raw));
         if let Some(c) = char::from_u32(codepoint as u32) {
             result.push(c);
         }

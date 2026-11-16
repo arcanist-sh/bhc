@@ -4590,6 +4590,12 @@ impl LowerContext {
                 return None;
             }
         };
+        // Instances are keyed by the type they are declared at, so a synonym
+        // in the occurrence must be expanded first: blaze's `!` at `Html ->
+        // Html` found no `Attributable (MarkupM () -> MarkupM ())`, and the
+        // fallback read the instance off the last argument instead (`section
+        // ! a ! b $ x` took the instance for markup and called the result).
+        let ty = self.expand_type_aliases(&ty);
         if dbg {
             eprintln!("[dispatch] {method}: occ ty = {ty:?}");
         }

@@ -2501,6 +2501,11 @@ fn test_tier3_overloaded_string_as_list_native() {
 }
 
 #[test]
+fn test_tier3_imported_default_method_native() {
+    run_native_test("tier3_io/imported_default_method", Profile::Default);
+}
+
+#[test]
 fn test_tier3_text_over_lazy_list_native() {
     run_native_test("tier3_io/text_over_lazy_list", Profile::Default);
 }

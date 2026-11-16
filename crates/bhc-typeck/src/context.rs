@@ -8855,7 +8855,16 @@ impl TyCtxt {
         // Type-check default method implementations.
         // Default methods must conform to their declared signatures.
         for default in &class.defaults {
+            // A default body shares its method's definition, and checking it
+            // records the body's own scheme there: the method's shape without
+            // its class. An importer then took the method for a plain
+            // function of the same name and called it with no dictionary.
+            // The method's scheme is the one that stands.
+            let method_scheme = self.def_schemes.get(&default.id).cloned();
             self.check_value_def(default);
+            if let Some(scheme) = method_scheme {
+                self.def_schemes.insert(default.id, scheme);
+            }
         }
     }
 

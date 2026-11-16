@@ -2496,6 +2496,11 @@ fn test_tier3_max_min_compare_by_contents_native() {
 }
 
 #[test]
+fn test_tier3_overloaded_string_as_list_native() {
+    run_native_test("tier3_io/overloaded_string_as_list", Profile::Default);
+}
+
+#[test]
 fn test_tier3_with_file_native() {
     run_native_test("tier3_io/with_file", Profile::Default);
 }

@@ -521,6 +521,37 @@ impl TyCtxt {
                 .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
     }
 
+    /// A string literal under OverloadedStrings that is used as a list is a
+    /// list of `Char`: the only list instance of `IsString` is
+    /// `(a ~ Char) => IsString [a]`. Without this the element stayed a type
+    /// variable when nothing else fixed it (`zip [1 ..] "ab"`), and `print`
+    /// of the pairs showed the characters as numbers.
+    ///
+    /// Looks at the constraints from `start` on, already under the current
+    /// substitution.
+    fn improve_string_literal_lists(&mut self, start: usize) {
+        let char_ty = self.builtins.char_ty.clone();
+        let elements: Vec<(Ty, Span)> = self.constraints[start..]
+            .iter()
+            .filter(|c| c.class.as_str() == "IsString")
+            .filter_map(|c| match c.args.first() {
+                Some(Ty::List(elem)) if matches!(elem.as_ref(), Ty::Var(_)) => {
+                    Some((elem.as_ref().clone(), c.span))
+                }
+                _ => None,
+            })
+            .collect();
+        if elements.is_empty() {
+            return;
+        }
+        for (elem, span) in elements {
+            self.unify(&elem, &char_ty, span);
+        }
+        for c in self.constraints[start..].iter_mut() {
+            c.args = c.args.iter().map(|t| self.subst.apply(t)).collect();
+        }
+    }
+
     /// Solve collected constraints using instance resolution.
     ///
     /// For each constraint:
@@ -534,6 +565,7 @@ impl TyCtxt {
     pub fn solve_constraints(&mut self) {
         // First apply substitution to all constraints
         self.apply_subst_to_constraints();
+        self.improve_string_literal_lists(0);
 
         // Propagate superclass constraints: if we have `Ord a`, also generate `Eq a`
         self.propagate_superclass_constraints();
@@ -627,6 +659,7 @@ impl TyCtxt {
         for c in self.constraints[start_idx..].iter_mut() {
             c.args = c.args.iter().map(|t| self.subst.apply(t)).collect();
         }
+        self.improve_string_literal_lists(start_idx);
 
         // Extract only the new constraints (leave earlier ones in place)
         let mut new_constraints: Vec<Constraint> = self.constraints.drain(start_idx..).collect();

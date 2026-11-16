@@ -1,0 +1,6 @@
+[(1,'a'),(2,'b')]
+("xy",3,"cba")
+(3,"t","su",Just 2)
+("text","text!","pq",["a","b"])
+one
+two

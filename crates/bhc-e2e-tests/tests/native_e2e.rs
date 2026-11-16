@@ -2519,6 +2519,11 @@ fn test_tier3_method_at_synonym_instance_native() {
 }
 
 #[test]
+fn test_tier3_explicit_from_string_native() {
+    run_native_test("tier3_io/explicit_from_string", Profile::Default);
+}
+
+#[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }

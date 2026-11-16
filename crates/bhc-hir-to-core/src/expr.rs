@@ -1968,6 +1968,9 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
         if let Some(e) = lower_value_pure_at_builtin(ctx, name, def_ref.span) {
             return Ok(e);
         }
+        if let Some(e) = lower_from_string_at_type(ctx, def_ref.def_id, name, def_ref.span) {
+            return Ok(e);
+        }
         // Check if this is a class method
         let is_method = ctx.class_method_of_def(def_ref.def_id, name).or_else(|| {
             // `<$>` is `fmap` under its operator name, which no class lists.
@@ -7897,6 +7900,60 @@ fn lower_value_pure_at_builtin(
         ),
     };
     Some(core::Expr::Lam(x, Box::new(body), span))
+}
+
+/// An explicit `fromString` at a type other than `String`: the type's own
+/// conversion, as a string literal under OverloadedStrings already gets.
+///
+/// The bare builtin is the identity, right only at `String`. blaze's `A5.id
+/// (fromString idName)` then used a char list as an `AttributeValue`, and the
+/// `fromString` inside `instance IsString Value where fromString = Value .
+/// fromString` never reached the inner type's instance.
+fn lower_from_string_at_type(
+    ctx: &mut LowerContext,
+    def_id: DefId,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    if name.as_str().rsplit('.').next() != Some("fromString") {
+        return None;
+    }
+    // Only the class method: a program's own `fromString` is left alone.
+    if ctx
+        .class_method_of_def(def_id, Symbol::intern("fromString"))
+        .is_none()
+    {
+        return None;
+    }
+    let Ty::Fun(_, result) = refined_occurrence_ty(ctx, span)? else {
+        return None;
+    };
+    let named = |fun: &str| {
+        core::Expr::Var(
+            Var {
+                name: Symbol::intern(fun),
+                id: VarId::new(0),
+                ty: Ty::Error,
+                checked_ty: Ty::Error,
+            },
+            span,
+        )
+    };
+    if ty_head_is_text(&result) {
+        return Some(named("Data.Text.pack"));
+    }
+    if let Some(pack) = bytestring_pack_for(&result) {
+        return Some(named(pack));
+    }
+    if !dispatchable_isstring_ty(&result) {
+        return None;
+    }
+    ctx.resolve_method_at_concrete_type(
+        Symbol::intern("fromString"),
+        Symbol::intern("IsString"),
+        &result,
+        span,
+    )
 }
 
 /// `Data.Set.member k s` (and the other key-first container operations) with

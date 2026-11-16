@@ -1,0 +1,6 @@
+id=Dyn "LITERAL"
+id=Dyn "EXPLICIT"
+id=Dyn "FOOTNOTES"
+id=Dyn "FOOTNOTES-3"
+Dyn "X"
+(4,"ABC4")

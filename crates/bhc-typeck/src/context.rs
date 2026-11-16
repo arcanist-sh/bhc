@@ -10051,11 +10051,24 @@ fn is_typeck_builtin_class(name: &str) -> bool {
 /// The declared type of a builtin `Semigroup`/`Monoid` method at a
 /// single-parameter instance's type, or `None` for any other method or class.
 fn builtin_value_method_shape(instance: &InstanceDef, method: Symbol) -> Option<Ty> {
-    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") || instance.types.len() != 1 {
+    if instance.types.len() != 1 {
         return None;
     }
     let t = instance.types[0].clone();
     let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+    // `IsString` is builtin too, and its one method is fixed by the instance
+    // type. Unchecked, the `fromString` inside `fromString = Value .
+    // fromString` had no recorded type and stayed the identity.
+    if instance.class.as_str() == "IsString" {
+        let string = Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        ))));
+        return (method.as_str() == "fromString").then(|| fun(string, t));
+    }
+    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") {
+        return None;
+    }
     match method.as_str() {
         "mempty" => Some(t),
         "<>" | "mappend" => Some(fun(t.clone(), fun(t.clone(), t))),

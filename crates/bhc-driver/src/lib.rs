@@ -4583,14 +4583,9 @@ impl Compiler {
                             ))
                         })
                     {
-                        // A parameterless type's constructor keeps fresh field
-                        // types (pinning them all broke checking elsewhere) —
-                        // except an `Integer` field (a literal argument must
-                        // be typed `Integer` to be built as a bignum:
-                        // `ModifiedJulianDay 0` stored a raw 0) and a ground
-                        // field mentioning `Text` (pandoc's `Header _ attr _`
-                        // pattern left `attr`'s key-value list untyped, and
-                        // its comparison fell back to comparing pointers).
+                        // A parameterless type's constructor has its declared
+                        // field types (see `pinnable_field`); a field that
+                        // still converts with a variable keeps a fresh one.
                         let mut quantified = Vec::new();
                         let mut field_tys = Vec::with_capacity(con.fields.len());
                         for (i, f) in con.fields.iter().enumerate() {
@@ -7374,27 +7369,16 @@ fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
 }
 
 /// Whether an imported constructor field's real type is kept (see the
-/// parameterless-type constructor scheme): ground and `Integer`, or ground and
-/// mentioning `Text`.
+/// parameterless-type constructor scheme): any field without a type variable.
+///
+/// This was once only `Integer` and plain `Text` shapes, because a field
+/// naming another data type rejected Text.Pandoc.Parsing.GridTable. The
+/// checker has since caught up (all of Pandoc checks with every such field
+/// kept), and the placeholder cost more than it saved: a variable bound by
+/// matching `Plain xs` had no type, so pandoc-types' `walkBlockM` could not
+/// tell its seven `Walkable` dictionaries apart and took the last.
 fn pinnable_field(ty: &bhc_types::Ty) -> bool {
-    // Only plain data shapes: pinning a field that mentions another data
-    // type (a `[Block]`, an external package's type) rejected
-    // Text.Pandoc.Parsing.GridTable, which the placeholder let through.
-    fn plain_shape(ty: &bhc_types::Ty) -> bool {
-        use bhc_types::Ty;
-        match ty {
-            Ty::Con(c) => {
-                matches!(
-                    c.name.as_str(),
-                    "Text" | "Int" | "Integer" | "Bool" | "Char" | "Double"
-                ) || c.name.as_str().ends_with(".Text")
-            }
-            Ty::List(e) => plain_shape(e),
-            Ty::Tuple(es) => es.iter().all(plain_shape),
-            _ => false,
-        }
-    }
-    !ty_has_vars(ty) && (ty_is_integer(ty) || (ty_mentions_text(ty) && plain_shape(ty)))
+    !ty_has_vars(ty)
 }
 
 /// Expand a parameterless interface type synonym (`Attr`), once.

@@ -1969,7 +1969,12 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
             return Ok(e);
         }
         // Check if this is a class method
-        let is_method = ctx.class_method_of_def(def_ref.def_id, name);
+        let is_method = ctx.class_method_of_def(def_ref.def_id, name).or_else(|| {
+            // `<$>` is `fmap` under its operator name, which no class lists.
+            (name.as_str() == "<$>")
+                .then(|| ctx.class_method_of_def(def_ref.def_id, canonical_functor_method(name)))
+                .flatten()
+        });
         // `return` is in NO class's method list: the builtin Monad layout is
         // [`>>=`, `>>`] and `return` is Applicative's `pure` under another
         // name, so `is_class_method` does not recognise it and the whole
@@ -2049,9 +2054,18 @@ fn lower_var_inner(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core
             // Look for an in-scope dictionary for this class
             let dict_matches = in_scope_dict_matches(ctx, class_name, def_ref.span);
             if let Some(dict_var) = ctx.lookup_dict(class_name).filter(|_| dict_matches) {
-                // Select the method from the dictionary
+                // Select the method from the dictionary. `<$>` is `fmap`: the
+                // Functor dictionary has no slot under the operator's name, so
+                // `Con <$> action` in an instance method with its own
+                // `Functor m` stayed the builtin, which walked the action as
+                // a list.
+                let slot = if class_name.as_str() == "Functor" && name.as_str() == "<$>" {
+                    canonical_functor_method(name)
+                } else {
+                    name
+                };
                 if let Some(method_expr) =
-                    ctx.select_method_from_dict(dict_var, class_name, name, def_ref.span)
+                    ctx.select_method_from_dict(dict_var, class_name, slot, def_ref.span)
                 {
                     return Ok(method_expr);
                 }

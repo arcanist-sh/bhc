@@ -2500,6 +2500,19 @@ fn test_tier3_overloaded_string_as_list_native() {
     run_native_test("tier3_io/overloaded_string_as_list", Profile::Default);
 }
 
+/// Closure IO model only: the default `walk` runs in the library `Identity`,
+/// which eager mode does not carry a type through.
+#[test]
+fn test_tier3_fmap_operator_in_instance_method_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test(
+        "tier3_io/fmap_operator_in_instance_method",
+        Profile::Default,
+    );
+}
+
 #[test]
 fn test_tier3_imported_default_method_native() {
     run_native_test("tier3_io/imported_default_method", Profile::Default);

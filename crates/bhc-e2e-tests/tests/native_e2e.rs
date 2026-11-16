@@ -2509,6 +2509,11 @@ fn test_tier3_overloaded_string_as_list_native() {
 }
 
 #[test]
+fn test_tier3_derived_functor_over_seq_native() {
+    run_native_test("tier3_io/derived_functor_over_seq", Profile::Default);
+}
+
+#[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }

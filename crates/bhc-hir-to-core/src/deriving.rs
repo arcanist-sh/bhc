@@ -2605,17 +2605,44 @@ impl DerivingContext {
             );
             let f = self.fresh_var("f", Ty::Error);
             let m = self.fresh_var("m", Ty::Error);
-            let body = core::Expr::Lam(
-                f.clone(),
-                Box::new(core::Expr::Lam(
-                    m.clone(),
-                    Box::new(self.make_fmap(
-                        core::Expr::Var(f, span),
-                        core::Expr::Var(m, span),
+            // A `Seq` is a cons list at runtime and has no `fmap` of its own
+            // for codegen to choose: the generic `<$>` over one was compiled
+            // as an action in the ambient monad, so `fmap f` on pandoc's
+            // `Many a` (a newtype over `Seq a`) returned a closure where a
+            // list of blocks was expected. Map it as the list it is.
+            let field_is_seq = matches!(
+                &field_ty,
+                Ty::App(head, _) if matches!(
+                    head.as_ref(),
+                    Ty::Con(c) if matches!(c.name.as_str(), "Seq" | "Data.Sequence.Seq")
+                )
+            );
+            let mapped = if field_is_seq {
+                let map_var = Var {
+                    name: Symbol::intern("map"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                    checked_ty: Ty::Error,
+                };
+                core::Expr::App(
+                    Box::new(core::Expr::App(
+                        Box::new(core::Expr::Var(map_var, span)),
+                        Box::new(core::Expr::Var(f.clone(), span)),
                         span,
                     )),
+                    Box::new(core::Expr::Var(m.clone(), span)),
                     span,
-                )),
+                )
+            } else {
+                self.make_fmap(
+                    core::Expr::Var(f.clone(), span),
+                    core::Expr::Var(m.clone(), span),
+                    span,
+                )
+            };
+            let body = core::Expr::Lam(
+                f,
+                Box::new(core::Expr::Lam(m, Box::new(mapped), span)),
                 span,
             );
             let mut methods = FxHashMap::default();

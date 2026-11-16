@@ -806,13 +806,30 @@ pub(crate) fn is_builtin_class(class: Symbol) -> bool {
 /// are not listed: Core's numeric specialization gives each use type its own
 /// copy, as under the eager model, so `let inc x = x + 1` works at `Integer`
 /// and `Double` alike (#57).
+///
+/// Every variable along the substitution's chain counts, not only the one a
+/// single application reaches: the substitution is triangular, and the
+/// binding's own type is often a later link. Read one layer deep, `let c =
+/// "pre " <> a` saw only the literal's variable, generalized `c` over its own,
+/// and the use at a user `IsString` type instantiated a fresh copy while the
+/// literals defaulted to `String` (pandoc's footnote `className` was built
+/// with list append and read as an attribute value).
 fn value_class_constrained_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
     for c in &ctx.constraints {
         if c.class.as_str() != "IsString" {
             continue;
         }
         for arg in &c.args {
-            out.extend(ctx.apply_subst(arg).free_vars());
+            let mut layer = arg.clone();
+            // Bounded like `apply_resolved`, against a cyclic chain.
+            for _ in 0..100 {
+                out.extend(layer.free_vars());
+                let next = ctx.apply_subst(&layer);
+                if next == layer {
+                    break;
+                }
+                layer = next;
+            }
         }
     }
 }

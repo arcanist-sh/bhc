@@ -28,6 +28,26 @@ pub fn generate_interface(
 ) -> ModuleInterface {
     let mut iface = ModuleInterface::new(module_name);
 
+    // The qualifiers that name the lazy Text module, for `convert_ast_type`.
+    let lazy_text_qualifiers: Vec<String> = ast
+        .imports
+        .iter()
+        .filter(|imp| {
+            matches!(
+                imp.module.to_string().as_str(),
+                "Data.Text.Lazy" | "Data.Text.Internal.Lazy"
+            )
+        })
+        .flat_map(|imp| {
+            let mut names = vec![imp.module.to_string()];
+            if let Some(alias) = &imp.alias {
+                names.push(alias.to_string());
+            }
+            names
+        })
+        .collect();
+    LAZY_TEXT_QUALIFIERS.with(|q| *q.borrow_mut() = lazy_text_qualifiers);
+
     // Compute a simple hash from the source for consistency checking
     iface.header.module_hash = compute_module_hash(module_name);
 
@@ -832,8 +852,24 @@ fn record_newtype_derived_instances(
     }
 }
 
+thread_local! {
+    /// The qualifiers (`TL`, `Data.Text.Lazy`) that name the lazy Text module
+    /// in the module whose interface is being generated.
+    static LAZY_TEXT_QUALIFIERS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
     match ty {
+        // Lazy `Text` shares the strict type's name; only its module tells
+        // them apart. Written as `Text`, `renderANSI :: … -> TL.Text` reached
+        // an importer as strict Text (see the matching case in `bhc-lower`).
+        bhc_ast::Type::QualCon(module, ident, _)
+            if ident.name.as_str() == "Text"
+                && LAZY_TEXT_QUALIFIERS.with(|q| q.borrow().contains(&module.to_string())) =>
+        {
+            Type::Con("LazyText".to_string())
+        }
         bhc_ast::Type::Var(tv, _) => Type::Var(tv.name.name.as_str().to_string()),
         bhc_ast::Type::Con(ident, _) => Type::Con(ident.name.as_str().to_string()),
         bhc_ast::Type::QualCon(_module, ident, _) => Type::Con(ident.name.as_str().to_string()),

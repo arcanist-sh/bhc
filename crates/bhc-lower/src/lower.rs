@@ -9232,8 +9232,19 @@ pub(crate) fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::T
             // how each module imported it: parsec's `import qualified Data.Text
             // as Text` recorded `instance Stream Text.Text m Char`, which no
             // use site spelling `Text` could ever match.
-            let _ = module_name;
-            let symbol = ident.name;
+            //
+            // Lazy `Text` is the exception: it shares the strict type's name
+            // and only its module tells them apart. Lowered as `Text`,
+            // `TL.Text` in a signature reached an importing module's interface
+            // as strict Text, and `toStrict (renderANSI …)` in pandoc's ANSI
+            // writer failed to check (`expected LazyText, found Text`).
+            let qualifier = Symbol::intern(&module_name.to_string());
+            let symbol =
+                if ident.name.as_str() == "Text" && ctx.qualifier_names_lazy_text(qualifier) {
+                    Symbol::intern("LazyText")
+                } else {
+                    ident.name
+                };
             bhc_types::Ty::Con(bhc_types::TyCon::new(symbol, bhc_types::Kind::Star))
         }
 

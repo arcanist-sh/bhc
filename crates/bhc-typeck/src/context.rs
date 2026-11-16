@@ -4632,8 +4632,7 @@ impl TyCtxt {
                 // decodeUtf8With takes the error handler FIRST:
                 // OnDecodeError -> ByteString -> Text (handler left permissive;
                 // Text.Pandoc.App's `TE.decodeUtf8With TE.lenientDecode err`).
-                "Data.Text.Encoding.decodeUtf8With"
-                | "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::poly(
+                "Data.Text.Encoding.decodeUtf8With" => Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::Var(a.clone()),
@@ -4643,24 +4642,37 @@ impl TyCtxt {
                         ),
                     ),
                 ),
+                // The lazy modules return and take LAZY Text: a signature
+                // written `TL.Text` is lowered as `LazyText`, so typing these
+                // with strict Text rejected `TL.pack s :: TL.Text`.
+                "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(
+                            self.builtins.bytestring_ty.clone(),
+                            self.builtins.lazy_text_ty.clone(),
+                        ),
+                    ),
+                ),
                 // Data.Text.Lazy: pack/unpack
                 "Data.Text.Lazy.pack" => Scheme::mono(Ty::fun(
                     self.builtins.string_ty.clone(),
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                 )),
                 "Data.Text.Lazy.unpack" => Scheme::mono(Ty::fun(
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                     self.builtins.string_ty.clone(),
                 )),
                 // Data.Text.Lazy.Encoding: TL.Text -> BL.ByteString
                 "Data.Text.Lazy.Encoding.encodeUtf8" => Scheme::mono(Ty::fun(
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                     self.builtins.bytestring_ty.clone(),
                 )),
                 // Data.Text.Lazy.Encoding: BL.ByteString -> TL.Text
                 "Data.Text.Lazy.Encoding.decodeUtf8" => Scheme::mono(Ty::fun(
                     self.builtins.bytestring_ty.clone(),
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                 )),
                 // The `'` (prime) decoders are total: they return
                 // `Either UnicodeException Text` rather than throwing. bhc does

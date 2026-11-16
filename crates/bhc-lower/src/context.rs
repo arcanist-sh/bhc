@@ -333,6 +333,10 @@ pub struct LowerContext {
     unimplemented_defs: FxHashSet<DefId>,
     /// Import aliases: maps alias (e.g., "M") to full module name (e.g., "Data.Map")
     import_aliases: FxHashMap<Symbol, Symbol>,
+    /// Qualifiers that name `Data.Text.Lazy`. Kept apart from
+    /// `import_aliases`, which holds one module per alias: pandoc imports
+    /// `Data.Text.Lazy` and `Data.Text.Lazy.Encoding` both `as TL`.
+    lazy_text_qualifiers: rustc_hash::FxHashSet<Symbol>,
     /// Qualified imports: maps "Module.name" to the unqualified name for resolution
     qualified_names: FxHashMap<Symbol, Symbol>,
     /// Type signatures: maps function name to its declared type
@@ -378,6 +382,7 @@ impl LowerContext {
             unimplemented_defs: FxHashSet::default(),
             prelude_values: FxHashMap::default(),
             import_aliases: FxHashMap::default(),
+            lazy_text_qualifiers: rustc_hash::FxHashSet::default(),
             qualified_names: FxHashMap::default(),
             type_signatures: FxHashMap::default(),
             class_param_counts: FxHashMap::default(),
@@ -2812,7 +2817,25 @@ impl LowerContext {
     /// For `import qualified Data.Map as M`, call:
     /// `register_import_alias("M", "Data.Map")`
     pub fn register_import_alias(&mut self, alias: Symbol, module: Symbol) {
+        if matches!(
+            module.as_str(),
+            "Data.Text.Lazy" | "Data.Text.Internal.Lazy"
+        ) {
+            self.lazy_text_qualifiers.insert(alias);
+        }
         self.import_aliases.insert(alias, module);
+    }
+
+    /// Whether a qualifier names the lazy Text module: an alias it was
+    /// imported under (one alias may stand for several modules), or the full
+    /// module name.
+    #[must_use]
+    pub fn qualifier_names_lazy_text(&self, qualifier: Symbol) -> bool {
+        self.lazy_text_qualifiers.contains(&qualifier)
+            || matches!(
+                qualifier.as_str(),
+                "Data.Text.Lazy" | "Data.Text.Internal.Lazy"
+            )
     }
 
     /// Every qualified spelling (`Alias.name`) registered for `unqualified`.

@@ -2534,6 +2534,11 @@ fn test_tier3_let_overloaded_string_append_native() {
 }
 
 #[test]
+fn test_tier3_lazy_text_across_modules_native() {
+    run_native_test("tier3_io/lazy_text_across_modules", Profile::Default);
+}
+
+#[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }

@@ -1177,12 +1177,25 @@ fn has_ty_vars(ty: &Ty) -> bool {
 
 /// Whether two types have the same outermost constructor: both lists, both
 /// functions, tuples of one arity, or applications of the same named head.
+///
+/// An application whose head is still a variable (`t a`, a `Foldable`
+/// argument) has no constructor of its own yet and fits any of them, as it
+/// does in `unify_inner`. Counted as a different shape, a second `t a` use
+/// of a variable already known as `[Int]` OVERWROTE that binding: after `any
+/// p xs`, a later `null xs` made `xs` a fresh `t a`, the first use went
+/// unchecked, and a string literal compared with the elements of a `[Text]`
+/// stayed a `String`.
 fn same_outer_shape(a: &Ty, b: &Ty) -> bool {
     fn app_head(t: &Ty) -> Option<&Ty> {
         match t {
             Ty::App(f, _) => app_head(f).or(Some(f)),
             _ => None,
         }
+    }
+    let open_application = |t: &Ty| matches!(app_head(t), Some(Ty::Var(_)));
+    let applicable = |t: &Ty| matches!(t, Ty::App(..) | Ty::List(_) | Ty::Tuple(_) | Ty::Fun(..));
+    if (open_application(a) && applicable(b)) || (open_application(b) && applicable(a)) {
+        return true;
     }
     match (a, b) {
         (Ty::List(_), Ty::List(_)) | (Ty::Fun(..), Ty::Fun(..)) => true,

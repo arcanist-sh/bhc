@@ -81,6 +81,14 @@ fn test_rejected_do_ends_in_let() {
 }
 
 #[test]
+fn test_rejected_foldable_use_then_another() {
+    expect_rejected(
+        "foldable_use_then_another.hs",
+        "expected `Int`, found `Bool`",
+    );
+}
+
+#[test]
 fn test_rejected_sum_string() {
     expect_rejected("sum_string.hs", "No instance for `Num Char`");
 }
@@ -2498,6 +2506,11 @@ fn test_tier3_max_min_compare_by_contents_native() {
 #[test]
 fn test_tier3_overloaded_string_as_list_native() {
     run_native_test("tier3_io/overloaded_string_as_list", Profile::Default);
+}
+
+#[test]
+fn test_tier3_literals_at_pattern_bound_text_native() {
+    run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }
 
 /// Closure IO model only: the default `walk` runs in the library `Identity`,

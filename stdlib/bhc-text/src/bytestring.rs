@@ -115,6 +115,8 @@ pub extern "C" fn bhc_bs_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
@@ -514,6 +516,8 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     let mut current = path_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
@@ -564,6 +568,8 @@ pub extern "C" fn bhc_bs_write_file(path_ptr: *const u8, bs: *const u8) {
     let mut current = path_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;

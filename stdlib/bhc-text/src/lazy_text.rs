@@ -220,11 +220,13 @@ unsafe fn append_chunks(a: *const u8, b: *const u8) -> *mut u8 {
 
 /// Convert a BHC cons-list of strict Text values to a lazy Text.
 #[no_mangle]
-pub extern "C" fn bhc_lazy_text_from_chunks(list: *const u8) -> *mut u8 {
+pub extern "C" fn bhc_lazy_text_from_chunks(mut list: *const u8) -> *mut u8 {
     if list.is_null() {
         return alloc_lazy_empty();
     }
     unsafe {
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        list = bhc_prelude::force_heap_object(list as *mut u8) as _;
         let tag = bhc_rts_alloc::object::tag(list);
         if tag == 0 {
             return alloc_lazy_empty();

@@ -76,6 +76,8 @@ unsafe fn extract_path(path_ptr: *const u8) -> String {
         if current.is_null() {
             break;
         }
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        current = bhc_prelude::force_heap_object(current as *mut u8) as _;
         let tag = bhc_rts_alloc::object::tag(current);
         if tag == 0 {
             break;
@@ -174,11 +176,13 @@ pub extern "C" fn bhc_lazy_bs_to_strict(lazy: *const u8) -> *mut u8 {
 
 /// Convert a BHC cons-list of strict ByteString values to lazy ByteString.
 #[no_mangle]
-pub extern "C" fn bhc_lazy_bs_from_chunks(list: *const u8) -> *mut u8 {
+pub extern "C" fn bhc_lazy_bs_from_chunks(mut list: *const u8) -> *mut u8 {
     if list.is_null() {
         return alloc_lazy_empty();
     }
     unsafe {
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        list = bhc_prelude::force_heap_object(list as *mut u8) as _;
         let tag = bhc_rts_alloc::object::tag(list);
         if tag == 0 {
             return alloc_lazy_empty();
@@ -255,6 +259,8 @@ pub extern "C" fn bhc_lazy_bs_pack(list: *const u8) -> *mut u8 {
             if current.is_null() {
                 break;
             }
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
@@ -638,6 +644,8 @@ pub extern "C" fn bhc_lazy_bs_char8_unlines(list: *const u8) -> *mut u8 {
             if current.is_null() {
                 break;
             }
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;

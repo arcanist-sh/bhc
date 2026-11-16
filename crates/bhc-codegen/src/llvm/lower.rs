@@ -60214,7 +60214,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         label: &str,
     ) -> CodegenResult<IntValue<'ctx>> {
         if bhc_types::boxed_values() {
-            let i64_ty = self.type_mapper().i64_type();
             let internal = |e: &dyn std::fmt::Debug| {
                 CodegenError::Internal(format!("failed to unbox a scalar: {e:?}"))
             };

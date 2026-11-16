@@ -48,7 +48,12 @@ unsafe fn text_byte_len(text: *const u8) -> usize {
 }
 
 /// Get a slice view of the text's active bytes.
+///
+/// The Text may still be a thunk: an element of a list built lazily
+/// (`map tshow (zipWith f [k ..] xs)`) reaches `T.concat` or
+/// `T.intercalate` unevaluated, and its words were read as a Text's.
 pub(crate) unsafe fn text_bytes(text: *const u8) -> &'static [u8] {
+    let text = bhc_prelude::force_heap_object(text.cast_mut()).cast_const();
     let data = text_data_ptr(text);
     let off = text_offset(text);
     let len = text_byte_len(text);
@@ -665,6 +670,8 @@ pub extern "C" fn bhc_text_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 // Nil
@@ -818,6 +825,8 @@ pub extern "C" fn bhc_text_concat(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
@@ -852,6 +861,8 @@ pub extern "C" fn bhc_text_intercalate(sep: *const u8, list_ptr: *const u8) -> *
     let mut current = list_ptr;
     unsafe {
         loop {
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
             let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
@@ -1037,6 +1048,8 @@ unsafe fn collect_text_list(list: *const u8) -> Vec<*const u8> {
     let mut out = Vec::new();
     let mut cur = list;
     while !cur.is_null() {
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        cur = bhc_prelude::force_heap_object(cur as *mut u8) as _;
         let tag = bhc_rts_alloc::object::tag(cur);
         if tag == 0 {
             break;

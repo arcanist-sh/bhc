@@ -1741,7 +1741,14 @@ impl Compiler {
         // Copies of class-polymorphic bindings at representation-sensitive
         // types (`sq :: Num a => …` at `Integer`; #57). Same span-keyed types,
         // so it also runs before the simplifier.
-        if loaded_bodies.is_none() && mentions_numeric {
+        // A library body that shows a value is copied at any concrete type
+        // (see `numeric_specialize`), so the bodies are also wanted when the
+        // module calls an imported `Show`-constrained function. Loading them
+        // for every module with imports made the pandoc chain ten times
+        // slower.
+        if loaded_bodies.is_none()
+            && (mentions_numeric || Self::calls_imported_show_poly(&core, lower_ctx))
+        {
             let (bodies, _, imported_cons) = self.load_imported_core_bodies(hir);
             // A copy may build the source module's private constructors.
             for con in imported_cons {
@@ -1906,6 +1913,52 @@ impl Compiler {
     }
 
     /// Whether `ty` mentions `Integer`, `Double`, `Float` or `Rational`.
+    /// Whether `core` refers to an imported value whose interface scheme is
+    /// constrained by `Show`, by name. A false positive only costs loading
+    /// the imported bodies.
+    fn calls_imported_show_poly(core: &CoreModule, lower_ctx: &LowerContext) -> bool {
+        let shown: FxHashSet<Symbol> = lower_ctx
+            .defs
+            .values()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    bhc_lower::DefKind::ImportedValue | bhc_lower::DefKind::Value
+                ) && d.type_scheme.as_ref().is_some_and(|s| {
+                    s.constraints.iter().any(|c| c.class.as_str() == "Show")
+                })
+            })
+            .map(|d| d.name)
+            .collect();
+        if shown.is_empty() {
+            return false;
+        }
+        fn walk(e: &Expr, shown: &FxHashSet<Symbol>) -> bool {
+            match e {
+                Expr::Var(v, _) => shown.contains(&v.name),
+                Expr::App(f, x, _) => walk(f, shown) || walk(x, shown),
+                Expr::TyApp(f, _, _)
+                | Expr::Lam(_, f, _)
+                | Expr::TyLam(_, f, _)
+                | Expr::Lazy(f, _)
+                | Expr::Cast(f, _, _)
+                | Expr::Tick(_, f, _) => walk(f, shown),
+                Expr::Let(bind, body, _) => walk_bind(bind, shown) || walk(body, shown),
+                Expr::Case(scrut, alts, _, _) => {
+                    walk(scrut, shown) || alts.iter().any(|a| walk(&a.rhs, shown))
+                }
+                _ => false,
+            }
+        }
+        fn walk_bind(bind: &Bind, shown: &FxHashSet<Symbol>) -> bool {
+            match bind {
+                Bind::NonRec(_, e) => walk(e, shown),
+                Bind::Rec(bs) => bs.iter().any(|(_, e)| walk(e, shown)),
+            }
+        }
+        core.bindings.iter().any(|b| walk_bind(b, &shown))
+    }
+
     fn mentions_numeric_ty(ty: &bhc_types::Ty) -> bool {
         use bhc_types::Ty;
         match ty {

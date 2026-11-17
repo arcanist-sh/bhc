@@ -26,10 +26,11 @@
 //! changes: the original binding stays as it is.
 //!
 //! A binding imported from another module (its body transported in a `.bhc`
-//! sidecar, as for `monomorphize`) is copied into this module, at the numeric
-//! types only (`Integer`, `Double`, `Float`, `Rational`): `sq` from a library
-//! used at `Integer` multiplied machine ints. Text and list uses of library
-//! code are left to the library's own compiled body.
+//! sidecar, as for `monomorphize`) is copied into this module at the numeric
+//! types (`Integer`, `Double`, `Float`, `Rational`): `sq` from a library used
+//! at `Integer` multiplied machine ints. A body that shows a value is copied
+//! at any concrete type, since `show` has no other way to learn it. Other
+//! Text and list uses of library code are left to the library's own body.
 
 use crate::monomorphize::{collect_tyvars, has_free_tyvar, match_ty, ultimate_result};
 use crate::simplify::expr_util::fresh_var_id;
@@ -177,7 +178,11 @@ fn specialize_at(v: &Var, occ: &Ty, ctx: &mut Ctx) -> Option<Var> {
         return None;
     }
     let image = m.get(tv)?.clone();
-    if !copy_needed(&image, &body) || (is_imported && !is_numeric(&image)) {
+    // An imported body is copied at a numeric type, or at any type when it
+    // shows a value: codegen picks `show`'s implementation from the operand's
+    // type, which the library's generic body does not have, so `strPoly
+    // Nothing True` from another module printed the Bool's machine word.
+    if !copy_needed(&image, &body) || (is_imported && !is_numeric(&image) && !uses_show(&body)) {
         return None;
     }
     let key = (orig.id, format!("{image:?}"));

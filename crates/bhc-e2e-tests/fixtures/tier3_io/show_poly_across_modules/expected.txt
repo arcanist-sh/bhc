@@ -1,0 +1,9 @@
+True
+3
+Just False
+LT
+Green
+"text"
+<Just Red>
+[True][False]
+[2.5]

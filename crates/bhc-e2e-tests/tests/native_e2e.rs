@@ -2539,6 +2539,11 @@ fn test_tier3_lazy_text_across_modules_native() {
 }
 
 #[test]
+fn test_tier3_show_poly_across_modules_native() {
+    run_native_test("tier3_io/show_poly_across_modules", Profile::Default);
+}
+
+#[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }

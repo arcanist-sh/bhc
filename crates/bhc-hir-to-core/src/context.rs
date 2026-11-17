@@ -233,6 +233,10 @@ pub struct LowerContext {
     /// schemes need not carry the class constraint, so they are recognised
     /// by identity in [`Self::class_method_of_def`].
     local_method_defs: FxHashSet<DefId>,
+    /// The module's own top-level value definitions. A name-based rewrite of
+    /// a library function must leave alone a program's own definition of the
+    /// same name.
+    local_value_defs: FxHashSet<DefId>,
 
     /// Head type constructors of instances that arrived through a module
     /// interface, keyed by class — `(Monad, ParsecT)` when compiling a module
@@ -348,6 +352,7 @@ impl LowerContext {
             instance_method_sig_override: None,
             instance_alias_ty: None,
             local_method_defs: FxHashSet::default(),
+            local_value_defs: FxHashSet::default(),
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
@@ -5358,6 +5363,7 @@ impl LowerContext {
         for item in &module.items {
             match item {
                 Item::Value(value_def) => {
+                    self.local_value_defs.insert(value_def.id);
                     // Look up the type from the type checker
                     let ty = self.lookup_type(value_def.id);
                     let var = self.named_var(value_def.name, ty);
@@ -6362,9 +6368,9 @@ impl LowerContext {
         fn mentions_join(ctx: &LowerContext, e: &bhc_hir::Expr) -> bool {
             use bhc_hir::Expr as E;
             match e {
-                E::Var(r) => ctx
-                    .lookup_var(r.def_id)
-                    .is_some_and(|v| v.name.as_str() == "join"),
+                E::Var(r) => ctx.lookup_var(r.def_id).is_some_and(|v| {
+                    v.name.as_str() == "join" && !ctx.local_value_defs.contains(&r.def_id)
+                }),
                 E::App(f, a, _) => mentions_join(ctx, f) || mentions_join(ctx, a),
                 E::Lam(_, b, _) => mentions_join(ctx, b),
                 E::Let(_, b, _) => mentions_join(ctx, b),
@@ -6421,14 +6427,14 @@ impl LowerContext {
             if let E::App(f, m, span) = e {
                 let is_join = matches!(f.as_ref(), E::Var(r) if ctx
                     .lookup_var(r.def_id)
-                    .is_some_and(|v| v.name.as_str() == "join"));
+                    .is_some_and(|v| v.name.as_str() == "join" && !ctx.local_value_defs.contains(&r.def_id)));
                 let is_dollar_join = matches!(f.as_ref(), E::App(g, h, _)
                     if matches!(g.as_ref(), E::Var(r) if ctx
                         .lookup_var(r.def_id)
                         .is_some_and(|v| v.name.as_str() == "$"))
                     && matches!(h.as_ref(), E::Var(r) if ctx
                         .lookup_var(r.def_id)
-                        .is_some_and(|v| v.name.as_str() == "join")));
+                        .is_some_and(|v| v.name.as_str() == "join" && !ctx.local_value_defs.contains(&r.def_id))));
                 if is_join || is_dollar_join {
                     let span = *span;
                     let n = ctx.fresh_counter;

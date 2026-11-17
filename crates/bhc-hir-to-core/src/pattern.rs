@@ -19,7 +19,7 @@
 //! for direct compilation without the matrix machinery.
 
 use bhc_core::{self as core, Alt, AltCon, DataCon, Literal, Var, VarId};
-use bhc_hir::{self as hir, Pat, ValueDef};
+use bhc_hir::{self as hir, DefId, Pat, ValueDef};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -556,6 +556,34 @@ struct ClauseRow {
     span: Span,
     /// Original row index (for overlap detection).
     row_index: usize,
+    /// Every variable the row's ORIGINAL patterns bind, kept through
+    /// specialization so its leaf can record where each is bound on its path.
+    binders: Vec<DefId>,
+}
+
+/// The variables a pattern binds, in order.
+fn pattern_binders(pat: &Pat, out: &mut Vec<DefId>) {
+    match pat {
+        Pat::Var(_, def_id, _) => out.push(*def_id),
+        Pat::As(_, def_id, inner, _) => {
+            out.push(*def_id);
+            pattern_binders(inner, out);
+        }
+        Pat::Con(_, subs, _) => subs.iter().for_each(|p| pattern_binders(p, out)),
+        Pat::RecordCon(_, fields, _) => fields.iter().for_each(|f| pattern_binders(&f.pat, out)),
+        Pat::Or(left, _, _) => pattern_binders(left, out),
+        Pat::Ann(inner, _, _) | Pat::View(_, inner, _) => pattern_binders(inner, out),
+        Pat::Wild(_) | Pat::Lit(..) | Pat::Error(_) => {}
+    }
+}
+
+/// Where each of `binders` is bound now: the variables registered for them on
+/// the path being built.
+fn current_bindings(ctx: &LowerContext, binders: &[DefId]) -> Vec<(DefId, Var)> {
+    binders
+        .iter()
+        .filter_map(|d| ctx.lookup_var(*d).map(|v| (*d, v.clone())))
+        .collect()
 }
 
 /// The match matrix: rows of patterns compiled against a vector of scrutinees.
@@ -570,11 +598,13 @@ struct MatchMatrix {
 enum DecisionTree {
     /// Leaf: matched successfully.
     Leaf {
-        /// Variable bindings from pattern matching.
-        // WIP lowering: bindings are currently registered via the context; this
-        // field will carry them explicitly once decision-tree codegen uses it.
-        #[allow(dead_code)]
-        bindings: Vec<(VarId, core::Expr)>,
+        /// Where each of the row's pattern variables is bound on this leaf's
+        /// path. The context's binding of a variable is one shared slot: a row
+        /// copied into several branches re-registers its variables in each,
+        /// and the right-hand sides, lowered after the whole tree is built,
+        /// all saw the last branch's variable. `Toks xs <> Toks ys` then
+        /// referred to a `ys` that only one branch binds (a runtime stub).
+        bindings: Vec<(DefId, Var)>,
         /// Guard condition (if any).
         guard: Option<hir::Expr>,
         /// Right-hand side.
@@ -662,12 +692,18 @@ pub fn compile_match_to_expr(
         // Flatten or-patterns into separate rows
         let expanded = expand_equation_or_patterns(eq);
         for expanded_eq in expanded {
+            let mut binders = Vec::new();
+            expanded_eq
+                .0
+                .iter()
+                .for_each(|p| pattern_binders(p, &mut binders));
             rows.push(ClauseRow {
                 pats: expanded_eq.0,
                 guard: expanded_eq.1,
                 rhs: expanded_eq.2,
                 span: eq.span,
                 row_index: i,
+                binders,
             });
         }
     }
@@ -903,7 +939,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
         let row_index = matrix.rows[0].row_index;
 
         return DecisionTree::Leaf {
-            bindings: vec![],
+            bindings: current_bindings(ctx, &matrix.rows[0].binders),
             guard: None,
             rhs,
             span: row_span,
@@ -920,7 +956,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
     if matrix.scrutinees.is_empty() {
         let first = &matrix.rows[0];
         return DecisionTree::Leaf {
-            bindings: vec![],
+            bindings: current_bindings(ctx, &first.binders),
             guard: first.guard.clone(),
             rhs: first.rhs.clone(),
             span: first.span,
@@ -1167,6 +1203,7 @@ fn specialize_matrix(
             rhs: row.rhs.clone(),
             span: row.span,
             row_index: row.row_index,
+            binders: row.binders.clone(),
         });
     }
 
@@ -1209,6 +1246,7 @@ fn default_matrix(
                 rhs: row.rhs.clone(),
                 span: row.span,
                 row_index: row.row_index,
+                binders: row.binders.clone(),
             }
         })
         .collect();
@@ -1303,12 +1341,15 @@ fn register_wildcard_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee:
 fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core::Expr> {
     match tree {
         DecisionTree::Leaf {
-            bindings: _,
+            bindings,
             guard,
             rhs,
             span,
             row_index: _,
         } => {
+            for (def_id, var) in bindings {
+                ctx.register_var(def_id, var);
+            }
             let core_rhs = lower_expr(ctx, &rhs)?;
 
             if let Some(guard_expr) = guard {
@@ -2482,12 +2523,15 @@ mod tests {
 
     /// Helper: build a ClauseRow from patterns and a literal RHS.
     fn clause(pats: Vec<Pat>, rhs_val: i128, idx: usize) -> ClauseRow {
+        let mut binders = Vec::new();
+        pats.iter().for_each(|p| pattern_binders(p, &mut binders));
         ClauseRow {
             pats,
             guard: None,
             rhs: hir::Expr::Lit(hir::Lit::Int(rhs_val), Span::default()),
             span: Span::default(),
             row_index: idx,
+            binders,
         }
     }
 

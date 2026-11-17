@@ -2553,6 +2553,11 @@ fn test_tier3_let_user_class_method_value_native() {
 }
 
 #[test]
+fn test_tier2_fallthrough_row_bindings_native() {
+    run_native_test("tier2_functions/fallthrough_row_bindings", Profile::Default);
+}
+
+#[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);
 }

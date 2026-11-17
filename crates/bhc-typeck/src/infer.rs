@@ -340,6 +340,33 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                                     scheme.vars.clear();
                                 }
                             }
+                            // Likewise a value binding that uses a method or
+                            // function of a DICTIONARY-passed class: a use of
+                            // one leaves no constraint here (a method's scheme
+                            // is registered without its class), so nothing
+                            // above kept its variable. Generalized, `let c =
+                            // pick def def in useV c` instantiated a fresh copy
+                            // at `V` while `def` itself stayed unresolved, and
+                            // printed an address. This is the monomorphism
+                            // restriction, which Haskell applies here too.
+                            if crate::io_closure_mode()
+                                && !matches!(binding.rhs, Expr::Lam(..))
+                                && !scheme.vars.is_empty()
+                            {
+                                let mut refs = Vec::new();
+                                crate::binding_groups::collect_expr_references(
+                                    &binding.rhs,
+                                    &mut refs,
+                                );
+                                let dict_constrained = refs.iter().any(|r| {
+                                    ctx.def_schemes.get(r).is_some_and(|s| {
+                                        s.constraints.iter().any(|c| !is_builtin_class(c.class))
+                                    })
+                                });
+                                if dict_constrained {
+                                    scheme.vars.clear();
+                                }
+                            }
                             scheme
                         } else if crate::io_closure_mode() {
                             // A local function used as a value stays general

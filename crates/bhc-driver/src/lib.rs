@@ -1924,9 +1924,10 @@ impl Compiler {
                 matches!(
                     d.kind,
                     bhc_lower::DefKind::ImportedValue | bhc_lower::DefKind::Value
-                ) && d.type_scheme.as_ref().is_some_and(|s| {
-                    s.constraints.iter().any(|c| c.class.as_str() == "Show")
-                })
+                ) && d
+                    .type_scheme
+                    .as_ref()
+                    .is_some_and(|s| s.constraints.iter().any(|c| c.class.as_str() == "Show"))
             })
             .map(|d| d.name)
             .collect();

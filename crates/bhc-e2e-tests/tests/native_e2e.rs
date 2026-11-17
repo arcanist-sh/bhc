@@ -2543,6 +2543,15 @@ fn test_tier3_show_poly_across_modules_native() {
     run_native_test("tier3_io/show_poly_across_modules", Profile::Default);
 }
 
+/// Closure IO model only: eager mode generalizes the binding.
+#[test]
+fn test_tier3_let_user_class_method_value_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() == Ok("eager") {
+        return;
+    }
+    run_native_test("tier3_io/let_user_class_method_value", Profile::Default);
+}
+
 #[test]
 fn test_tier3_literals_at_pattern_bound_text_native() {
     run_native_test("tier3_io/literals_at_pattern_bound_text", Profile::Default);

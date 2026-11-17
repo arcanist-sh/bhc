@@ -50,6 +50,42 @@ fn expect_rejected(file: &str, needle: &str) {
     );
 }
 
+/// Compile `rejected/<file>` to an executable (so code generation runs) with
+/// runtime stubs not allowed, and expect it to fail with `needle`.
+fn expect_build_rejected(file: &str, needle: &str) {
+    let path = bhc_e2e_tests::fixtures_dir().join("rejected").join(file);
+    let out = tempfile::tempdir().expect("temporary directory");
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--"])
+        .arg(&path)
+        .arg("-o")
+        .arg(out.path().join("program"))
+        .env_remove("BHC_ALLOW_STUBS")
+        .output()
+        .expect("failed to run the compiler");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "{file} was built, expected an error containing `{needle}`:\n{text}"
+    );
+    assert!(
+        text.contains(needle),
+        "{file} was rejected, but not with `{needle}`:\n{text}"
+    );
+}
+
+#[test]
+fn test_rejected_method_without_instance() {
+    expect_build_rejected(
+        "method_without_instance.hs",
+        "`m` is not implemented by bhc; the program cannot be compiled",
+    );
+}
+
 // =============================================================================
 // Programs the type checker must reject
 // =============================================================================

@@ -54,6 +54,12 @@ struct Cli {
     #[arg(long)]
     kernel_report: bool,
 
+    /// Compile a program that uses something bhc does not implement, with a
+    /// runtime abort in its place, instead of failing to compile it.
+    /// `BHC_ALLOW_STUBS=1` has the same effect.
+    #[arg(long = "allow-stubs", global = true)]
+    allow_stubs: bool,
+
     /// Explicitly enable the tensor fusion pipeline (regardless of profile).
     /// The Numeric profile always fuses; accepted for toolchain compatibility.
     #[arg(long = "tensor-fusion", global = true)]
@@ -280,6 +286,9 @@ fn real_main() -> Result<()> {
     }
     // Validate --dump-ir/--emit up front so a bad value fails before compiling.
     dump_options(&cli)?;
+    if cli.allow_stubs {
+        bhc_driver::set_allow_stubs(true);
+    }
     if cli.edition.is_some() {
         eprintln!("warning: --edition has no effect yet; all modules use bhc's defaults");
     }

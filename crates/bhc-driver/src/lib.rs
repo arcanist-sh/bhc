@@ -49,6 +49,9 @@ mod report;
 
 pub use report::ComprehensiveKernelReport;
 
+/// Allow runtime stubs for what bhc does not implement (`--allow-stubs`).
+pub use bhc_codegen::set_allow_stubs;
+
 use bhc_ast::Module as AstModule;
 use bhc_codegen::{
     llvm::{

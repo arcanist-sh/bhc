@@ -70,6 +70,27 @@ pub use llvm::{LlvmBackend, LlvmContext, LlvmModule};
 
 pub use bhc_types::io_closure_mode;
 
+static ALLOW_STUBS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let code generation fall back to a runtime stub for something bhc does
+/// not implement (`--allow-stubs`): the program then aborts if it reaches it.
+/// Off by default, so such a program fails to compile instead (#99).
+pub fn set_allow_stubs(allow: bool) {
+    ALLOW_STUBS.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether runtime stubs are allowed: `--allow-stubs`, or the environment
+/// variable `BHC_ALLOW_STUBS=1` (for build scripts that cannot pass a flag
+/// to every compile, such as the pandoc harness).
+#[must_use]
+pub fn stubs_allowed() -> bool {
+    static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    ALLOW_STUBS.load(std::sync::atomic::Ordering::Relaxed)
+        || *FROM_ENV.get_or_init(|| {
+            std::env::var("BHC_ALLOW_STUBS").is_ok_and(|v| !v.is_empty() && v != "0")
+        })
+}
+
 static IO_PRIMITIVES: std::sync::OnceLock<rustc_hash::FxHashSet<String>> =
     std::sync::OnceLock::new();
 
@@ -124,6 +145,14 @@ pub enum CodegenError {
     /// Unsupported feature.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// The program uses something bhc does not implement, and runtime
+    /// stubs are not allowed (see [`stubs_allowed`]).
+    #[error(
+        "`{0}` is not implemented by bhc; the program cannot be compiled \
+         (pass --allow-stubs to build it anyway and abort if it is reached)"
+    )]
+    NotImplemented(String),
 }
 
 /// Result type for code generation operations.

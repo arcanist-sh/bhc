@@ -55470,10 +55470,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///
     /// The stub has signature `(ptr) -> ptr` and calls `bhc_error` with a diagnostic
     /// message, then hits unreachable. This allows compilation to succeed for code
-    /// paths that reference stub functions, deferring the error to runtime.
+    /// paths that reference stub functions, deferring the error to runtime. Only
+    /// with `--allow-stubs`; otherwise the reference is a compile error.
     fn get_or_create_stub_function(&mut self, name: &str) -> CodegenResult<FunctionValue<'ctx>> {
         if let Some(fn_val) = self.stub_functions.get(name) {
             return Ok(*fn_val);
+        }
+        // A program that compiles cannot reach a "not implemented" abort
+        // unless asked for (#99).
+        if !crate::stubs_allowed() {
+            return Err(CodegenError::NotImplemented(name.to_string()));
         }
 
         let ptr_type = self.type_mapper().ptr_type();

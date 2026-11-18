@@ -89,6 +89,52 @@ pub unsafe extern "C" fn bhc_rts_init(argc: c_int, argv: *const *const c_char) {
     // For now, just use defaults
     let _ = (argc, argv);
     bhc_init();
+    install_internal_error_hook();
+}
+
+/// The thread that started the program, whose panics the hook reports.
+static PROGRAM_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Report a runtime panic on the program's thread as one line and a bug
+/// report hint, then end with status 1, instead of a Rust panic message,
+/// a backtrace of runtime frames and an abort (#99). Such a panic is a bug
+/// in bhc: what a Haskell program can cause goes through [`fatal`].
+///
+/// Panics on other threads (the scheduler's workers, which catch them) keep
+/// Rust's handling. A backtrace is still printed when `RUST_BACKTRACE` asks.
+fn install_internal_error_hook() {
+    if PROGRAM_THREAD.set(std::thread::current().id()).is_err() {
+        return;
+    }
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if PROGRAM_THREAD.get() != Some(&std::thread::current().id()) {
+            default(info);
+            return;
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "runtime panic".to_string());
+        let location = info
+            .location()
+            .map(|l| format!(" ({}:{})", l.file(), l.line()))
+            .unwrap_or_default();
+        let program = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
+        eprintln!(
+            "{program}: internal error: {message}{location}\n\
+             This is a bug in bhc; please report it at https://github.com/arcanist-sh/bhc/issues"
+        );
+        let bt = std::backtrace::Backtrace::capture();
+        if bt.status() == std::backtrace::BacktraceStatus::Captured {
+            eprintln!("stack backtrace:\n{bt}");
+        }
+        std::process::exit(1);
+    }));
 }
 
 /// Shutdown the BHC runtime system.

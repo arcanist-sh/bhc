@@ -165,6 +165,22 @@ pub enum LowerWarning {
         /// Source location of the first use.
         span: Span,
     },
+    /// A Template Haskell declaration splice bhc does not recognize was
+    /// skipped: the declarations it would generate do not exist.
+    SpliceSkipped {
+        /// The function the splice applies (`deriveJSON`).
+        name: String,
+        /// Source location of the splice.
+        span: Span,
+    },
+    /// A `deriving` clause names a standard class bhc cannot derive, so no
+    /// instance is generated.
+    DerivingUnsupported {
+        /// The class name.
+        class: String,
+        /// Source location of the type declaration.
+        span: Span,
+    },
     /// A LANGUAGE pragma extension is not yet implemented.
     UnimplementedExtension {
         /// The extension name.
@@ -220,6 +236,20 @@ impl std::fmt::Display for LowerWarning {
                     f,
                     "`{name}` is not implemented on WebAssembly yet: calling it aborts \
                      at run time (threads run on native targets only, see issue #75)"
+                )
+            }
+            LowerWarning::SpliceSkipped { name, .. } => {
+                write!(
+                    f,
+                    "Template Haskell splice `{name}` is not supported and was skipped: \
+                     the declarations it generates do not exist"
+                )
+            }
+            LowerWarning::DerivingUnsupported { class, .. } => {
+                write!(
+                    f,
+                    "bhc cannot derive `{class}`: no instance is generated, so using one \
+                     is a compile error"
                 )
             }
             LowerWarning::UnknownExtension { name, .. } => {

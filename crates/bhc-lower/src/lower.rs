@@ -68,8 +68,13 @@ pub fn lower_module_with_cache(
         .iter()
         .any(|d| matches!(d, ast::Decl::Splice(_, _)))
     {
+        let (decls, skipped) = crate::th_expand::expand_th_splices(module.decls.clone());
+        for (name, span) in skipped {
+            ctx.warnings
+                .push(crate::LowerWarning::SpliceSkipped { name, span });
+        }
         expanded_holder = ast::Module {
-            decls: crate::th_expand::expand_th_splices(module.decls.clone()),
+            decls,
             ..module.clone()
         };
         &expanded_holder
@@ -9610,11 +9615,7 @@ fn lower_data_decl(ctx: &mut LowerContext, data: &ast::DataDecl) -> LowerResult<
     let deriving: Vec<hir::DerivingClause> = data
         .deriving
         .iter()
-        .map(|clause| hir::DerivingClause {
-            strategy: lower_deriving_strategy(ctx, &clause.strategy),
-            class: clause.class.name,
-            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
-        })
+        .map(|clause| lower_deriving_clause(ctx, clause, data.span))
         .collect();
 
     Ok(hir::DataDef {
@@ -9726,6 +9727,36 @@ fn lower_gadt_con_def(ctx: &mut LowerContext, con: &ast::GadtConDecl) -> hir::Co
     }
 }
 
+/// Stock-derivable standard classes bhc cannot derive: a `deriving` clause
+/// naming one generates no instance. (`Typeable` is not listed: every type
+/// has it, so deriving it adds nothing.)
+const UNDERIVABLE_CLASSES: &[&str] = &["Data", "Ix", "Lift"];
+
+/// Lower one `deriving` clause, warning when it names a class bhc cannot
+/// derive, so the missing instance is not a surprise later (#99).
+fn lower_deriving_clause(
+    ctx: &mut LowerContext,
+    clause: &ast::DerivingClause,
+    span: Span,
+) -> hir::DerivingClause {
+    let class = clause.class.name.as_str();
+    let stock = matches!(
+        clause.strategy,
+        ast::DerivingStrategy::Default | ast::DerivingStrategy::Stock
+    );
+    if stock && UNDERIVABLE_CLASSES.contains(&class.rsplit('.').next().unwrap_or(class)) {
+        ctx.warnings.push(crate::LowerWarning::DerivingUnsupported {
+            class: class.to_string(),
+            span,
+        });
+    }
+    hir::DerivingClause {
+        strategy: lower_deriving_strategy(ctx, &clause.strategy),
+        class: clause.class.name,
+        args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
+    }
+}
+
 /// Lower a deriving strategy from AST to HIR.
 fn lower_deriving_strategy(
     ctx: &mut LowerContext,
@@ -9761,11 +9792,7 @@ fn lower_newtype_decl_with_accessors(
     let deriving: Vec<hir::DerivingClause> = newtype
         .deriving
         .iter()
-        .map(|clause| hir::DerivingClause {
-            strategy: lower_deriving_strategy(ctx, &clause.strategy),
-            class: clause.class.name,
-            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
-        })
+        .map(|clause| lower_deriving_clause(ctx, clause, newtype.span))
         .collect();
 
     // The newtype's applied type `N a1 .. an`, for accessor signatures.
@@ -9960,11 +9987,7 @@ fn lower_data_instance_decl(
     let deriving: Vec<hir::DerivingClause> = di
         .deriving
         .iter()
-        .map(|clause| hir::DerivingClause {
-            strategy: lower_deriving_strategy(ctx, &clause.strategy),
-            class: clause.class.name,
-            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
-        })
+        .map(|clause| lower_deriving_clause(ctx, clause, di.span))
         .collect();
 
     hir::DataFamilyInstance {

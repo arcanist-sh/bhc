@@ -8168,6 +8168,43 @@ exposed-modules: Data.Text Data.Text.Internal
         assert_eq!(missing, ["Hidden", "hidden"]);
     }
 
+    /// A Template Haskell splice bhc does not recognize, and a `deriving`
+    /// of a standard class it cannot derive, each warn instead of leaving
+    /// the declarations or instance missing silently (#99). A recognized
+    /// splice and `deriving Typeable` (which every type has) do not warn.
+    #[test]
+    fn test_skipped_splice_and_underivable_class_warn() {
+        let src = "{-# LANGUAGE TemplateHaskell, DeriveDataTypeable #-}\n\
+                   import Data.Data (Data, Typeable)\n\
+                   data R = R { _rx :: Int } deriving (Show, Typeable)\n\
+                   data T = A | B deriving (Eq, Data)\n\
+                   makeThing :: Int -> Int\n\
+                   makeThing = id\n\
+                   $(makeLenses ''R)\n\
+                   $(makeThing 3)\n\
+                   main :: IO ()\n\
+                   main = print (R 1)\n";
+        let unit = CompilationUnit::from_source("Main", src);
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let mut reported: Vec<String> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::SpliceSkipped { name, .. } => {
+                    Some(format!("splice {name}"))
+                }
+                bhc_lower::LowerWarning::DerivingUnsupported { class, .. } => {
+                    Some(format!("deriving {class}"))
+                }
+                _ => None,
+            })
+            .collect();
+        reported.sort();
+        assert_eq!(reported, ["deriving Data", "splice makeThing"]);
+    }
+
     /// The interpreter forces `fst`/`snd` components and evaluates floating
     /// literals as Double (#17): this printed `expected Num, got <thunk>`,
     /// then `1.3333334`.

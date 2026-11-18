@@ -372,6 +372,17 @@ pub fn lower_core_module(
         }
     }
 
+    // A program that compiles must not compute with a made-up 0 in place of
+    // a function the backend does not know (#99).
+    if !lowering.unresolved.is_empty() && !bhc_codegen::stubs_allowed() {
+        let names: Vec<&str> = lowering.unresolved.iter().map(String::as_str).collect();
+        return Err(crate::WasmError::NotSupported(format!(
+            "not implemented by the WASM backend: {}; the program cannot be compiled \
+             (pass --allow-stubs to build it anyway with 0 in their place)",
+            names.join(", ")
+        )));
+    }
+
     // Find main's function index
     let main_idx = lowering
         .func_map
@@ -484,6 +495,9 @@ struct WasmLowering<'a> {
     /// Tail-call-optimization context for the function currently being lowered,
     /// if it is self-recursive. Drives `Cont::Tail` lowering.
     tco_ctx: Option<TcoCtx>,
+    /// Names the backend could not resolve and replaced with the constant 0.
+    /// Unless runtime stubs are allowed, any entry is a compile error (#99).
+    unresolved: std::collections::BTreeSet<String>,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -520,6 +534,7 @@ impl<'a> WasmLowering<'a> {
             arities: FxHashMap::default(),
             next_synthetic_id: 5_000_000,
             tco_ctx: None,
+            unresolved: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1273,9 +1288,13 @@ impl<'a> WasmLowering<'a> {
                     instrs.push(WasmInstr::Call(self.runtime.get_args_idx));
                 } else if strip_qualifier(name) == "getProgName" {
                     instrs.push(WasmInstr::Call(self.runtime.get_prog_name_idx));
+                } else if name == "$null_targs" {
+                    // A derived show's empty type-argument list: a null pointer.
+                    instrs.push(WasmInstr::I32Const(0));
                 } else {
                     // Unknown variable - push 0 as fallback
                     tracing::warn!(var = name, "unresolved variable, using 0");
+                    self.unresolved.insert(name.to_string());
                     instrs.push(WasmInstr::I32Const(0));
                 }
             }
@@ -4866,8 +4885,10 @@ impl<'a> WasmLowering<'a> {
 
             // `show x` as a value: produce a String (length-prefixed) so it
             // composes with `++`. The last argument is the value; any earlier
-            // argument is a dictionary.
-            Some("show" | "GHC.Show.show" | "Prelude.show" | "Text.Show.show")
+            // argument is a dictionary. A derived show's `$show_field targs x`
+            // (a field typed by the type's parameters) shows `x` the same way:
+            // this backend has no type-argument descriptors.
+            Some("show" | "GHC.Show.show" | "Prelude.show" | "Text.Show.show" | "$show_field")
                 if !args.is_empty() =>
             {
                 let value = args[args.len() - 1];
@@ -5498,6 +5519,7 @@ impl<'a> WasmLowering<'a> {
                         );
                     } else {
                         tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
+                        self.unresolved.insert(name.to_string());
                         for arg in &args {
                             self.lower_expr(arg, instrs, locals, local_count, false)?;
                             instrs.push(WasmInstr::Drop);
@@ -5506,6 +5528,7 @@ impl<'a> WasmLowering<'a> {
                     }
                 } else {
                     tracing::warn!(func = name, args = args.len(), "unknown function, using 0");
+                    self.unresolved.insert(name.to_string());
                     for arg in &args {
                         self.lower_expr(arg, instrs, locals, local_count, false)?;
                         instrs.push(WasmInstr::Drop);

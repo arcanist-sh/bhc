@@ -45,6 +45,9 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             let scheme = ctx.env.lookup_def_id(def_ref.def_id).cloned();
             if let Some(s) = scheme {
                 let result = ctx.instantiate(&s);
+                if let Some(class) = ctx.local_class_methods.get(&def_ref.def_id).copied() {
+                    record_class_method_use(ctx, class, def_ref, &result);
+                }
                 if let Some((class, of_result)) = ctx.class_op_defs.get(&def_ref.def_id).copied() {
                     if let Ty::Fun(argument, returned) = &result {
                         let operand = if of_result { returned } else { argument };
@@ -767,6 +770,36 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
 ///
 /// The constraints are collected during inference and solved after,
 /// potentially defaulting ambiguous type variables to standard types.
+/// Record the type `class`'s variable takes at this use of one of its
+/// methods, whose instantiated type is `used_at`, for
+/// [`TyCtxt::check_class_method_instances`].
+fn record_class_method_use(
+    ctx: &mut TyCtxt,
+    class: Symbol,
+    def_ref: &bhc_hir::DefRef,
+    used_at: &Ty,
+) {
+    let Some(scheme) = ctx.def_schemes.get(&def_ref.def_id).cloned() else {
+        return;
+    };
+    let Some(constraint) = scheme.constraints.iter().find(|c| c.class == class) else {
+        return;
+    };
+    let [class_arg] = constraint.args.as_slice() else {
+        return;
+    };
+    let (ty, fresh) = crate::instantiate::instantiate_scoped(ctx, &scheme);
+    let class_arg = substitute(class_arg, &fresh);
+    // The two instantiations have one shape; tying them together only
+    // connects the class variable to this use, so its errors are not the
+    // program's.
+    let saved = ctx.take_diagnostics();
+    ctx.unify(&ty, used_at, def_ref.span);
+    let _ = ctx.take_diagnostics();
+    ctx.restore_diagnostics(saved);
+    ctx.class_method_uses.push((class, class_arg, def_ref.span));
+}
+
 /// Give each variable parameter of a lambda whose expected type (`expected`,
 /// a function type) is a `forall` that polymorphic type, so every use in
 /// the body instantiates it afresh (the pattern keeps it: see

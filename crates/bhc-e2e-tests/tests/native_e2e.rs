@@ -82,7 +82,16 @@ fn expect_build_rejected(file: &str, needle: &str) {
 fn test_rejected_method_without_instance() {
     expect_build_rejected(
         "method_without_instance.hs",
-        "`m` is not implemented by bhc; the program cannot be compiled",
+        // The type checker rejects it now, before code generation (#97).
+        "No instance for `C [Char]`",
+    );
+}
+
+#[test]
+fn test_rejected_unimplemented_function() {
+    expect_build_rejected(
+        "unimplemented_function.hs",
+        "`Data.Text.chunksOf` is not implemented by bhc; the program cannot be compiled",
     );
 }
 
@@ -220,6 +229,18 @@ fn test_rejected_literal_not_a_number() {
     expect_rejected(file, "No instance for `Num [");
     expect_rejected(file, "No instance for `Num (");
     expect_rejected(file, "No instance for `Num (IO ");
+}
+
+#[test]
+fn test_rejected_instance_errors() {
+    let file = "instance_errors.hs";
+    expect_rejected(
+        file,
+        "`size` in `instance Size Int` does not have the type the class gives it",
+    );
+    expect_rejected(file, "`weight` is not a method of class `Size`");
+    expect_rejected(file, "No instance for `Size Char`");
+    expect_rejected(file, "No instance for `Box []`");
 }
 
 // =============================================================================

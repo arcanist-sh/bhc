@@ -199,6 +199,22 @@ pub struct TyCtxt {
     /// are all visible here, so a `Show`, `Eq` or `Ord` operation at one of
     /// them with no instance is an error.
     pub(crate) local_types: FxHashMap<Symbol, Vec<Symbol>>,
+    /// The methods of the single-parameter classes this module declares,
+    /// with their class: a use is recorded in [`Self::class_method_uses`].
+    pub(crate) local_class_methods: FxHashMap<DefId, Symbol>,
+    /// The classes this module declares. Only their method lists are known
+    /// to be complete: an imported class's interface may list fewer.
+    pub(crate) local_classes: rustc_hash::FxHashSet<Symbol>,
+    /// Each use of one of those methods: its class, the type the class
+    /// variable takes there, and where. Instances are selected in Core
+    /// lowering and the method's constraint is not solved here, so these
+    /// are checked once the module is solved
+    /// ([`Self::check_class_method_instances`]).
+    pub(crate) class_method_uses: Vec<(Symbol, Ty, Span)>,
+    /// Instance methods already reported as wrong: instances are registered
+    /// twice (before and with their binding group), and each error is
+    /// reported once.
+    reported_instance_methods: rustc_hash::FxHashSet<Span>,
     /// Whether the module contains an expression lowering already reported
     /// as an error, which is typed `Ty::Error` without a type error.
     pub(crate) saw_error_expr: bool,
@@ -338,6 +354,10 @@ impl TyCtxt {
             class_op_defs: FxHashMap::default(),
             class_op_uses: Vec::new(),
             local_types: FxHashMap::default(),
+            local_class_methods: FxHashMap::default(),
+            local_classes: rustc_hash::FxHashSet::default(),
+            class_method_uses: Vec::new(),
+            reported_instance_methods: rustc_hash::FxHashSet::default(),
             saw_error_expr: false,
             checking_instance_methods: false,
             dict_constraint_args: Vec::new(),
@@ -530,6 +550,74 @@ impl TyCtxt {
 
         // Add all new constraints
         self.constraints.extend(new_constraints);
+    }
+
+    /// Report a use of a method of a class this module declares at a type
+    /// no instance of the class covers: `m True` with only `instance C Int`
+    /// compiled (#97).
+    ///
+    /// Conservative: a type whose head is still a variable is skipped, and
+    /// so is a class with an instance at a bare type variable or at an
+    /// instance head with the same constructor (whose context the checker
+    /// does not need to see to accept it).
+    pub fn check_class_method_instances(&mut self) {
+        for (class, arg, span) in std::mem::take(&mut self.class_method_uses) {
+            let arg = self.subst.apply_resolved(&arg);
+            let head = match &arg {
+                Ty::Fun(..) => "->",
+                other => match container_head_name(other) {
+                    Some(head) => head,
+                    None => continue,
+                },
+            };
+            // Only a data type's head says which instances can apply: a type
+            // family application (`StyleId a`) or an imported synonym may be
+            // anything.
+            let is_data_type = matches!(
+                head,
+                "->" | "[]"
+                    | "(,)"
+                    | "()"
+                    | "Int"
+                    | "Integer"
+                    | "Double"
+                    | "Float"
+                    | "Char"
+                    | "Bool"
+                    | "Word"
+                    | "Ordering"
+                    | "Maybe"
+                    | "Either"
+                    | "IO"
+            ) || self.local_types.contains_key(&Symbol::intern(head));
+            if !is_data_type {
+                continue;
+            }
+            let covered = self.env.lookup_instances(class).is_some_and(|instances| {
+                instances.iter().any(|inst| match inst.types.first() {
+                    Some(Ty::Var(_)) | None => true,
+                    Some(Ty::Fun(..)) => head == "->",
+                    Some(t) => container_head_name(t) == Some(head),
+                })
+            });
+            if covered {
+                continue;
+            }
+            let names = signature_variable_names(&arg.free_vars());
+            let shown = crate::diagnostics::pretty_ty(&rename_vars(&arg, &names));
+            let shown = if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                format!("({shown})")
+            } else {
+                shown
+            };
+            let diag = Diagnostic::error(format!("No instance for `{} {shown}`", class.as_str()))
+                .with_label(self.full_span(span), format!("used here at `{shown}`"))
+                .with_note(format!(
+                    "the class `{}` has no instance for `{shown}`",
+                    class.as_str()
+                ));
+            self.emit_error(diag);
+        }
     }
 
     /// Reject `show`, `print`, `==`, `<`, … used at a function type, and
@@ -925,7 +1013,14 @@ impl TyCtxt {
                     // error (e.g., Num Bool from `if 42 then ...`)
                     let args_str = args
                         .iter()
-                        .map(|t| format!("{:?}", t))
+                        .map(|t| {
+                            let shown = crate::diagnostics::pretty_ty(t);
+                            if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                                format!("({shown})")
+                            } else {
+                                shown
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join(" ");
                     self.diag.emit(Diagnostic::error(format!(
@@ -9046,6 +9141,9 @@ impl TyCtxt {
             self.env.insert_global(method.id, shape_scheme);
 
             // Also store by DefId so hir-to-core can look it up
+            if class.params.len() == 1 {
+                self.local_class_methods.insert(method.id, class.name);
+            }
             self.def_schemes.insert(method.id, method_scheme);
         }
 
@@ -9107,6 +9205,27 @@ impl TyCtxt {
                 if own.get(&v).is_none() {
                     let fresh = self.fresh_ty();
                     own.insert(&v, fresh);
+                }
+            }
+        }
+        let local_class = self
+            .local_classes
+            .contains(&instance.class)
+            .then(|| self.env.lookup_class(instance.class).cloned())
+            .flatten();
+        if let Some(class_info) = local_class {
+            for method in &instance.methods {
+                if !class_info.methods.contains_key(&method.name)
+                    && self.reported_instance_methods.insert(method.span)
+                {
+                    let diag = Diagnostic::error(format!(
+                        "`{}` is not a method of class `{}`",
+                        method.name.as_str(),
+                        instance.class.as_str()
+                    ))
+                    .with_label(self.full_span(method.span), "defined in this instance")
+                    .with_note("an instance can only define the methods its class declares");
+                    self.emit_error(diag);
                 }
             }
         }
@@ -9335,7 +9454,7 @@ impl TyCtxt {
     }
 
     /// Unify an instance method's inferred type with the class method's type
-    /// at the instance head, keeping no errors from it.
+    /// at the instance head, and report a method whose body does not have it.
     ///
     /// Instance method bodies are inferred without an expected type, so
     /// inside `instance PandocMonad m => PandocMonad (ParsecT s st m)` the
@@ -9343,9 +9462,9 @@ impl TyCtxt {
     /// matched that variable against the constraint dictionary for `m`,
     /// selected `getsCommonState` and `>>=` from it, and ran a ParsecT action
     /// through ExceptT-over-StateT's bind. Pinning the type here makes the
-    /// recorded occurrence types say `ParsecT s st m`. Any mismatch is
-    /// dropped: this only refines types, it must not reject a module that
-    /// checked before.
+    /// recorded occurrence types say `ParsecT s st m`. A mismatch was
+    /// dropped at first; on the e2e corpus and all of pandoc none occurs in
+    /// a correct program, so it is reported (#97).
     fn guide_instance_method_type(&mut self, instance: &InstanceDef, method: &ValueDef) {
         let Some(class) = self.env.lookup_class(instance.class).cloned() else {
             return;
@@ -9387,9 +9506,40 @@ impl TyCtxt {
         let expected = subst.apply(&method_scheme.ty);
         let saved = self.diag.take_diagnostics();
         self.unify(&expected, &inferred, method.span);
-        let _speculative = self.diag.take_diagnostics();
+        let mismatches = self.diag.take_diagnostics();
         for d in saved {
             self.diag.emit(d);
+        }
+        // The method's body must have the type the class gives it at this
+        // instance: `instance C Int where m x = True` for `m :: a -> Int`
+        // compiled (#97).
+        let first = mismatches.into_iter().next();
+        if let Some(first) = first.filter(|_| self.reported_instance_methods.insert(method.span)) {
+            let head = instance
+                .types
+                .iter()
+                .map(|t| {
+                    let shown = crate::diagnostics::pretty_ty(t);
+                    if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                        format!("({shown})")
+                    } else {
+                        shown
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let diag = Diagnostic::error(format!(
+                "`{}` in `instance {} {head}` does not have the type the class gives it: {}",
+                method.name.as_str(),
+                instance.class.as_str(),
+                first.message
+            ))
+            .with_label(self.full_span(method.span), "in this method")
+            .with_note(format!(
+                "the class declares `{}`; at this instance its class variable is `{head}`",
+                method.name.as_str()
+            ));
+            self.emit_error(diag);
         }
     }
 
@@ -10022,6 +10172,13 @@ impl TyCtxt {
     /// Take all diagnostics.
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
         self.diag.take_diagnostics()
+    }
+
+    /// Put back diagnostics taken with [`Self::take_diagnostics`].
+    pub(crate) fn restore_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        for d in diagnostics {
+            self.diag.emit(d);
+        }
     }
 
     /// Create a `FullSpan` from a Span.

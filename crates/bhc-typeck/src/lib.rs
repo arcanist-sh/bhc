@@ -846,6 +846,7 @@ pub fn type_check_module_with_imports(
     // Register type classes and instances
     for item in &hir.items {
         if let bhc_hir::Item::Class(class) = item {
+            ctx.local_classes.insert(class.name);
             ctx.register_class(class);
         }
     }
@@ -893,6 +894,7 @@ pub fn type_check_module_with_imports(
     // Solve type class constraints (defaults ambiguous type variables)
     ctx.solve_constraints();
     ctx.check_class_ops_not_at_functions();
+    ctx.check_class_method_instances();
 
     if ctx.has_errors() {
         Err(ctx.take_diagnostics())

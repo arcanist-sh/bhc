@@ -153,6 +153,23 @@ fn test_rejected_compare_functions() {
     );
 }
 
+#[test]
+fn test_rejected_numeric_types_distinct() {
+    let file = "numeric_types_distinct.hs";
+    expect_rejected(file, "expected `Integer`, found `Int`");
+    expect_rejected(file, "expected `Int`, found `Double`");
+    expect_rejected(file, "expected `Int`, found `Integer`");
+    expect_rejected(file, "No instance for `Integral Double`");
+}
+
+#[test]
+fn test_rejected_missing_derived_instance() {
+    let file = "missing_derived_instance.hs";
+    expect_rejected(file, "No instance for `Show T`");
+    expect_rejected(file, "No instance for `Eq T`");
+    expect_rejected(file, "No instance for `Ord T`");
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================

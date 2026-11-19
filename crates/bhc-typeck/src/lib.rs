@@ -824,6 +824,26 @@ pub fn type_check_module_with_imports(
         }
     }
 
+    // The types this module declares, for the missing-instance check.
+    for item in &hir.items {
+        match item {
+            bhc_hir::Item::Data(data) => {
+                ctx.local_types.entry(data.name).or_default();
+            }
+            bhc_hir::Item::Newtype(newtype) => {
+                ctx.local_types.entry(newtype.name).or_default();
+            }
+            _ => {}
+        }
+    }
+    for item in &hir.items {
+        if let bhc_hir::Item::StandaloneDeriving(sd) = item {
+            if let Some(classes) = ctx.local_types.get_mut(&sd.type_name) {
+                classes.push(sd.class);
+            }
+        }
+    }
+
     // Register type classes and instances
     for item in &hir.items {
         if let bhc_hir::Item::Class(class) = item {

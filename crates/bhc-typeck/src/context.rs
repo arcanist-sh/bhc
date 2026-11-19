@@ -132,6 +132,11 @@ pub struct TyCtxt {
     /// checked once the module is solved
     /// ([`Self::check_class_ops_not_at_functions`]).
     pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
+    /// The data types and newtypes this module declares, each with the
+    /// classes a standalone `deriving instance` gives it. Their instances
+    /// are all visible here, so a `Show`, `Eq` or `Ord` operation at one of
+    /// them with no instance is an error.
+    pub(crate) local_types: FxHashMap<Symbol, Vec<Symbol>>,
 
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
@@ -263,6 +268,7 @@ impl TyCtxt {
             numeric_conversion_defs: rustc_hash::FxHashSet::default(),
             class_op_defs: FxHashMap::default(),
             class_op_uses: Vec::new(),
+            local_types: FxHashMap::default(),
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -474,6 +480,19 @@ impl TyCtxt {
         for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
             let operand = self.subst.apply(&operand);
             let is_function = matches!(operand, Ty::Fun(..));
+            if let Some(name) = self.local_type_without_instance(class, &operand) {
+                let diag = Diagnostic::error(format!("No instance for `{class} {name}`"))
+                    .with_label(
+                        self.full_span(span),
+                        format!("used here at the type `{name}`"),
+                    )
+                    .with_note(format!(
+                        "add `deriving ({class})` to the declaration of `{name}`, \
+                         or write an `instance {class} {name}`"
+                    ));
+                self.emit_error(diag);
+                continue;
+            }
             if !is_function && !self.is_plainly_not_numeric(class, &operand) {
                 continue;
             }
@@ -492,7 +511,11 @@ impl TyCtxt {
             } else {
                 (
                     format!("used here at the type `{shown}`"),
-                    format!("`{shown}` is not a number: it has no `{class}` instance"),
+                    if matches!(shown.as_str(), "Float" | "Double") {
+                        format!("`{shown}` is not an integral type: it has no `{class}` instance")
+                    } else {
+                        format!("`{shown}` is not a number: it has no `{class}` instance")
+                    },
                 )
             };
             let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
@@ -500,6 +523,29 @@ impl TyCtxt {
                 .with_note(note);
             self.emit_error(diag);
         }
+    }
+
+    /// The name of `ty`'s type constructor when it is a type this module
+    /// declares and nothing gives it an instance of `class` (`Show`, `Eq` or
+    /// `Ord`): no deriving clause, standalone deriving or instance
+    /// declaration for any application of it. `print A` for a `data T = A`
+    /// without `deriving Show` compiled and printed nothing (#97).
+    fn local_type_without_instance(&self, class: &str, ty: &Ty) -> Option<Symbol> {
+        if !matches!(class, "Show" | "Eq" | "Ord") {
+            return None;
+        }
+        let name = Symbol::intern(container_head_name(ty)?);
+        let standalone = self.local_types.get(&name)?;
+        let class = Symbol::intern(class);
+        if standalone.contains(&class) {
+            return None;
+        }
+        let has_instance = self.env.lookup_instances(class).is_some_and(|instances| {
+            instances
+                .iter()
+                .any(|inst| inst.types.first().and_then(container_head_name) == Some(name.as_str()))
+        });
+        (!has_instance).then_some(name)
     }
 
     /// Whether `ty` is a builtin type with no instance of the numeric class
@@ -515,10 +561,17 @@ impl TyCtxt {
         };
         // `Integral` and `Fractional` operations are also `Num` ones; an
         // instance of any of them is the program saying the type is a number.
-        not_a_number
+        if not_a_number
             && !["Num", "Fractional", "Integral"]
                 .iter()
                 .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
+        {
+            return true;
+        }
+        // A floating-point type is a number but not an integral one:
+        // `fromIntegral (1.5 :: Double)` printed 1.5.
+        class == "Integral"
+            && matches!(ty, Ty::Con(con) if matches!(con.name.as_str(), "Float" | "Double"))
     }
 
     /// A string literal under OverloadedStrings that is used as a list is a

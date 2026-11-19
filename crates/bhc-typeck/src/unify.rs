@@ -271,93 +271,16 @@ fn int_ty() -> Ty {
 
 /// Check if two type constructor names are compatible type aliases.
 /// Returns true if they both resolve to the same underlying type.
+///
+/// Only the standard `FilePath = String` synonym is known here; user type
+/// synonyms are expanded by [`try_expand_type_alias`]. Distinct types never
+/// unify, even numeric ones such as `Int` and `Integer` (#97).
 fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
-    // First, check if they're the same type after normalizing qualified names.
-    // E.g., "T.Text" and "Text" should be the same type.
     if same_type_name(name1, name2) {
         return true;
     }
-
-    // Normalize before checking alias groups
-    let n1 = normalize_qualified_tyname(name1);
-    let n2 = normalize_qualified_tyname(name2);
-
-    // Type aliases for Int
-    const INT_ALIASES: &[&str] = &[
-        "Int",
-        "Dimension",
-        "Position",
-        "KeyMask",
-        "Window",
-        "ScreenId",
-        "Handle",
-    ];
-
-    // Type aliases for String
-    const STRING_ALIASES: &[&str] = &["String", "FilePath", "WorkspaceId"];
-
-    // Type aliases for Text
-    const TEXT_ALIASES: &[&str] = &[
-        "Text",
-        "MimeType",
-        "Extension",
-        "NameSpaceIRI",
-        "Attr",
-        "Tag",
-    ];
-
-    // Check if both are Int aliases
-    let is_int1 = INT_ALIASES.contains(&n1);
-    let is_int2 = INT_ALIASES.contains(&n2);
-    if is_int1 && is_int2 {
-        return true;
-    }
-
-    // Check if both are String aliases
-    let is_str1 = STRING_ALIASES.contains(&n1);
-    let is_str2 = STRING_ALIASES.contains(&n2);
-    if is_str1 && is_str2 {
-        return true;
-    }
-
-    // Check if both are Text aliases
-    let is_text1 = TEXT_ALIASES.contains(&n1);
-    let is_text2 = TEXT_ALIASES.contains(&n2);
-    if is_text1 && is_text2 {
-        return true;
-    }
-
-    // Integer and Int should be compatible in check mode
-    let is_integer_like = |s: &str| {
-        matches!(
-            s,
-            "Int"
-                | "Integer"
-                | "Word"
-                | "Int64"
-                | "Word8"
-                | "Word16"
-                | "Word32"
-                | "Word64"
-                | "Int8"
-                | "Int16"
-                | "Int32"
-                | "CInt"
-                | "CSize"
-        )
-    };
-    if is_integer_like(n1) && is_integer_like(n2) {
-        return true;
-    }
-
-    // Float/Double should be compatible
-    let is_float_like =
-        |s: &str| matches!(s, "Float" | "Double" | "CDouble" | "CFloat" | "Rational");
-    if is_float_like(n1) && is_float_like(n2) {
-        return true;
-    }
-
-    false
+    let is_string = |s: &str| matches!(normalize_qualified_tyname(s), "String" | "FilePath");
+    is_string(name1) && is_string(name2)
 }
 
 /// Try to reduce a type if it looks like a type family application.

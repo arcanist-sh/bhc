@@ -24,6 +24,50 @@ use crate::diagnostics;
 use crate::env::{ClassInfo, InstanceInfo, TypeEnv};
 use crate::TypedModule;
 
+/// The type of `mask`'s `restore` argument, `forall a. IO a -> IO a`.
+pub(crate) fn rank2_restore(io_con: TyCon) -> Ty {
+    let a = TyVar::new_star(0xFFFF_0010);
+    let io_a = Ty::App(Box::new(Ty::Con(io_con)), Box::new(Ty::Var(a.clone())));
+    Ty::Forall(vec![a], Box::new(Ty::fun(io_a.clone(), io_a)))
+}
+
+/// Names for a signature's type variables in an error message, `a`, `b`, …
+/// in order of appearance: the variables themselves carry only ids.
+fn signature_variable_names(vars: &[TyVar]) -> FxHashMap<u32, String> {
+    vars.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let name = match u8::try_from(i) {
+                Ok(i) if i < 26 => char::from(b'a' + i).to_string(),
+                _ => format!("t{i}"),
+            };
+            (v.id, name)
+        })
+        .collect()
+}
+
+/// `ty` with the named type variables written as their names, for printing.
+fn rename_vars(ty: &Ty, names: &FxHashMap<u32, String>) -> Ty {
+    match ty {
+        Ty::Var(v) => names.get(&v.id).map_or_else(
+            || ty.clone(),
+            |name| Ty::Con(TyCon::new(Symbol::intern(name), v.kind.clone())),
+        ),
+        Ty::App(a, b) => Ty::App(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(rename_vars(e, names))),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| rename_vars(e, names)).collect()),
+        Ty::Forall(vs, body) => Ty::Forall(vs.clone(), Box::new(rename_vars(body, names))),
+        other => other.clone(),
+    }
+}
+
 /// Extract the name of the head type constructor of a type, for recognizing
 /// container types regardless of how many arguments are applied.
 ///
@@ -40,12 +84,30 @@ fn container_head_name(ty: &Ty) -> Option<&str> {
     }
 }
 
+/// The first id [`TyVarGen`] hands out.
+///
+/// A type variable written in the source is identified by its name's
+/// interned symbol (`a` in every signature is one id), and symbols are
+/// numbered from 0. Fresh inference variables counted from 0 too, so the
+/// 44th fresh variable of a module was the same variable as every `a`:
+/// solving it solved the signatures' `a` (#97). Fresh ids start above any
+/// symbol and below the builtin schemes' reserved ids (`0xFFFF_0000`).
+pub const FIRST_FRESH_TYVAR: u32 = 0x4000_0000;
+
 /// Generator for fresh type variables.
 ///
 /// Produces unique type variable IDs during type inference.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TyVarGen {
     next_id: u32,
+}
+
+impl Default for TyVarGen {
+    fn default() -> Self {
+        Self {
+            next_id: FIRST_FRESH_TYVAR,
+        }
+    }
 }
 
 impl TyVarGen {
@@ -137,6 +199,13 @@ pub struct TyCtxt {
     /// are all visible here, so a `Show`, `Eq` or `Ord` operation at one of
     /// them with no instance is an error.
     pub(crate) local_types: FxHashMap<Symbol, Vec<Symbol>>,
+    /// Whether the module contains an expression lowering already reported
+    /// as an error, which is typed `Ty::Error` without a type error.
+    pub(crate) saw_error_expr: bool,
+    /// Whether instance methods are being checked: their signatures are the
+    /// class's, specialised by the checker, not ones the program wrote, so
+    /// they are not held to [`Self::check_signature_variables_rigid`].
+    checking_instance_methods: bool,
 
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
@@ -269,6 +338,8 @@ impl TyCtxt {
             class_op_defs: FxHashMap::default(),
             class_op_uses: Vec::new(),
             local_types: FxHashMap::default(),
+            saw_error_expr: false,
+            checking_instance_methods: false,
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -548,6 +619,43 @@ impl TyCtxt {
         (!has_instance).then_some(name)
     }
 
+    /// Whether `class` is a numeric class and `ty` is built by a constructor
+    /// that has no numeric instance: a list, a tuple, a function, or a
+    /// standard non-numeric type such as `Maybe` or `IO`, with no instance
+    /// of any numeric class the program declares for it.
+    fn is_non_numeric_constructor(&self, class: Symbol, ty: &Ty) -> bool {
+        if !matches!(class.as_str(), "Num" | "Fractional" | "Integral") {
+            return false;
+        }
+        let head = match ty {
+            Ty::List(_) => "[]",
+            Ty::Tuple(_) => "(,)",
+            Ty::Fun(..) => "->",
+            Ty::App(..) => match container_head_name(ty) {
+                Some(
+                    head @ ("Maybe" | "Either" | "IO" | "Map" | "Set" | "IntMap" | "Seq"
+                    | "NonEmpty"),
+                ) => head,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let declared = ["Num", "Fractional", "Integral"].iter().any(|c| {
+            self.env
+                .lookup_instances(Symbol::intern(c))
+                .is_some_and(|instances| {
+                    instances.iter().any(|inst| {
+                        inst.types.first().is_some_and(|t| match t {
+                            Ty::Fun(..) => head == "->",
+                            Ty::Tuple(_) => head == "(,)",
+                            other => container_head_name(other) == Some(head),
+                        })
+                    })
+                })
+        });
+        !declared
+    }
+
     /// Whether `ty` is a builtin type with no instance of the numeric class
     /// `class`, and the program declares none for it.
     fn is_plainly_not_numeric(&self, class: &str, ty: &Ty) -> bool {
@@ -762,6 +870,33 @@ impl TyCtxt {
                     if self.try_default_constraint(constraint.class, v) {
                         continue;
                     }
+                }
+            }
+
+            // A numeric class at a list, tuple, function or other plainly
+            // non-numeric constructor can never be solved, type variables
+            // or not: `length 1` asks for `Num [a]`.
+            if let [arg] = args.as_slice() {
+                if self.is_non_numeric_constructor(constraint.class, arg) {
+                    let names = signature_variable_names(&arg.free_vars());
+                    let shown = crate::diagnostics::pretty_ty(&rename_vars(arg, &names));
+                    let shown = if shown.contains(' ') && !shown.starts_with(['[', '(']) {
+                        format!("({shown})")
+                    } else {
+                        shown
+                    };
+                    let class = constraint.class.as_str();
+                    let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                        .with_label(
+                            self.full_span(constraint.span),
+                            format!("this needs `{shown}` to be a number"),
+                        )
+                        .with_note(format!(
+                            "`{shown}` has no `{class}` instance; maybe a numeric literal is \
+                             used where another kind of value is expected"
+                        ));
+                    self.emit_error(diag);
+                    continue;
                 }
             }
 
@@ -3538,16 +3673,17 @@ impl TyCtxt {
                         ),
                     )
                 }
-                // Numeric.showFFloat :: Maybe Int -> Double -> ShowS
+                // Numeric.showFFloat :: RealFloat a => Maybe Int -> a -> ShowS
+                // (the class is not tracked here, so it is left off).
                 "showFFloat" | "Numeric.showFFloat" => {
                     let string = self.builtins.string_ty.clone();
-                    Scheme::mono(Ty::fun(
-                        self.builtins.maybe_of(self.builtins.int_ty.clone()),
+                    Scheme::poly(
+                        vec![a.clone()],
                         Ty::fun(
-                            self.builtins.double_ty.clone(),
-                            Ty::fun(string.clone(), string),
+                            self.builtins.maybe_of(self.builtins.int_ty.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(string.clone(), string)),
                         ),
-                    ))
+                    )
                 }
                 // showHex, showOct :: Int -> ShowS
                 "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
@@ -3935,19 +4071,17 @@ impl TyCtxt {
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_a))
                 }
-                // mask :: ((IO a -> IO a) -> IO b) -> IO b
+                // mask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 "mask" => {
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
-                    );
                     let io_b = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(b.clone())),
                     );
-                    let restore = Ty::fun(io_a.clone(), io_a);
+                    // `restore` is rank-2 (`forall a. IO a -> IO a`): it is
+                    // used at more than one type in one body.
+                    let restore = rank2_restore(self.builtins.io_con.clone());
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![b.clone()],
                         Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                     )
                 }
@@ -3959,19 +4093,17 @@ impl TyCtxt {
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
                 }
-                // uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
+                // uninterruptibleMask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 "uninterruptibleMask" => {
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
-                    );
                     let io_b = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(b.clone())),
                     );
-                    let restore = Ty::fun(io_a.clone(), io_a);
+                    // `restore` is rank-2 (`forall a. IO a -> IO a`): it is
+                    // used at more than one type in one body.
+                    let restore = rank2_restore(self.builtins.io_con.clone());
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![b.clone()],
                         Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                     )
                 }
@@ -8978,6 +9110,7 @@ impl TyCtxt {
                 }
             }
         }
+        let outer = std::mem::replace(&mut self.checking_instance_methods, true);
         for method in &instance.methods {
             if class_known {
                 self.check_value_def(method);
@@ -9042,6 +9175,7 @@ impl TyCtxt {
                 self.env.insert_global(method.id, scheme);
             }
         }
+        self.checking_instance_methods = outer;
     }
 
     /// The type of a `Functor`/`Applicative`/`Monad` method at the instance
@@ -9643,7 +9777,19 @@ impl TyCtxt {
             }
         } else {
             scoped_var_ids = Vec::new();
-            value_def.sig.as_ref().map(|s| s.ty.clone())
+            // Check against a fresh copy of the signature. A source type
+            // variable's id is its name's symbol, so the `a` of every
+            // signature is one variable: checking one definition solved the
+            // others' `a` (#97).
+            value_def.sig.as_ref().map(|sig| {
+                let vars = if sig.vars.is_empty() {
+                    sig.ty.free_vars()
+                } else {
+                    sig.vars.clone()
+                };
+                let scheme = Scheme::poly(vars, sig.ty.clone());
+                crate::instantiate::instantiate_scoped(self, &scheme).0
+            })
         };
 
         // For rank-2 types: if the declared type has Forall in parameter positions,
@@ -9679,7 +9825,11 @@ impl TyCtxt {
 
         // If there's a declared type, unify with inferred type
         if let Some(declared) = &declared_ty {
+            let errors_before = self.diag.error_count();
             self.unify(declared, &inferred_ty, value_def.span);
+            if self.diag.error_count() == errors_before && !self.checking_instance_methods {
+                self.check_signature_variables_rigid(value_def, declared);
+            }
         }
 
         // Solve constraints accumulated during this binding's inference.
@@ -9720,6 +9870,70 @@ impl TyCtxt {
 
         self.def_schemes.insert(value_def.id, scheme.clone());
         self.env.insert_global(value_def.id, scheme);
+    }
+
+    /// A signature's type variables are rigid: the definition must work for
+    /// every type, so after unifying the signature with the definition each
+    /// of them must still be a distinct, unsolved variable (#97).
+    ///
+    /// `g :: a -> a; g x = True` compiled: the signature's `a` was an
+    /// ordinary unification variable, and the definition solved it to
+    /// `Bool`.
+    fn check_signature_variables_rigid(&mut self, value_def: &ValueDef, declared: &Ty) {
+        let rigid = declared.free_vars();
+        let mut images: Vec<(u32, Ty)> = Vec::new();
+        for var in &rigid {
+            let image = self.subst.apply_resolved(&Ty::Var(var.clone()));
+            let clash = match &image {
+                Ty::Var(v) => images.iter().any(|(other, img)| {
+                    *other != var.id && matches!(img, Ty::Var(w) if w.id == v.id)
+                }),
+                _ => true,
+            };
+            if clash {
+                let names = signature_variable_names(&rigid);
+                let shown_sig = crate::diagnostics::pretty_ty(&rename_vars(declared, &names));
+                let shown_sig = match declared {
+                    Ty::Fun(..) => shown_sig
+                        .strip_prefix('(')
+                        .and_then(|s| s.strip_suffix(')'))
+                        .map_or(shown_sig.clone(), str::to_string),
+                    _ => shown_sig,
+                };
+                let var_name = names.get(&var.id).map_or("a", String::as_str);
+                let (message, label) = match &image {
+                    Ty::Var(_) => (
+                        format!(
+                            "`{}` is less polymorphic than its signature `{shown_sig}`",
+                            value_def.name.as_str()
+                        ),
+                        format!(
+                            "the definition makes the signature's `{var_name}` the same type \
+                             as another of its type variables"
+                        ),
+                    ),
+                    concrete => (
+                        format!(
+                            "`{}` is less polymorphic than its signature `{shown_sig}`",
+                            value_def.name.as_str()
+                        ),
+                        format!(
+                            "the definition only works when `{var_name}` is `{}`",
+                            crate::diagnostics::pretty_ty(&rename_vars(concrete, &names))
+                        ),
+                    ),
+                };
+                let diag = Diagnostic::error(message)
+                    .with_label(self.full_span(value_def.span), label)
+                    .with_note(format!(
+                        "a type variable in a signature stands for every type: \
+                         the definition must not choose `{var_name}`"
+                    ));
+                self.emit_error(diag);
+                return;
+            }
+            images.push((var.id, image));
+        }
     }
 
     /// Infer the type of a list of equations (function clauses).
@@ -9857,6 +10071,8 @@ impl TyCtxt {
         }
     }
 
+    /// Finish type checking `hir`: the types of its expressions, binders and
+    /// definitions under the final substitution.
     pub fn into_typed_module(self, hir: Module) -> TypedModule {
         // Apply final substitution to all expression types. Single-pass apply:
         // these values are baked into Core by lowering, and codegen's width
@@ -10153,9 +10369,9 @@ mod tests {
         let v2 = gen.fresh();
         let v3 = gen.fresh();
 
-        assert_eq!(v1.id, 0);
-        assert_eq!(v2.id, 1);
-        assert_eq!(v3.id, 2);
+        assert_eq!(v1.id, FIRST_FRESH_TYVAR);
+        assert_eq!(v2.id, FIRST_FRESH_TYVAR + 1);
+        assert_eq!(v3.id, FIRST_FRESH_TYVAR + 2);
     }
 
     #[test]

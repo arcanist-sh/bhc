@@ -1707,18 +1707,15 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_a))
             }),
             ("mask", {
-                // mask :: ((IO a -> IO a) -> IO b) -> IO b (simplified)
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
+                // mask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 let io_b = Ty::App(
                     Box::new(Ty::Con(self.io_con.clone())),
                     Box::new(Ty::Var(b.clone())),
                 );
+                let restore = crate::context::rank2_restore(self.io_con.clone());
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::fun(io_a.clone(), io_a), io_b.clone()), io_b),
+                    vec![b.clone()],
+                    Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                 )
             }),
             ("mask_", {
@@ -1730,18 +1727,15 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
             }),
             ("uninterruptibleMask", {
-                // uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
+                // uninterruptibleMask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 let io_b = Ty::App(
                     Box::new(Ty::Con(self.io_con.clone())),
                     Box::new(Ty::Var(b.clone())),
                 );
+                let restore = crate::context::rank2_restore(self.io_con.clone());
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::fun(io_a.clone(), io_a), io_b.clone()), io_b),
+                    vec![b.clone()],
+                    Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                 )
             }),
             ("uninterruptibleMask_", {

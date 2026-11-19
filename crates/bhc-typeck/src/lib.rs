@@ -897,7 +897,15 @@ pub fn type_check_module_with_imports(
     if ctx.has_errors() {
         Err(ctx.take_diagnostics())
     } else {
-        Ok(ctx.into_typed_module(hir.clone()))
+        let saw_error_expr = ctx.saw_error_expr;
+        let typed = ctx.into_typed_module(hir.clone());
+        // `Ty::Error` unifies with anything, so it must only stand for a
+        // type the checker has already reported an error about (#97).
+        debug_assert!(
+            saw_error_expr || typed.expr_types.values().all(|ty| !contains_error_type(ty)),
+            "a module with no type errors has an expression of type `Ty::Error`"
+        );
+        Ok(typed)
     }
 }
 
@@ -939,6 +947,19 @@ pub fn main_action_error(typed: &TypedModule, file_id: FileId) -> Option<Diagnos
         .with_code("E0001")
         .with_label(FullSpan::new(file_id, def.span), "expected `IO t`")
     })
+}
+
+/// Whether `ty` contains `Ty::Error`, the type of an expression whose error
+/// has been reported.
+fn contains_error_type(ty: &Ty) -> bool {
+    match ty {
+        Ty::Error => true,
+        Ty::App(a, b) | Ty::Fun(a, b) => contains_error_type(a) || contains_error_type(b),
+        Ty::List(elem) => contains_error_type(elem),
+        Ty::Tuple(elems) => elems.iter().any(contains_error_type),
+        Ty::Forall(_, body) => contains_error_type(body),
+        Ty::Var(_) | Ty::Con(_) | Ty::Prim(_) | Ty::Nat(_) | Ty::TyList(_) => false,
+    }
 }
 
 #[cfg(test)]

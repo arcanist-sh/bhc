@@ -196,6 +196,32 @@ fn test_rejected_ill_kinded() {
     );
 }
 
+#[test]
+fn test_rejected_signature_too_general() {
+    let file = "signature_too_general.hs";
+    expect_rejected(
+        file,
+        "`constant` is less polymorphic than its signature `a -> a`",
+    );
+    expect_rejected(
+        file,
+        "`coerce` is less polymorphic than its signature `a -> b`",
+    );
+    expect_rejected(file, "`pick` is less polymorphic than its signature");
+    expect_rejected(
+        file,
+        "`fromInt` is less polymorphic than its signature `Int -> a`",
+    );
+}
+
+#[test]
+fn test_rejected_literal_not_a_number() {
+    let file = "literal_not_a_number.hs";
+    expect_rejected(file, "No instance for `Num [");
+    expect_rejected(file, "No instance for `Num (");
+    expect_rejected(file, "No instance for `Num (IO ");
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================
@@ -1045,6 +1071,12 @@ fn test_tier3_char_predicates_native() {
 #[test]
 fn test_tier3_newtype_derived_ord_native() {
     run_native_test("tier3_io/newtype_derived_ord", Profile::Default);
+}
+
+// mask's rank-2 restore, and showFFloat at a RealFloat type variable
+#[test]
+fn test_tier3_mask_restore_polymorphic_native() {
+    run_native_test("tier3_io/mask_restore_polymorphic", Profile::Default);
 }
 
 // Higher-kinded declarations the kind checker accepts

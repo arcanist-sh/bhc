@@ -104,6 +104,16 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 }
             }
 
+            // A lambda passed where its parameter is expected to be
+            // polymorphic (`mask $ \restore -> …`, with `restore :: forall a.
+            // IO a -> IO a`) must see that type while its body is inferred,
+            // or the first use fixes the parameter to one type.
+            if let (Ty::Fun(expected_arg, _), Expr::Lam(pats, _, _)) =
+                (ctx.subst.apply_resolved(&func_ty), arg.as_ref())
+            {
+                prebind_rank2_lambda_params(ctx, pats, &expected_arg);
+            }
+
             // Standard case: infer argument type and unify
             let arg_ty = infer_expr(ctx, arg);
             let result_ty = ctx.fresh_ty();
@@ -741,7 +751,11 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             }
         }
 
-        Expr::Error(_) => Ty::Error,
+        Expr::Error(_) => {
+            // Lowering reported this expression's error already.
+            ctx.saw_error_expr = true;
+            Ty::Error
+        }
     }
 }
 
@@ -753,6 +767,24 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
 ///
 /// The constraints are collected during inference and solved after,
 /// potentially defaulting ambiguous type variables to standard types.
+/// Give each variable parameter of a lambda whose expected type (`expected`,
+/// a function type) is a `forall` that polymorphic type, so every use in
+/// the body instantiates it afresh (the pattern keeps it: see
+/// `infer_pattern`).
+fn prebind_rank2_lambda_params(ctx: &mut TyCtxt, pats: &[bhc_hir::Pat], expected: &Ty) {
+    let mut expected = ctx.subst.apply_resolved(expected);
+    for pat in pats {
+        let Ty::Fun(param, rest) = expected else {
+            return;
+        };
+        if let (Ty::Forall(vars, body), bhc_hir::Pat::Var(_, def_id, _)) = (param.as_ref(), pat) {
+            ctx.env
+                .insert_global(*def_id, Scheme::poly(vars.clone(), body.as_ref().clone()));
+        }
+        expected = ctx.subst.apply_resolved(&rest);
+    }
+}
+
 fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
     match lit {
         Lit::Int(_) => {

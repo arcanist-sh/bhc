@@ -68,7 +68,6 @@ mod unify;
 
 pub use context::TyCtxt;
 pub use env::{DataConInfo, TypeEnv};
-pub use kind_check::KindEnv;
 
 use bhc_diagnostics::Diagnostic;
 use bhc_hir::{DefId, Module};
@@ -879,6 +878,9 @@ pub fn type_check_module_with_imports(
             ctx.register_data_family_instance(inst);
         }
     }
+
+    // Every type the module writes must be well-kinded.
+    kind_check::check_module_kinds(&mut ctx, hir);
 
     // Compute binding groups (SCCs) for mutual recursion
     let groups = binding_groups::compute_binding_groups(&hir.items);

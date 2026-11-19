@@ -170,6 +170,32 @@ fn test_rejected_missing_derived_instance() {
     expect_rejected(file, "No instance for `Ord T`");
 }
 
+#[test]
+fn test_rejected_ill_kinded() {
+    let file = "ill_kinded.hs";
+    expect_rejected(
+        file,
+        "`Maybe` expects an argument of kind `*`, but `Maybe` has kind `* -> *`",
+    );
+    expect_rejected(
+        file,
+        "`Maybe` has kind `* -> *`, but `C` expects a type of kind `*`",
+    );
+    expect_rejected(
+        file,
+        "`Maybe` has kind `* -> *`, but a type of kind `*` is expected",
+    );
+    expect_rejected(file, "`Int` has kind `*` and cannot be applied to `Int`");
+    expect_rejected(
+        file,
+        "`T` expects an argument of kind `* -> *`, but `Int` has kind `*`",
+    );
+    expect_rejected(
+        file,
+        "`S` has kind `* -> *`, but a type of kind `*` is expected",
+    );
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================
@@ -1019,6 +1045,12 @@ fn test_tier3_char_predicates_native() {
 #[test]
 fn test_tier3_newtype_derived_ord_native() {
     run_native_test("tier3_io/newtype_derived_ord", Profile::Default);
+}
+
+// Higher-kinded declarations the kind checker accepts
+#[test]
+fn test_tier3_higher_kinds_native() {
+    run_native_test("tier3_io/higher_kinds", Profile::Default);
 }
 
 // Hand-written Show, Eq and Ord instances for a type with parameters

@@ -1015,6 +1015,18 @@ fn test_tier3_char_predicates_native() {
     run_native_test("tier3_io/char_predicates", Profile::Default);
 }
 
+// Comparing values of a newtype that derives Eq and Ord
+#[test]
+fn test_tier3_newtype_derived_ord_native() {
+    run_native_test("tier3_io/newtype_derived_ord", Profile::Default);
+}
+
+// Hand-written Show, Eq and Ord instances for a type with parameters
+#[test]
+fn test_tier3_instance_parameterized_type_native() {
+    run_native_test("tier3_io/instance_parameterized_type", Profile::Default);
+}
+
 // Type-specialized show functions - showInt, showBool, showChar
 #[test]
 fn test_tier3_show_types_native() {

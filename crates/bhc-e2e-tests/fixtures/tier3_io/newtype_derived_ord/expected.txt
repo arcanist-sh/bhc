@@ -1,0 +1,5 @@
+(True,False,False,True)
+(True,False,False)
+(LT,EQ)
+(N 2,N 1)
+(True,True,D 1.5)

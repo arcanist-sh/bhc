@@ -29281,7 +29281,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         .build_indirect_call(
                             fn_type,
                             fn_ptr,
-                            &[null_env.into(), lhs.into(), rhs.into()],
+                            &[
+                                null_env.into(),
+                                self.value_to_ptr(lhs)?.into(),
+                                self.value_to_ptr(rhs)?.into(),
+                            ],
                             "derived_compare",
                         )
                         .map_err(|e| CodegenError::Internal(format!("derived compare: {:?}", e)))?;
@@ -35697,7 +35701,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(
                 fn_type,
                 fn_ptr,
-                &[null_env.into(), lhs.into(), rhs.into()],
+                &[
+                    null_env.into(),
+                    self.value_to_ptr(lhs)?.into(),
+                    self.value_to_ptr(rhs)?.into(),
+                ],
                 "minmax_compare",
             )
             .map_err(|e| CodegenError::Internal(format!("min/max compare: {:?}", e)))?;
@@ -53850,47 +53858,90 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.tag_constructors_with_type(expr, &type_name);
                 }
                 // Detect manual instance methods ($instance_show_TypeName)
-                else if let Some(type_name) = name.strip_prefix("$instance_show_") {
+                else if let Some(type_name) = name
+                    .strip_prefix("$instance_show_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_show_fns.insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_==_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_==_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_eq_fns.insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_compare_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_compare_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_compare_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_fmap_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_fmap_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_functor_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_foldr_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_foldr_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_foldable_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_traverse_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_traverse_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_traversable_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_fromEnum_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_fromEnum_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_from_enum_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_toEnum_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_toEnum_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_to_enum_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_minBound_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_minBound_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_min_bound_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
-                } else if let Some(type_name) = name.strip_prefix("$instance_maxBound_") {
+                } else if let Some(type_name) = name
+                    .strip_prefix("$instance_maxBound_")
+                    .map(Self::instance_head_key)
+                {
                     self.derived_max_bound_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
                 }
             }
         }
+    }
+
+    /// The type an instance method symbol is for, as the derived-method
+    /// tables key it: `$instance_show_C_v` is `instance Show (C a)`, whose
+    /// head's type variables are encoded as `v`, and `show (C 3)` looks up
+    /// `C`. Without this an instance for a type with parameters was never
+    /// found, and `show` printed an address.
+    fn instance_head_key(encoded: &str) -> &str {
+        let mut key = encoded;
+        while let Some(rest) = key.strip_suffix("_v") {
+            key = rest;
+        }
+        key
     }
 
     /// Strip the counter suffix from a derived binding name.
@@ -60688,7 +60739,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                     .build_indirect_call(
                                         fn_type,
                                         fn_ptr,
-                                        &[null_env.into(), lhs.into(), rhs.into()],
+                                        &[
+                                            null_env.into(),
+                                            self.value_to_ptr(lhs)?.into(),
+                                            self.value_to_ptr(rhs)?.into(),
+                                        ],
                                         "derived_eq",
                                     )
                                     .map_err(|e| {
@@ -60784,7 +60839,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                     .build_indirect_call(
                                         fn_type,
                                         fn_ptr,
-                                        &[null_env.into(), lhs.into(), rhs.into()],
+                                        &[
+                                            null_env.into(),
+                                            self.value_to_ptr(lhs)?.into(),
+                                            self.value_to_ptr(rhs)?.into(),
+                                        ],
                                         "derived_compare",
                                     )
                                     .map_err(|e| {

@@ -92,10 +92,19 @@ pub unsafe extern "C" fn bhc_rts_init(argc: c_int, argv: *const *const c_char) {
     install_internal_error_hook();
 }
 
-/// The thread that started the program, whose panics the hook reports.
-static PROGRAM_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+std::thread_local! {
+    /// Whether this thread runs the program: the thread that started the
+    /// runtime, and the thread [`crate::stack::bhc_run_main`] runs `main` on.
+    static IS_PROGRAM_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-/// Report a runtime panic on the program's thread as one line and a bug
+/// Mark the current thread as one that runs the program, so a panic on it
+/// is reported as an internal error.
+pub(crate) fn mark_program_thread() {
+    IS_PROGRAM_THREAD.with(|p| p.set(true));
+}
+
+/// Report a runtime panic on a program thread as one line and a bug
 /// report hint, then end with status 1, instead of a Rust panic message,
 /// a backtrace of runtime frames and an abort (#99). Such a panic is a bug
 /// in bhc: what a Haskell program can cause goes through [`fatal`].
@@ -103,23 +112,26 @@ static PROGRAM_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::O
 /// Panics on other threads (the scheduler's workers, which catch them) keep
 /// Rust's handling. A backtrace is still printed when `RUST_BACKTRACE` asks.
 fn install_internal_error_hook() {
-    if PROGRAM_THREAD.set(std::thread::current().id()).is_err() {
-        return;
-    }
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    mark_program_thread();
+    INSTALLED.call_once(install_hook);
+}
+
+fn install_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if PROGRAM_THREAD.get() != Some(&std::thread::current().id()) {
+        if !IS_PROGRAM_THREAD.with(|p| p.get()) {
             default(info);
             return;
         }
         use std::io::Write;
         let _ = std::io::stdout().flush();
-        let message = info
-            .payload()
+        let payload = info.payload();
+        let message = payload
             .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "runtime panic".to_string());
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("runtime panic");
         let location = info
             .location()
             .map(|l| format!(" ({}:{})", l.file(), l.line()))

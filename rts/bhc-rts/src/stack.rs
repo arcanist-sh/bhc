@@ -143,6 +143,7 @@ pub unsafe extern "C" fn bhc_run_main(body: extern "C" fn()) {
         .name("main".to_string())
         .stack_size(MAIN_STACK_BYTES)
         .spawn(move || {
+            crate::ffi::mark_program_thread();
             enter_thread(MAIN_STACK_BYTES);
             body();
         });

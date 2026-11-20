@@ -165,7 +165,9 @@ def ghc_output(srcs, stdin):
         shutil.copy(s, os.path.join(GHC_WORK, os.path.basename(s)))
     names = [os.path.basename(s) for s in srcs]
     art = "ghc_out"
-    rc, _, err = run([GHC, "-v0", "-o", art, *names], GHC_WORK)
+    # A program GHC built may use a 6 GiB heap: past that it fails with a
+    # heap overflow instead of taking the CI runner's memory.
+    rc, _, err = run([GHC, "-v0", "-with-rtsopts=-M6g", "-o", art, *names], GHC_WORK)
     if rc != 0:
         return False, "", f"compile: {err.strip()[:200]}"
     rc, out, err = run([os.path.join(GHC_WORK, art)], GHC_WORK, stdin=stdin)

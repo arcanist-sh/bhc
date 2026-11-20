@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 -- Pure code is preempted on function entry and at allocations, so a thread
 -- in a long pure computation does not keep the others from running, and
 -- killThread reaches it at its next IO step (#75).
@@ -6,10 +7,12 @@ import Control.Exception
 import Data.List (foldl')
 
 -- A tail-recursive loop over unboxed Ints: it neither allocates nor reaches
--- an IO step.
+-- an IO step. The accumulator is forced at each step: GHC without
+-- optimisation otherwise builds a billion-long chain of additions, which
+-- took the GHC differential's CI runner down.
 go :: Int -> Int -> Int
-go 0 acc = acc
-go n acc = go (n - 1) (acc + n)
+go 0 !acc = acc
+go n !acc = go (n - 1) (acc + n)
 
 -- Non-tail recursion, which allocates nothing either.
 fib :: Int -> Int

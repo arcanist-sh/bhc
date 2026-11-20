@@ -5098,21 +5098,27 @@ impl Compiler {
                 .with_library_path(Utf8PathBuf::from_path_buf(release_path).unwrap_or_default());
         }
 
-        // Add the BHC RTS library
-        // The RTS provides: bhc_init, bhc_rts_init, bhc_shutdown, bhc_alloc, etc.
-        config = config.with_library(LinkLibrary::named("bhc_rts"));
-
-        // Add the BHC Text library
-        // Provides: bhc_text_pack, bhc_text_unpack, bhc_text_append, etc.
-        config = config.with_library(LinkLibrary::named("bhc_text"));
-
-        // Add the BHC Base library
-        // Provides: bhc_char_is_alpha, bhc_char_is_digit, bhc_char_to_upper, etc.
-        config = config.with_library(LinkLibrary::named("bhc_base"));
-
-        // Add the BHC Containers library
-        // Provides: bhc_map_empty, bhc_map_insert, bhc_map_lookup, bhc_set_* etc.
-        config = config.with_library(LinkLibrary::named("bhc_containers"));
+        // The BHC runtime and standard library archives. Each is linked by
+        // the path of its static archive when a search directory has one:
+        // the stdlib crates are also built as shared libraries, and `-l`
+        // prefers `libbhc_text.so` (or `.dylib`) next to the archive, which
+        // the program then cannot find when it runs unless the loader's path
+        // happens to include that directory (CI's coverage build exited with
+        // 127). The RTS provides bhc_init, bhc_alloc, …; text, base and
+        // containers provide the Text, Char and Map/Set primitives.
+        for name in ["bhc_rts", "bhc_text", "bhc_base", "bhc_containers"] {
+            let archive = format!("lib{name}.a");
+            let library = config
+                .library_paths
+                .iter()
+                .map(|dir| dir.join(&archive))
+                .find(|path| path.exists())
+                .map_or_else(
+                    || LinkLibrary::named(name),
+                    |path| LinkLibrary::with_path(name, path),
+                );
+            config = config.with_library(library);
+        }
 
         // Add system libraries needed by the RTS
         #[cfg(target_os = "linux")]

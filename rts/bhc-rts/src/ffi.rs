@@ -7032,7 +7032,7 @@ mod ffloat_tests {
 
     #[test]
     fn show_ffloat_matches_ghc() {
-        assert_eq!(format_ffloat(3.14159, Some(2)), "3.14");
+        assert_eq!(format_ffloat(1.23456, Some(2)), "1.23");
         assert_eq!(format_ffloat(2.675, Some(2)), "2.68");
         assert_eq!(format_ffloat(0.001234, Some(3)), "0.001");
         assert_eq!(format_ffloat(0.0016, Some(3)), "0.002");

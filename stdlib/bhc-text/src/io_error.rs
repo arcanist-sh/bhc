@@ -8,7 +8,7 @@
 //!
 //! The compiled program hands this crate the runtime's function for raising
 //! an `IOException` once, at startup ([`bhc_text_set_io_error_hook`]), and
-//! the file operations call it through [`raise`].
+//! the file operations call it through `raise`.
 
 use std::ffi::{c_char, CString};
 use std::io;

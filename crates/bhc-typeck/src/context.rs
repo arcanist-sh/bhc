@@ -24,6 +24,50 @@ use crate::diagnostics;
 use crate::env::{ClassInfo, InstanceInfo, TypeEnv};
 use crate::TypedModule;
 
+/// The type of `mask`'s `restore` argument, `forall a. IO a -> IO a`.
+pub(crate) fn rank2_restore(io_con: TyCon) -> Ty {
+    let a = TyVar::new_star(0xFFFF_0010);
+    let io_a = Ty::App(Box::new(Ty::Con(io_con)), Box::new(Ty::Var(a.clone())));
+    Ty::Forall(vec![a], Box::new(Ty::fun(io_a.clone(), io_a)))
+}
+
+/// Names for a signature's type variables in an error message, `a`, `b`, …
+/// in order of appearance: the variables themselves carry only ids.
+fn signature_variable_names(vars: &[TyVar]) -> FxHashMap<u32, String> {
+    vars.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let name = match u8::try_from(i) {
+                Ok(i) if i < 26 => char::from(b'a' + i).to_string(),
+                _ => format!("t{i}"),
+            };
+            (v.id, name)
+        })
+        .collect()
+}
+
+/// `ty` with the named type variables written as their names, for printing.
+fn rename_vars(ty: &Ty, names: &FxHashMap<u32, String>) -> Ty {
+    match ty {
+        Ty::Var(v) => names.get(&v.id).map_or_else(
+            || ty.clone(),
+            |name| Ty::Con(TyCon::new(Symbol::intern(name), v.kind.clone())),
+        ),
+        Ty::App(a, b) => Ty::App(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(rename_vars(a, names)),
+            Box::new(rename_vars(b, names)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(rename_vars(e, names))),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| rename_vars(e, names)).collect()),
+        Ty::Forall(vs, body) => Ty::Forall(vs.clone(), Box::new(rename_vars(body, names))),
+        other => other.clone(),
+    }
+}
+
 /// Extract the name of the head type constructor of a type, for recognizing
 /// container types regardless of how many arguments are applied.
 ///
@@ -40,12 +84,30 @@ fn container_head_name(ty: &Ty) -> Option<&str> {
     }
 }
 
+/// The first id [`TyVarGen`] hands out.
+///
+/// A type variable written in the source is identified by its name's
+/// interned symbol (`a` in every signature is one id), and symbols are
+/// numbered from 0. Fresh inference variables counted from 0 too, so the
+/// 44th fresh variable of a module was the same variable as every `a`:
+/// solving it solved the signatures' `a` (#97). Fresh ids start above any
+/// symbol and below the builtin schemes' reserved ids (`0xFFFF_0000`).
+pub const FIRST_FRESH_TYVAR: u32 = 0x4000_0000;
+
 /// Generator for fresh type variables.
 ///
 /// Produces unique type variable IDs during type inference.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TyVarGen {
     next_id: u32,
+}
+
+impl Default for TyVarGen {
+    fn default() -> Self {
+        Self {
+            next_id: FIRST_FRESH_TYVAR,
+        }
+    }
 }
 
 impl TyVarGen {
@@ -118,6 +180,48 @@ pub struct TyCtxt {
     /// The builtin `$`, so a local binding's uses can tell `f $ x` (an
     /// application of `f`) from `f` passed as a value.
     pub(crate) dollar_def: Option<DefId>,
+    /// The builtin numeric conversions (`fromInteger`, `fromIntegral`,
+    /// `realToFrac`, `truncate`, …), whose result type a local value binding
+    /// must not generalize (see the monomorphism restriction in `infer`).
+    pub(crate) numeric_conversion_defs: rustc_hash::FxHashSet<DefId>,
+
+    /// The builtin operations of `Show`, `Eq`, `Ord` and the numeric classes
+    /// whose schemes carry no class constraint (`show :: a -> String`), with
+    /// their class and whether the class applies to the result rather than
+    /// the first argument (`sum :: t a -> a`).
+    pub(crate) class_op_defs: FxHashMap<DefId, (&'static str, bool)>,
+    /// For each occurrence of one of those, the type the class applies to,
+    /// checked once the module is solved
+    /// ([`Self::check_class_ops_not_at_functions`]).
+    pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
+    /// The data types and newtypes this module declares, each with the
+    /// classes a standalone `deriving instance` gives it. Their instances
+    /// are all visible here, so a `Show`, `Eq` or `Ord` operation at one of
+    /// them with no instance is an error.
+    pub(crate) local_types: FxHashMap<Symbol, Vec<Symbol>>,
+    /// The methods of the single-parameter classes this module declares,
+    /// with their class: a use is recorded in [`Self::class_method_uses`].
+    pub(crate) local_class_methods: FxHashMap<DefId, Symbol>,
+    /// The classes this module declares. Only their method lists are known
+    /// to be complete: an imported class's interface may list fewer.
+    pub(crate) local_classes: rustc_hash::FxHashSet<Symbol>,
+    /// Each use of one of those methods: its class, the type the class
+    /// variable takes there, and where. Instances are selected in Core
+    /// lowering and the method's constraint is not solved here, so these
+    /// are checked once the module is solved
+    /// ([`Self::check_class_method_instances`]).
+    pub(crate) class_method_uses: Vec<(Symbol, Ty, Span)>,
+    /// Instance methods already reported as wrong: instances are registered
+    /// twice (before and with their binding group), and each error is
+    /// reported once.
+    reported_instance_methods: rustc_hash::FxHashSet<Span>,
+    /// Whether the module contains an expression lowering already reported
+    /// as an error, which is typed `Ty::Error` without a type error.
+    pub(crate) saw_error_expr: bool,
+    /// Whether instance methods are being checked: their signatures are the
+    /// class's, specialised by the checker, not ones the program wrote, so
+    /// they are not held to [`Self::check_signature_variables_rigid`].
+    checking_instance_methods: bool,
 
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
@@ -246,6 +350,16 @@ impl TyCtxt {
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
             dollar_def: None,
+            numeric_conversion_defs: rustc_hash::FxHashSet::default(),
+            class_op_defs: FxHashMap::default(),
+            class_op_uses: Vec::new(),
+            local_types: FxHashMap::default(),
+            local_class_methods: FxHashMap::default(),
+            local_classes: rustc_hash::FxHashSet::default(),
+            class_method_uses: Vec::new(),
+            reported_instance_methods: rustc_hash::FxHashSet::default(),
+            saw_error_expr: false,
+            checking_instance_methods: false,
             dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
@@ -438,6 +552,255 @@ impl TyCtxt {
         self.constraints.extend(new_constraints);
     }
 
+    /// Report a use of a method of a class this module declares at a type
+    /// no instance of the class covers: `m True` with only `instance C Int`
+    /// compiled (#97).
+    ///
+    /// Conservative: a type whose head is still a variable is skipped, and
+    /// so is a class with an instance at a bare type variable or at an
+    /// instance head with the same constructor (whose context the checker
+    /// does not need to see to accept it).
+    pub fn check_class_method_instances(&mut self) {
+        for (class, arg, span) in std::mem::take(&mut self.class_method_uses) {
+            let arg = self.subst.apply_resolved(&arg);
+            let head = match &arg {
+                Ty::Fun(..) => "->",
+                other => match container_head_name(other) {
+                    Some(head) => head,
+                    None => continue,
+                },
+            };
+            // Only a data type's head says which instances can apply: a type
+            // family application (`StyleId a`) or an imported synonym may be
+            // anything.
+            let is_data_type = matches!(
+                head,
+                "->" | "[]"
+                    | "(,)"
+                    | "()"
+                    | "Int"
+                    | "Integer"
+                    | "Double"
+                    | "Float"
+                    | "Char"
+                    | "Bool"
+                    | "Word"
+                    | "Ordering"
+                    | "Maybe"
+                    | "Either"
+                    | "IO"
+            ) || self.local_types.contains_key(&Symbol::intern(head));
+            if !is_data_type {
+                continue;
+            }
+            let covered = self.env.lookup_instances(class).is_some_and(|instances| {
+                instances.iter().any(|inst| match inst.types.first() {
+                    Some(Ty::Var(_)) | None => true,
+                    Some(Ty::Fun(..)) => head == "->",
+                    Some(t) => container_head_name(t) == Some(head),
+                })
+            });
+            if covered {
+                continue;
+            }
+            let names = signature_variable_names(&arg.free_vars());
+            let shown = crate::diagnostics::pretty_ty(&rename_vars(&arg, &names));
+            let shown = if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                format!("({shown})")
+            } else {
+                shown
+            };
+            let diag = Diagnostic::error(format!("No instance for `{} {shown}`", class.as_str()))
+                .with_label(self.full_span(span), format!("used here at `{shown}`"))
+                .with_note(format!(
+                    "the class `{}` has no instance for `{shown}`",
+                    class.as_str()
+                ));
+            self.emit_error(diag);
+        }
+    }
+
+    /// Reject `show`, `print`, `==`, `<`, … used at a function type, and
+    /// arithmetic used at a type that is plainly not a number.
+    ///
+    /// The builtin schemes of these operations have no class constraint
+    /// (`show :: a -> String`), so nothing else objects to `print id` or to
+    /// `f == g`: the program compiled and printed an empty line. Until the
+    /// standard classes are real classes with instances, this catches the
+    /// one case that can never have an instance. It sees the type an
+    /// occurrence ends up at in this module; a function reaching `show`
+    /// through another polymorphic function is not caught.
+    ///
+    /// The arithmetic schemes are as loose (`(+) :: a -> a -> a`,
+    /// `sum :: t a -> a`), so `sum "abc"` and `'a' + 'b'` compiled and
+    /// added character codes. `Char`, `Bool`, `()`, a tuple and a list have
+    /// no numeric instance unless the program declares one.
+    pub fn check_class_ops_not_at_functions(&mut self) {
+        for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
+            let operand = self.subst.apply(&operand);
+            let is_function = matches!(operand, Ty::Fun(..));
+            if let Some(name) = self.local_type_without_instance(class, &operand) {
+                let diag = Diagnostic::error(format!("No instance for `{class} {name}`"))
+                    .with_label(
+                        self.full_span(span),
+                        format!("used here at the type `{name}`"),
+                    )
+                    .with_note(format!(
+                        "add `deriving ({class})` to the declaration of `{name}`, \
+                         or write an `instance {class} {name}`"
+                    ));
+                self.emit_error(diag);
+                continue;
+            }
+            if !is_function && !self.is_plainly_not_numeric(class, &operand) {
+                continue;
+            }
+            // A function type is printed in its own parentheses.
+            let shown = crate::diagnostics::pretty_ty(&operand);
+            let shown = if matches!(operand, Ty::App(..)) {
+                format!("({shown})")
+            } else {
+                shown
+            };
+            let (label, note) = if is_function {
+                (
+                    format!("used here at the function type `{shown}`"),
+                    format!("a function has no `{class}` instance; maybe an argument is missing"),
+                )
+            } else {
+                (
+                    format!("used here at the type `{shown}`"),
+                    if matches!(shown.as_str(), "Float" | "Double") {
+                        format!("`{shown}` is not an integral type: it has no `{class}` instance")
+                    } else {
+                        format!("`{shown}` is not a number: it has no `{class}` instance")
+                    },
+                )
+            };
+            let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                .with_label(self.full_span(span), label)
+                .with_note(note);
+            self.emit_error(diag);
+        }
+    }
+
+    /// The name of `ty`'s type constructor when it is a type this module
+    /// declares and nothing gives it an instance of `class` (`Show`, `Eq` or
+    /// `Ord`): no deriving clause, standalone deriving or instance
+    /// declaration for any application of it. `print A` for a `data T = A`
+    /// without `deriving Show` compiled and printed nothing (#97).
+    fn local_type_without_instance(&self, class: &str, ty: &Ty) -> Option<Symbol> {
+        if !matches!(class, "Show" | "Eq" | "Ord") {
+            return None;
+        }
+        let name = Symbol::intern(container_head_name(ty)?);
+        let standalone = self.local_types.get(&name)?;
+        let class = Symbol::intern(class);
+        if standalone.contains(&class) {
+            return None;
+        }
+        let has_instance = self.env.lookup_instances(class).is_some_and(|instances| {
+            instances
+                .iter()
+                .any(|inst| inst.types.first().and_then(container_head_name) == Some(name.as_str()))
+        });
+        (!has_instance).then_some(name)
+    }
+
+    /// Whether `class` is a numeric class and `ty` is built by a constructor
+    /// that has no numeric instance: a list, a tuple, a function, or a
+    /// standard non-numeric type such as `Maybe` or `IO`, with no instance
+    /// of any numeric class the program declares for it.
+    fn is_non_numeric_constructor(&self, class: Symbol, ty: &Ty) -> bool {
+        if !matches!(class.as_str(), "Num" | "Fractional" | "Integral") {
+            return false;
+        }
+        let head = match ty {
+            Ty::List(_) => "[]",
+            Ty::Tuple(_) => "(,)",
+            Ty::Fun(..) => "->",
+            Ty::App(..) => match container_head_name(ty) {
+                Some(
+                    head @ ("Maybe" | "Either" | "IO" | "Map" | "Set" | "IntMap" | "Seq"
+                    | "NonEmpty"),
+                ) => head,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let declared = ["Num", "Fractional", "Integral"].iter().any(|c| {
+            self.env
+                .lookup_instances(Symbol::intern(c))
+                .is_some_and(|instances| {
+                    instances.iter().any(|inst| {
+                        inst.types.first().is_some_and(|t| match t {
+                            Ty::Fun(..) => head == "->",
+                            Ty::Tuple(_) => head == "(,)",
+                            other => container_head_name(other) == Some(head),
+                        })
+                    })
+                })
+        });
+        !declared
+    }
+
+    /// Whether `ty` is a builtin type with no instance of the numeric class
+    /// `class`, and the program declares none for it.
+    fn is_plainly_not_numeric(&self, class: &str, ty: &Ty) -> bool {
+        if !matches!(class, "Num" | "Fractional" | "Integral") {
+            return false;
+        }
+        let not_a_number = match ty {
+            Ty::Tuple(_) | Ty::List(_) => true,
+            Ty::Con(con) => matches!(con.name.as_str(), "Char" | "Bool" | "()"),
+            _ => false,
+        };
+        // `Integral` and `Fractional` operations are also `Num` ones; an
+        // instance of any of them is the program saying the type is a number.
+        if not_a_number
+            && !["Num", "Fractional", "Integral"]
+                .iter()
+                .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
+        {
+            return true;
+        }
+        // A floating-point type is a number but not an integral one:
+        // `fromIntegral (1.5 :: Double)` printed 1.5.
+        class == "Integral"
+            && matches!(ty, Ty::Con(con) if matches!(con.name.as_str(), "Float" | "Double"))
+    }
+
+    /// A string literal under OverloadedStrings that is used as a list is a
+    /// list of `Char`: the only list instance of `IsString` is
+    /// `(a ~ Char) => IsString [a]`. Without this the element stayed a type
+    /// variable when nothing else fixed it (`zip [1 ..] "ab"`), and `print`
+    /// of the pairs showed the characters as numbers.
+    ///
+    /// Looks at the constraints from `start` on, already under the current
+    /// substitution.
+    fn improve_string_literal_lists(&mut self, start: usize) {
+        let char_ty = self.builtins.char_ty.clone();
+        let elements: Vec<(Ty, Span)> = self.constraints[start..]
+            .iter()
+            .filter(|c| c.class.as_str() == "IsString")
+            .filter_map(|c| match c.args.first() {
+                Some(Ty::List(elem)) if matches!(elem.as_ref(), Ty::Var(_)) => {
+                    Some((elem.as_ref().clone(), c.span))
+                }
+                _ => None,
+            })
+            .collect();
+        if elements.is_empty() {
+            return;
+        }
+        for (elem, span) in elements {
+            self.unify(&elem, &char_ty, span);
+        }
+        for c in self.constraints[start..].iter_mut() {
+            c.args = c.args.iter().map(|t| self.subst.apply(t)).collect();
+        }
+    }
+
     /// Solve collected constraints using instance resolution.
     ///
     /// For each constraint:
@@ -451,6 +814,7 @@ impl TyCtxt {
     pub fn solve_constraints(&mut self) {
         // First apply substitution to all constraints
         self.apply_subst_to_constraints();
+        self.improve_string_literal_lists(0);
 
         // Propagate superclass constraints: if we have `Ord a`, also generate `Eq a`
         self.propagate_superclass_constraints();
@@ -544,6 +908,7 @@ impl TyCtxt {
         for c in self.constraints[start_idx..].iter_mut() {
             c.args = c.args.iter().map(|t| self.subst.apply(t)).collect();
         }
+        self.improve_string_literal_lists(start_idx);
 
         // Extract only the new constraints (leave earlier ones in place)
         let mut new_constraints: Vec<Constraint> = self.constraints.drain(start_idx..).collect();
@@ -596,6 +961,33 @@ impl TyCtxt {
                 }
             }
 
+            // A numeric class at a list, tuple, function or other plainly
+            // non-numeric constructor can never be solved, type variables
+            // or not: `length 1` asks for `Num [a]`.
+            if let [arg] = args.as_slice() {
+                if self.is_non_numeric_constructor(constraint.class, arg) {
+                    let names = signature_variable_names(&arg.free_vars());
+                    let shown = crate::diagnostics::pretty_ty(&rename_vars(arg, &names));
+                    let shown = if shown.contains(' ') && !shown.starts_with(['[', '(']) {
+                        format!("({shown})")
+                    } else {
+                        shown
+                    };
+                    let class = constraint.class.as_str();
+                    let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                        .with_label(
+                            self.full_span(constraint.span),
+                            format!("this needs `{shown}` to be a number"),
+                        )
+                        .with_note(format!(
+                            "`{shown}` has no `{class}` instance; maybe a numeric literal is \
+                             used where another kind of value is expected"
+                        ));
+                    self.emit_error(diag);
+                    continue;
+                }
+            }
+
             // Check if the constraint is on concrete types (no type variables).
             // If so, it's an unsolvable error, not a deferred constraint.
             let has_type_vars = args.iter().any(|t| !t.free_vars().is_empty());
@@ -621,7 +1013,14 @@ impl TyCtxt {
                     // error (e.g., Num Bool from `if 42 then ...`)
                     let args_str = args
                         .iter()
-                        .map(|t| format!("{:?}", t))
+                        .map(|t| {
+                            let shown = crate::diagnostics::pretty_ty(t);
+                            if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                                format!("({shown})")
+                            } else {
+                                shown
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join(" ");
                     self.diag.emit(Diagnostic::error(format!(
@@ -1047,8 +1446,9 @@ impl TyCtxt {
                 Some(self.builtins.int_ty.clone())
             }
             "Fractional" | "Floating" | "RealFrac" | "RealFloat" => {
-                // Default to Double/Float
-                Some(self.builtins.float_ty.clone())
+                // Default to Double, as Haskell's `default (Integer, Double)`.
+                // `Float` made `show 3.0` take the Float path and print "0".
+                Some(self.builtins.double_ty.clone())
             }
             "IsString" => {
                 // Default to String ([Char]), matching GHC behavior
@@ -1422,6 +1822,12 @@ impl TyCtxt {
             let scheme = match name {
                 // Bool constructors
                 "True" | "False" => Scheme::mono(self.builtins.bool_ty.clone()),
+
+                // Ordering constructors. Without a scheme here each was one
+                // type variable for the whole module: `max LT 3` and
+                // `[LT, 'a']` compiled, and `print (max LT EQ)` printed an
+                // address, the argument's type unknown.
+                "LT" | "EQ" | "GT" => Scheme::mono(self.builtins.ordering_ty.clone()),
 
                 // Maybe constructors
                 "Nothing" => {
@@ -2473,6 +2879,46 @@ impl TyCtxt {
         if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
             self.dollar_def = Some(*id);
         }
+        self.class_op_defs = defs
+            .iter()
+            // The Prelude's own: not a name this module defines, a pattern
+            // variable, or a value another module's interface gave a type.
+            .filter(|(id, d)| {
+                !local_value_ids.contains(id)
+                    && !matches!(d.kind, DefKind::PatVar | DefKind::ImportedValue)
+                    && d.type_scheme.is_none()
+            })
+            .filter_map(|(id, d)| {
+                let class = match d.name.as_str() {
+                    "show" | "print" => ("Show", false),
+                    "==" | "/=" => ("Eq", false),
+                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => ("Ord", false),
+                    "maximum" | "minimum" => ("Ord", true),
+                    "+" | "-" | "*" | "negate" | "abs" | "signum" => ("Num", false),
+                    "sum" | "product" => ("Num", true),
+                    "/" | "recip" => ("Fractional", false),
+                    "fromIntegral" | "toInteger" => ("Integral", false),
+                    _ => return None,
+                };
+                Some((*id, class))
+            })
+            .collect();
+        self.numeric_conversion_defs = defs
+            .iter()
+            .filter(|(_, d)| {
+                matches!(
+                    d.name.as_str(),
+                    "fromInteger"
+                        | "fromIntegral"
+                        | "realToFrac"
+                        | "truncate"
+                        | "round"
+                        | "floor"
+                        | "ceiling"
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
 
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {
@@ -2515,39 +2961,50 @@ impl TyCtxt {
             let normalized_name;
             let _is_char8 = raw_name.starts_with("Data.ByteString.Char8.")
                 || raw_name.starts_with("Data.ByteString.Lazy.Char8.");
-            let name =
-                if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
-                    // Char8 functions that use Char where strict ByteString uses Word8/Int
-                    // are handled separately below — don't normalize them.
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name =
-                                raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
-                            normalized_name.as_str()
-                        }
+            let name = if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
+                // Char8 functions that use Char where strict ByteString uses Word8/Int
+                // are handled separately below — don't normalize them.
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'"
+                    | "index" => raw_name,
+                    _ => {
+                        normalized_name =
+                            raw_name.replacen("Data.ByteString.Char8.", "Data.ByteString.", 1);
+                        normalized_name.as_str()
                     }
-                } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
-                    match fn_name {
-                        "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
-                        | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
-                        | "intercalate" | "concatMap" | "any" | "all" | "foldr" | "foldl"
-                        | "foldr'" | "foldl'" => raw_name,
-                        _ => {
-                            normalized_name = raw_name.replacen(
-                                "Data.ByteString.Lazy.Char8.",
-                                "Data.ByteString.Lazy.",
-                                1,
-                            );
-                            normalized_name.as_str()
-                        }
+                }
+            } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
+                match fn_name {
+                    "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
+                    | "uncons" | "map" | "filter" | "elem" | "notElem" | "find" | "intercalate"
+                    | "concatMap" | "any" | "all" | "foldr" | "foldl" | "foldr'" | "foldl'" => {
+                        raw_name
                     }
-                } else {
-                    raw_name
-                };
+                    _ => {
+                        normalized_name = raw_name.replacen(
+                            "Data.ByteString.Lazy.Char8.",
+                            "Data.ByteString.Lazy.",
+                            1,
+                        );
+                        normalized_name.as_str()
+                    }
+                }
+            } else {
+                raw_name
+            };
+            // `Set e`, as `Data.Set.fromList` and the other Set schemes
+            // below spell it.
+            let set_of = |elem: Ty| {
+                Ty::App(
+                    Box::new(Ty::Con(TyCon::new(
+                        Symbol::intern("Set"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    ))),
+                    Box::new(elem),
+                )
+            };
             let scheme = match name {
                 // Arithmetic operators
                 // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
@@ -2927,6 +3384,23 @@ impl TyCtxt {
                 )),
                 // otherwise :: Bool
                 "otherwise" => Scheme::mono(self.builtins.bool_ty.clone()),
+                // The `Floating`/`RealFloat` functions at `Double`.
+                "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+                | "atanh" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.double_ty.clone(),
+                )),
+                "atan2" | "logBase" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    Ty::fun(
+                        self.builtins.double_ty.clone(),
+                        self.builtins.double_ty.clone(),
+                    ),
+                )),
+                "isNaN" | "isInfinite" => Scheme::mono(Ty::fun(
+                    self.builtins.double_ty.clone(),
+                    self.builtins.bool_ty.clone(),
+                )),
                 // show :: a -> String
                 "show" => Scheme::poly(
                     vec![a.clone()],
@@ -3218,6 +3692,15 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::fun(maybe_a, Ty::Var(a.clone()))),
                     )
                 }
+                // fromJust :: Maybe a -> a. Without a scheme its result had
+                // no type: `print (fromJust (Just 'x'))` printed 120.
+                "fromJust" => {
+                    let maybe_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(maybe_a, Ty::Var(a.clone())))
+                }
                 // either :: (a -> c) -> (b -> c) -> Either a b -> c
                 "either" => {
                     let either_ab = Ty::App(
@@ -3284,6 +3767,26 @@ impl TyCtxt {
                             Ty::fun(list_a, Ty::Var(a.clone())),
                         ),
                     )
+                }
+                // Numeric.showFFloat :: RealFloat a => Maybe Int -> a -> ShowS
+                // (the class is not tracked here, so it is left off).
+                "showFFloat" | "Numeric.showFFloat" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            self.builtins.maybe_of(self.builtins.int_ty.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(string.clone(), string)),
+                        ),
+                    )
+                }
+                // showHex, showOct :: Int -> ShowS
+                "showHex" | "Numeric.showHex" | "showOct" | "Numeric.showOct" => {
+                    let string = self.builtins.string_ty.clone();
+                    Scheme::mono(Ty::fun(
+                        self.builtins.int_ty.clone(),
+                        Ty::fun(string.clone(), string),
+                    ))
                 }
                 "comparing" => {
                     let ordering_ty = Ty::Con(self.builtins.ordering_con.clone());
@@ -3631,6 +4134,30 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b)),
                     )
                 }
+                // unsafePerformIO :: IO a -> a
+                "unsafePerformIO" | "unsafeDupablePerformIO" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(io_a, Ty::Var(a.clone())))
+                }
+                // trace :: String -> a -> a
+                "trace" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
+                ),
+                // traceIO :: String -> IO ()
+                "traceIO" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    ),
+                )),
                 // evaluate :: a -> IO a
                 "evaluate" => {
                     let io_a = Ty::App(
@@ -3639,19 +4166,17 @@ impl TyCtxt {
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_a))
                 }
-                // mask :: ((IO a -> IO a) -> IO b) -> IO b
+                // mask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 "mask" => {
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
-                    );
                     let io_b = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(b.clone())),
                     );
-                    let restore = Ty::fun(io_a.clone(), io_a);
+                    // `restore` is rank-2 (`forall a. IO a -> IO a`): it is
+                    // used at more than one type in one body.
+                    let restore = rank2_restore(self.builtins.io_con.clone());
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![b.clone()],
                         Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                     )
                 }
@@ -3663,19 +4188,17 @@ impl TyCtxt {
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
                 }
-                // uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
+                // uninterruptibleMask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
                 "uninterruptibleMask" => {
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
-                    );
                     let io_b = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(b.clone())),
                     );
-                    let restore = Ty::fun(io_a.clone(), io_a);
+                    // `restore` is rank-2 (`forall a. IO a -> IO a`): it is
+                    // used at more than one type in one body.
+                    let restore = rank2_restore(self.builtins.io_con.clone());
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![b.clone()],
                         Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
                     )
                 }
@@ -4389,8 +4912,7 @@ impl TyCtxt {
                 // decodeUtf8With takes the error handler FIRST:
                 // OnDecodeError -> ByteString -> Text (handler left permissive;
                 // Text.Pandoc.App's `TE.decodeUtf8With TE.lenientDecode err`).
-                "Data.Text.Encoding.decodeUtf8With"
-                | "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::poly(
+                "Data.Text.Encoding.decodeUtf8With" => Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::Var(a.clone()),
@@ -4400,24 +4922,37 @@ impl TyCtxt {
                         ),
                     ),
                 ),
+                // The lazy modules return and take LAZY Text: a signature
+                // written `TL.Text` is lowered as `LazyText`, so typing these
+                // with strict Text rejected `TL.pack s :: TL.Text`.
+                "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(
+                            self.builtins.bytestring_ty.clone(),
+                            self.builtins.lazy_text_ty.clone(),
+                        ),
+                    ),
+                ),
                 // Data.Text.Lazy: pack/unpack
                 "Data.Text.Lazy.pack" => Scheme::mono(Ty::fun(
                     self.builtins.string_ty.clone(),
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                 )),
                 "Data.Text.Lazy.unpack" => Scheme::mono(Ty::fun(
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                     self.builtins.string_ty.clone(),
                 )),
                 // Data.Text.Lazy.Encoding: TL.Text -> BL.ByteString
                 "Data.Text.Lazy.Encoding.encodeUtf8" => Scheme::mono(Ty::fun(
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                     self.builtins.bytestring_ty.clone(),
                 )),
                 // Data.Text.Lazy.Encoding: BL.ByteString -> TL.Text
                 "Data.Text.Lazy.Encoding.decodeUtf8" => Scheme::mono(Ty::fun(
                     self.builtins.bytestring_ty.clone(),
-                    self.builtins.text_ty.clone(),
+                    self.builtins.lazy_text_ty.clone(),
                 )),
                 // The `'` (prime) decoders are total: they return
                 // `Either UnicodeException Text` rather than throwing. bhc does
@@ -4470,6 +5005,16 @@ impl TyCtxt {
                         self.builtins.char_ty.clone(),
                     ))
                 }
+                "Data.ByteString.Char8.index" => {
+                    // index :: ByteString -> Int -> Char
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.int_ty.clone(),
+                            self.builtins.char_ty.clone(),
+                        ),
+                    ))
+                }
                 "Data.ByteString.Char8.singleton" | "Data.ByteString.Lazy.Char8.singleton" => {
                     // singleton :: Char -> ByteString
                     Scheme::mono(Ty::fun(
@@ -4477,16 +5022,23 @@ impl TyCtxt {
                         self.builtins.bytestring_ty.clone(),
                     ))
                 }
-                "Data.ByteString.Char8.cons"
-                | "Data.ByteString.Lazy.Char8.cons"
-                | "Data.ByteString.Char8.snoc"
-                | "Data.ByteString.Lazy.Char8.snoc" => {
+                "Data.ByteString.Char8.cons" | "Data.ByteString.Lazy.Char8.cons" => {
                     // cons :: Char -> ByteString -> ByteString
-                    // snoc :: ByteString -> Char -> ByteString (same signature shape for permissiveness)
                     Scheme::mono(Ty::fun(
                         self.builtins.char_ty.clone(),
                         Ty::fun(
                             self.builtins.bytestring_ty.clone(),
+                            self.builtins.bytestring_ty.clone(),
+                        ),
+                    ))
+                }
+                "Data.ByteString.Char8.snoc" | "Data.ByteString.Lazy.Char8.snoc" => {
+                    // snoc :: ByteString -> Char -> ByteString. It shared
+                    // `cons`'s scheme, which rejected every correct use.
+                    Scheme::mono(Ty::fun(
+                        self.builtins.bytestring_ty.clone(),
+                        Ty::fun(
+                            self.builtins.char_ty.clone(),
                             self.builtins.bytestring_ty.clone(),
                         ),
                     ))
@@ -4796,6 +5348,14 @@ impl TyCtxt {
                             ),
                         ),
                     )
+                }
+                // Data.ByteString: ByteString -> IO ()
+                "Data.ByteString.putStr" | "Data.ByteString.putStrLn" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.bytestring_ty.clone(), io_unit))
                 }
                 // Data.ByteString: Handle -> ByteString -> IO ()
                 "Data.ByteString.hPutStr" | "Data.ByteString.hPut" => {
@@ -5518,13 +6078,60 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // The key-aware traversals, at their real types. Permissive
+                // (`a -> b`), `M.foldrWithKey (\k v acc -> k ++ show v ++
+                // acc) "" m` had no result type and printed an address.
+                "Data.Map.foldrWithKey"
+                | "Data.Map.foldlWithKey"
+                | "Data.Map.mapWithKey"
+                | "Data.Map.filterWithKey" => {
+                    let map_con = TyCon::new(
+                        Symbol::intern("Map"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    let k = TyVar::new_star(0xFFFF_0003);
+                    let v = a.clone();
+                    let r = b.clone();
+                    let map_of = |key: &TyVar, val: Ty| {
+                        Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(map_con.clone())),
+                                Box::new(Ty::Var(key.clone())),
+                            )),
+                            Box::new(val),
+                        )
+                    };
+                    let (kt, vt, rt) = (Ty::Var(k.clone()), Ty::Var(v.clone()), Ty::Var(r.clone()));
+                    let body = match name {
+                        // (k -> v -> b -> b) -> b -> Map k v -> b
+                        "Data.Map.foldrWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), Ty::fun(rt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (b -> k -> v -> b) -> b -> Map k v -> b
+                        "Data.Map.foldlWithKey" => Ty::fun(
+                            Ty::fun(rt.clone(), Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone()))),
+                            Ty::fun(rt.clone(), Ty::fun(map_of(&k, vt), rt)),
+                        ),
+                        // (k -> v -> w) -> Map k v -> Map k w
+                        "Data.Map.mapWithKey" => Ty::fun(
+                            Ty::fun(kt.clone(), Ty::fun(vt.clone(), rt.clone())),
+                            Ty::fun(map_of(&k, vt), map_of(&k, rt)),
+                        ),
+                        // (k -> v -> Bool) -> Map k v -> Map k v
+                        _ => Ty::fun(
+                            Ty::fun(kt, Ty::fun(vt.clone(), self.builtins.bool_ty.clone())),
+                            Ty::fun(map_of(&k, vt.clone()), map_of(&k, vt)),
+                        ),
+                    };
+                    Scheme::poly(vec![v, r, k], body)
+                }
                 "Data.Map.differenceWith"
                 | "Data.Map.unionWithKey"
-                | "Data.Map.mapWithKey"
                 | "Data.Map.mapKeys"
-                | "Data.Map.filterWithKey"
-                | "Data.Map.foldrWithKey"
-                | "Data.Map.foldlWithKey"
                 | "Data.Map.keysSet"
                 | "Data.Map.mapMaybeWithKey" => {
                     // Permissive fallback: a -> b
@@ -5534,7 +6141,7 @@ impl TyCtxt {
                     )
                 }
                 // Data.Set operations
-                "Data.Set.empty" => Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
+                "Data.Set.empty" => Scheme::poly(vec![a.clone()], set_of(Ty::Var(a.clone()))),
                 "Data.Set.fromList" => {
                     // fromList :: Ord a => [a] -> Set a
                     let set_con = TyCon::new(
@@ -5646,36 +6253,42 @@ impl TyCtxt {
                         ),
                     )
                 }
-                "Data.Set.insert" | "Data.Set.delete" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
-                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
-                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                    ),
-                ),
-                "Data.Set.deleteMin" | "Data.Set.deleteMax" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                ),
+                // These were permissive (`insert :: a -> b -> b`, `map ::
+                // (a -> b) -> a -> b`): with the set standing where the
+                // element should, `S.map (+ 1) s` asked for `Num (Set Int)`.
+                "Data.Set.insert" | "Data.Set.delete" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.union" | "Data.Set.intersection" | "Data.Set.difference" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(set_a.clone(), Ty::fun(set_a.clone(), set_a)),
+                    )
+                }
+                "Data.Set.isSubsetOf" | "Data.Set.isProperSubsetOf" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            set_a.clone(),
+                            Ty::fun(set_a, self.builtins.bool_ty.clone()),
+                        ),
+                    )
+                }
+                "Data.Set.deleteMin" | "Data.Set.deleteMax" => {
+                    let set_a = set_of(Ty::Var(a.clone()));
+                    Scheme::poly(vec![a.clone()], Ty::fun(set_a.clone(), set_a))
+                }
                 "Data.Set.map" => Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(set_of(Ty::Var(a.clone())), set_of(Ty::Var(b.clone()))),
                     ),
                 ),
                 "Data.Set.filter" => {
@@ -7806,6 +8419,23 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                     )
                 }
+                // The `System.IO.Error` predicates: IOError -> Bool. Their
+                // result type is what lets `show` and `&&` treat it as a Bool.
+                "isDoesNotExistError"
+                | "isAlreadyExistsError"
+                | "isPermissionError"
+                | "isUserError"
+                | "isEOFError"
+                | "isFullError"
+                | "isAlreadyInUseError"
+                | "isIllegalOperation"
+                    if def_info.kind == DefKind::StubValue =>
+                {
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                    )
+                }
                 "option" | "maybeReader" if def_info.kind == DefKind::StubValue => {
                     // option :: ReadM a -> Mod OptionFields a -> Parser a
                     // Needs at least a -> b -> c to avoid sharing
@@ -8032,6 +8662,80 @@ impl TyCtxt {
                         | "traverse"
                         | "for"
                         | "sequenceA"
+                        // `import Control.Monad (foldM)`: its scheme is the
+                        // real one (any monad). Typed fresh, the fold's monad
+                        // was unknown and `print (foldM f z xs)` at `Maybe`
+                        // printed an address.
+                        | "foldM"
+                        // `compare :: a -> a -> Ordering` is exact. Typed
+                        // fresh, its two arguments did not have to agree:
+                        // `compare (3 :: Int) "x"` compiled, and under
+                        // OverloadedStrings `compare t "b"` at `Text` left
+                        // the literal a `[Char]` (#97).
+                        | "compare"
+                        // `a -> a -> a`, `t a -> a`, `[a] -> a` and the pair
+                        // projections are exact too. Typed fresh, the result
+                        // had no type: `print (max LT EQ)`, `print (head
+                        // [GT, LT])` and `print (fst (EQ, 1))` printed an
+                        // address, and `max 'a' True` compiled.
+                        | "max"
+                        | "min"
+                        | "maximum"
+                        | "minimum"
+                        | "head"
+                        | "last"
+                        | "fst"
+                        | "snd"
+                        // `import Data.Function (on)`, exact. (A saturated or
+                        // partial use is desugared before this; the scheme
+                        // types `on` passed as a value.)
+                        | "on"
+                        // `import Data.List` re-exports these with their exact
+                        // builtin schemes. Typed fresh, `print (sort xs)` at a
+                        // user type could not see the element type and
+                        // printed addresses.
+                        | "sort"
+                        | "sortBy"
+                        | "sortOn"
+                        | "nub"
+                        | "nubBy"
+                        | "group"
+                        | "groupBy"
+                        | "partition"
+                        | "isPrefixOf"
+                        | "isSuffixOf"
+                        | "isInfixOf"
+                        | "tails"
+                        | "inits"
+                        | "transpose"
+                        | "foldl'"
+                        | "insert"
+                        | "delete"
+                        | "union"
+                        | "intersect"
+                        | "find"
+                        | "zip3"
+                        | "unzip3"
+                        // `a -> a -> a` (shared with Data.Set), which keeps
+                        // the operands' type on the result.
+                        | "\\\\"
+                        // Data.Maybe / Data.Either re-exports, exact schemes.
+                        // Typed fresh, `print (lefts es)` printed addresses.
+                        | "lefts"
+                        | "rights"
+                        | "partitionEithers"
+                        | "either"
+                        | "catMaybes"
+                        | "mapMaybe"
+                        | "fromMaybe"
+                        | "fromJust"
+                        | "listToMaybe"
+                        | "maybeToList"
+                        | "isJust"
+                        | "isNothing"
+                        | "maybe"
+                        // `import Control.Monad (replicateM)`, in any monad.
+                        | "replicateM"
                 )
             })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
@@ -8437,13 +9141,25 @@ impl TyCtxt {
             self.env.insert_global(method.id, shape_scheme);
 
             // Also store by DefId so hir-to-core can look it up
+            if class.params.len() == 1 {
+                self.local_class_methods.insert(method.id, class.name);
+            }
             self.def_schemes.insert(method.id, method_scheme);
         }
 
         // Type-check default method implementations.
         // Default methods must conform to their declared signatures.
         for default in &class.defaults {
+            // A default body shares its method's definition, and checking it
+            // records the body's own scheme there: the method's shape without
+            // its class. An importer then took the method for a plain
+            // function of the same name and called it with no dictionary.
+            // The method's scheme is the one that stands.
+            let method_scheme = self.def_schemes.get(&default.id).cloned();
             self.check_value_def(default);
+            if let Some(scheme) = method_scheme {
+                self.def_schemes.insert(default.id, scheme);
+            }
         }
     }
 
@@ -8492,6 +9208,28 @@ impl TyCtxt {
                 }
             }
         }
+        let local_class = self
+            .local_classes
+            .contains(&instance.class)
+            .then(|| self.env.lookup_class(instance.class).cloned())
+            .flatten();
+        if let Some(class_info) = local_class {
+            for method in &instance.methods {
+                if !class_info.methods.contains_key(&method.name)
+                    && self.reported_instance_methods.insert(method.span)
+                {
+                    let diag = Diagnostic::error(format!(
+                        "`{}` is not a method of class `{}`",
+                        method.name.as_str(),
+                        instance.class.as_str()
+                    ))
+                    .with_label(self.full_span(method.span), "defined in this instance")
+                    .with_note("an instance can only define the methods its class declares");
+                    self.emit_error(diag);
+                }
+            }
+        }
+        let outer = std::mem::replace(&mut self.checking_instance_methods, true);
         for method in &instance.methods {
             if class_known {
                 self.check_value_def(method);
@@ -8556,6 +9294,7 @@ impl TyCtxt {
                 self.env.insert_global(method.id, scheme);
             }
         }
+        self.checking_instance_methods = outer;
     }
 
     /// The type of a `Functor`/`Applicative`/`Monad` method at the instance
@@ -8715,7 +9454,7 @@ impl TyCtxt {
     }
 
     /// Unify an instance method's inferred type with the class method's type
-    /// at the instance head, keeping no errors from it.
+    /// at the instance head, and report a method whose body does not have it.
     ///
     /// Instance method bodies are inferred without an expected type, so
     /// inside `instance PandocMonad m => PandocMonad (ParsecT s st m)` the
@@ -8723,9 +9462,9 @@ impl TyCtxt {
     /// matched that variable against the constraint dictionary for `m`,
     /// selected `getsCommonState` and `>>=` from it, and ran a ParsecT action
     /// through ExceptT-over-StateT's bind. Pinning the type here makes the
-    /// recorded occurrence types say `ParsecT s st m`. Any mismatch is
-    /// dropped: this only refines types, it must not reject a module that
-    /// checked before.
+    /// recorded occurrence types say `ParsecT s st m`. A mismatch was
+    /// dropped at first; on the e2e corpus and all of pandoc none occurs in
+    /// a correct program, so it is reported (#97).
     fn guide_instance_method_type(&mut self, instance: &InstanceDef, method: &ValueDef) {
         let Some(class) = self.env.lookup_class(instance.class).cloned() else {
             return;
@@ -8767,9 +9506,40 @@ impl TyCtxt {
         let expected = subst.apply(&method_scheme.ty);
         let saved = self.diag.take_diagnostics();
         self.unify(&expected, &inferred, method.span);
-        let _speculative = self.diag.take_diagnostics();
+        let mismatches = self.diag.take_diagnostics();
         for d in saved {
             self.diag.emit(d);
+        }
+        // The method's body must have the type the class gives it at this
+        // instance: `instance C Int where m x = True` for `m :: a -> Int`
+        // compiled (#97).
+        let first = mismatches.into_iter().next();
+        if let Some(first) = first.filter(|_| self.reported_instance_methods.insert(method.span)) {
+            let head = instance
+                .types
+                .iter()
+                .map(|t| {
+                    let shown = crate::diagnostics::pretty_ty(t);
+                    if shown.contains(' ') && !shown.starts_with(['(', '[']) {
+                        format!("({shown})")
+                    } else {
+                        shown
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let diag = Diagnostic::error(format!(
+                "`{}` in `instance {} {head}` does not have the type the class gives it: {}",
+                method.name.as_str(),
+                instance.class.as_str(),
+                first.message
+            ))
+            .with_label(self.full_span(method.span), "in this method")
+            .with_note(format!(
+                "the class declares `{}`; at this instance its class variable is `{head}`",
+                method.name.as_str()
+            ));
+            self.emit_error(diag);
         }
     }
 
@@ -9157,7 +9927,19 @@ impl TyCtxt {
             }
         } else {
             scoped_var_ids = Vec::new();
-            value_def.sig.as_ref().map(|s| s.ty.clone())
+            // Check against a fresh copy of the signature. A source type
+            // variable's id is its name's symbol, so the `a` of every
+            // signature is one variable: checking one definition solved the
+            // others' `a` (#97).
+            value_def.sig.as_ref().map(|sig| {
+                let vars = if sig.vars.is_empty() {
+                    sig.ty.free_vars()
+                } else {
+                    sig.vars.clone()
+                };
+                let scheme = Scheme::poly(vars, sig.ty.clone());
+                crate::instantiate::instantiate_scoped(self, &scheme).0
+            })
         };
 
         // For rank-2 types: if the declared type has Forall in parameter positions,
@@ -9193,7 +9975,11 @@ impl TyCtxt {
 
         // If there's a declared type, unify with inferred type
         if let Some(declared) = &declared_ty {
+            let errors_before = self.diag.error_count();
             self.unify(declared, &inferred_ty, value_def.span);
+            if self.diag.error_count() == errors_before && !self.checking_instance_methods {
+                self.check_signature_variables_rigid(value_def, declared);
+            }
         }
 
         // Solve constraints accumulated during this binding's inference.
@@ -9234,6 +10020,70 @@ impl TyCtxt {
 
         self.def_schemes.insert(value_def.id, scheme.clone());
         self.env.insert_global(value_def.id, scheme);
+    }
+
+    /// A signature's type variables are rigid: the definition must work for
+    /// every type, so after unifying the signature with the definition each
+    /// of them must still be a distinct, unsolved variable (#97).
+    ///
+    /// `g :: a -> a; g x = True` compiled: the signature's `a` was an
+    /// ordinary unification variable, and the definition solved it to
+    /// `Bool`.
+    fn check_signature_variables_rigid(&mut self, value_def: &ValueDef, declared: &Ty) {
+        let rigid = declared.free_vars();
+        let mut images: Vec<(u32, Ty)> = Vec::new();
+        for var in &rigid {
+            let image = self.subst.apply_resolved(&Ty::Var(var.clone()));
+            let clash = match &image {
+                Ty::Var(v) => images.iter().any(|(other, img)| {
+                    *other != var.id && matches!(img, Ty::Var(w) if w.id == v.id)
+                }),
+                _ => true,
+            };
+            if clash {
+                let names = signature_variable_names(&rigid);
+                let shown_sig = crate::diagnostics::pretty_ty(&rename_vars(declared, &names));
+                let shown_sig = match declared {
+                    Ty::Fun(..) => shown_sig
+                        .strip_prefix('(')
+                        .and_then(|s| s.strip_suffix(')'))
+                        .map_or(shown_sig.clone(), str::to_string),
+                    _ => shown_sig,
+                };
+                let var_name = names.get(&var.id).map_or("a", String::as_str);
+                let (message, label) = match &image {
+                    Ty::Var(_) => (
+                        format!(
+                            "`{}` is less polymorphic than its signature `{shown_sig}`",
+                            value_def.name.as_str()
+                        ),
+                        format!(
+                            "the definition makes the signature's `{var_name}` the same type \
+                             as another of its type variables"
+                        ),
+                    ),
+                    concrete => (
+                        format!(
+                            "`{}` is less polymorphic than its signature `{shown_sig}`",
+                            value_def.name.as_str()
+                        ),
+                        format!(
+                            "the definition only works when `{var_name}` is `{}`",
+                            crate::diagnostics::pretty_ty(&rename_vars(concrete, &names))
+                        ),
+                    ),
+                };
+                let diag = Diagnostic::error(message)
+                    .with_label(self.full_span(value_def.span), label)
+                    .with_note(format!(
+                        "a type variable in a signature stands for every type: \
+                         the definition must not choose `{var_name}`"
+                    ));
+                self.emit_error(diag);
+                return;
+            }
+            images.push((var.id, image));
+        }
     }
 
     /// Infer the type of a list of equations (function clauses).
@@ -9324,6 +10174,13 @@ impl TyCtxt {
         self.diag.take_diagnostics()
     }
 
+    /// Put back diagnostics taken with [`Self::take_diagnostics`].
+    pub(crate) fn restore_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        for d in diagnostics {
+            self.diag.emit(d);
+        }
+    }
+
     /// Create a `FullSpan` from a Span.
     #[must_use]
     pub const fn full_span(&self, span: Span) -> FullSpan {
@@ -9332,6 +10189,47 @@ impl TyCtxt {
 
     /// Convert the context into a `TypedModule`.
     #[must_use]
+    /// `ty` with every reducible type family application inside it reduced.
+    /// `families` names the families worth trying (see
+    /// [`TypeEnv::reducible_family_names`]), so a type that mentions none
+    /// costs one walk.
+    fn reduce_families_deep(&self, ty: &Ty, families: &rustc_hash::FxHashSet<Symbol>) -> Ty {
+        match ty {
+            Ty::App(f, a) => {
+                let applied = Ty::App(
+                    Box::new(self.reduce_families_deep(f, families)),
+                    Box::new(self.reduce_families_deep(a, families)),
+                );
+                let mut head = &applied;
+                while let Ty::App(inner, _) = head {
+                    head = inner;
+                }
+                if !matches!(head, Ty::Con(c) if families.contains(&c.name)) {
+                    return applied;
+                }
+                let reduced = crate::unify::try_reduce_type_family(self, &applied);
+                if reduced == applied {
+                    applied
+                } else {
+                    self.reduce_families_deep(&reduced, families)
+                }
+            }
+            Ty::Fun(a, r) => Ty::Fun(
+                Box::new(self.reduce_families_deep(a, families)),
+                Box::new(self.reduce_families_deep(r, families)),
+            ),
+            Ty::List(e) => Ty::List(Box::new(self.reduce_families_deep(e, families))),
+            Ty::Tuple(es) => Ty::Tuple(
+                es.iter()
+                    .map(|e| self.reduce_families_deep(e, families))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Finish type checking `hir`: the types of its expressions, binders and
+    /// definitions under the final substitution.
     pub fn into_typed_module(self, hir: Module) -> TypedModule {
         // Apply final substitution to all expression types. Single-pass apply:
         // these values are baked into Core by lowering, and codegen's width
@@ -9345,10 +10243,34 @@ impl TyCtxt {
         // A fixpoint-resolved copy for lowering's dispatch decisions only (never
         // baked into Core). Resolves triangular chains that a single apply leaves
         // partial, e.g. `return 42 :: M a` recorded as `App(Var m, Int)`.
+        // Type family applications are reduced in this copy too: lowering
+        // and codegen dispatch on the type (`print` at `[Elem String]` has to
+        // know it is showing a `String`), and neither can reduce a family.
+        let families = self.env.reducible_family_names();
         let resolved_expr_types: rustc_hash::FxHashMap<Span, Ty> = self
             .expr_types
             .iter()
-            .map(|(id, ty)| (*id, self.subst.apply_resolved(ty)))
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (*id, resolved)
+                } else {
+                    (*id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
+            .collect();
+
+        let binder_types: FxHashMap<DefId, Ty> = self
+            .env
+            .pattern_var_types()
+            .map(|(id, ty)| {
+                let resolved = self.subst.apply_resolved(ty);
+                if families.is_empty() {
+                    (id, resolved)
+                } else {
+                    (id, self.reduce_families_deep(&resolved, &families))
+                }
+            })
             .collect();
 
         // Apply final substitution to all definition schemes
@@ -9437,6 +10359,7 @@ impl TyCtxt {
             expr_types,
             resolved_expr_types,
             def_schemes,
+            binder_types,
             type_aliases: self.type_aliases.clone(),
         }
     }
@@ -9566,11 +10489,24 @@ fn is_typeck_builtin_class(name: &str) -> bool {
 /// The declared type of a builtin `Semigroup`/`Monoid` method at a
 /// single-parameter instance's type, or `None` for any other method or class.
 fn builtin_value_method_shape(instance: &InstanceDef, method: Symbol) -> Option<Ty> {
-    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") || instance.types.len() != 1 {
+    if instance.types.len() != 1 {
         return None;
     }
     let t = instance.types[0].clone();
     let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+    // `IsString` is builtin too, and its one method is fixed by the instance
+    // type. Unchecked, the `fromString` inside `fromString = Value .
+    // fromString` had no recorded type and stayed the identity.
+    if instance.class.as_str() == "IsString" {
+        let string = Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        ))));
+        return (method.as_str() == "fromString").then(|| fun(string, t));
+    }
+    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") {
+        return None;
+    }
     match method.as_str() {
         "mempty" => Some(t),
         "<>" | "mappend" => Some(fun(t.clone(), fun(t.clone(), t))),
@@ -9590,9 +10526,9 @@ mod tests {
         let v2 = gen.fresh();
         let v3 = gen.fresh();
 
-        assert_eq!(v1.id, 0);
-        assert_eq!(v2.id, 1);
-        assert_eq!(v3.id, 2);
+        assert_eq!(v1.id, FIRST_FRESH_TYVAR);
+        assert_eq!(v2.id, FIRST_FRESH_TYVAR + 1);
+        assert_eq!(v3.id, FIRST_FRESH_TYVAR + 2);
     }
 
     #[test]

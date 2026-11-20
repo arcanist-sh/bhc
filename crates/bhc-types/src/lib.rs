@@ -64,6 +64,22 @@ pub use dyn_tensor::{dyn_tensor_of, dyn_tensor_tycon, shape_witness_of, shape_wi
 pub use nat::TyNat;
 pub use ty_list::TyList;
 
+/// The value representation, fixed once per process; see [`boxed_values`].
+static BOXED_VALUES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether a scalar in a value word is boxed (`BHC_VALUE_REP=boxed`, #94).
+///
+/// By default an `Int`, `Char` or `Double` in a lifted position (a
+/// constructor field, a list element, an argument of an unknown call) is the
+/// scalar's own bits in the word, which nothing at run time can tell from a
+/// pointer. Boxed, the word points to a `{kind, payload}` object. The
+/// compiled program tells the runtime libraries which it was built with at
+/// startup. Native code only; experimental until the suites pass under it.
+#[must_use]
+pub fn boxed_values() -> bool {
+    *BOXED_VALUES.get_or_init(|| matches!(std::env::var("BHC_VALUE_REP").as_deref(), Ok("boxed")))
+}
+
 /// The IO model, fixed once per process; see [`io_closure_mode`].
 static IO_CLOSURE_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -98,7 +114,18 @@ pub fn io_closure_mode() -> bool {
 pub fn select_io_model_for_target(target_triple: Option<&str>) {
     let wasm = target_triple.is_some_and(|t| t.contains("wasm"));
     let _ = IO_CLOSURE_MODE.set(io_model_from_env().unwrap_or(!wasm));
+    let _ = TARGET_HAS_THREADS.set(!wasm);
 }
+
+/// Whether the compilation target runs `Control.Concurrent` threads: every
+/// native target does, under either IO model; WebAssembly does not yet (#75).
+/// Set by [`select_io_model_for_target`]; a native target until then.
+#[must_use]
+pub fn target_has_threads() -> bool {
+    *TARGET_HAS_THREADS.get_or_init(|| true)
+}
+
+static TARGET_HAS_THREADS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Every type, constructor, class and value that `stdlib/bhc-transformers/hs`
 /// defines. Under the closure IO model ([`io_closure_mode`]) no compiler stage
@@ -961,6 +988,14 @@ pub fn types_match(pattern: &Ty, target: &Ty) -> Option<Subst> {
     }
 }
 
+/// `[Char]`, which is what `String` stands for.
+fn string_as_list() -> Ty {
+    Ty::List(Box::new(Ty::Con(TyCon::new(
+        Symbol::intern("Char"),
+        Kind::Star,
+    ))))
+}
+
 /// Helper function that accumulates substitutions during type matching.
 ///
 /// Returns `true` if the pattern matches the target, accumulating bindings
@@ -980,6 +1015,16 @@ pub fn types_match_with_subst(pattern: &Ty, target: &Ty, subst: &mut Subst) -> b
 
         // Type constructors must match by name
         (Ty::Con(c1), Ty::Con(c2)) => c1.name == c2.name,
+
+        // `String` is `[Char]`. A type is written with either spelling, so
+        // `instance Convert Int String` must answer for `Convert Int [Char]`,
+        // and the other way round.
+        (Ty::Con(c), other @ (Ty::List(_) | Ty::App(..))) if c.name.as_str() == "String" => {
+            types_match_with_subst(&string_as_list(), other, subst)
+        }
+        (other @ (Ty::List(_) | Ty::App(..)), Ty::Con(c)) if c.name.as_str() == "String" => {
+            types_match_with_subst(other, &string_as_list(), subst)
+        }
 
         // Primitive types must match exactly
         (Ty::Prim(p1), Ty::Prim(p2)) => p1 == p2,

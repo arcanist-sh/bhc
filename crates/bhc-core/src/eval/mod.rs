@@ -1415,6 +1415,21 @@ impl Evaluator {
     }
 
     fn apply_primop(&self, op: PrimOp, args: Vec<Value>) -> Result<Value, EvalError> {
+        // `apply_primop_inner` is one `match` over every primitive, and in a
+        // debug build its frame alone is close to 900KB. A primitive that
+        // applies its arguments (`>>`, `>>=`, `map`, ...) re-enters it
+        // through `apply` without passing `eval`'s guard, so two nested
+        // primitives overran that guard's 1MB margin: `print 1 >> print 2 >>
+        // print 3` overflowed a 2MB thread stack. The margin here has to
+        // cover this function's own frame and what it calls before the next
+        // guard.
+        stacker::maybe_grow(4 * 1024 * 1024, 32 * 1024 * 1024, || {
+            self.apply_primop_inner(op, args)
+        })
+    }
+
+    /// The primitives themselves; see [`Self::apply_primop`].
+    fn apply_primop_inner(&self, op: PrimOp, args: Vec<Value>) -> Result<Value, EvalError> {
         // Check if we have enough arguments
         if args.len() < op.arity() {
             // Return a partially applied primop as a closure

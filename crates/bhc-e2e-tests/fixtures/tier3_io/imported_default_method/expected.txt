@@ -1,0 +1,5 @@
+<3>
+!yes
+4
+Str "a!"
+[Str "b!",Emph [Str "c!"]]

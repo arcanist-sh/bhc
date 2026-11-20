@@ -132,9 +132,9 @@ no per-module profile pragma. See [Profiles](profiles.md).
 
 ## REPL
 
-`bhc repl` starts `bhci`, which must sit next to the `bhc` binary. The release
-archives do not include it yet, so the REPL is available from a source build
-(`cargo build --release -p bhci`):
+`bhc repl` starts `bhci`, which must sit next to the `bhc` binary. Release
+archives include it from v0.2.30 on, and the install script and Homebrew put it
+there; with a source build, build it too (`cargo build --release -p bhci`):
 
 ```
 bhci:001> 2 + 2

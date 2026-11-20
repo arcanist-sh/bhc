@@ -1,0 +1,8 @@
+f 1 = 2
+(True,False)
+True
+(7,7,10)
+xxx10
+Just "b"
+("3",True,False)
+["1","2"]

@@ -805,6 +805,10 @@ impl<'src> Parser<'src> {
             | TokenKind::IntLit(_)
             | TokenKind::CharLit(_)
             | TokenKind::StringLit(_) => self.parse_value_decl_with_doc(doc),
+            // An infix definition whose left operand is a constructor
+            // pattern, `TagOpen n as ~== TagOpen p ps = …`, or a top-level
+            // pattern binding `Box x = …`.
+            TokenKind::ConId(_) | TokenKind::QualConId(_, _) => self.parse_value_decl_with_doc(doc),
             // Top-level Template Haskell declaration splice: `$(deriver ... ''T)`.
             TokenKind::Operator(sym) if sym.as_str() == "$" => self.parse_decl_splice(),
             _ => Err(ParseError::Unexpected {
@@ -1616,6 +1620,26 @@ impl<'src> Parser<'src> {
             let params = self.parse_ty_var_list()?;
             (name, params)
         };
+
+        // A kind signature on the head: `data T :: Type -> Type where ...`
+        // (KindSignatures). Each arrow in the kind is one more type parameter
+        // that the head did not name, so give it a name the source cannot
+        // spell. The kind itself is not tracked, as for `(a :: k)` binders.
+        let mut params = params;
+        if self.check(&TokenKind::DoubleColon) {
+            let kind_span = self.current_span();
+            self.advance();
+            let mut kind = self.parse_kind()?;
+            let mut index = 0usize;
+            while let Kind::Arrow(_, result) = kind {
+                params.push(TyVar {
+                    name: Ident::new(Symbol::intern(&format!("k$arg{index}"))),
+                    span: kind_span,
+                });
+                index += 1;
+                kind = *result;
+            }
+        }
 
         // A Haddock comment may sit between the head and the `=` (it documents
         // the first constructor, e.g. `data T\n  -- | doc\n  = Con1 ...`). Skip

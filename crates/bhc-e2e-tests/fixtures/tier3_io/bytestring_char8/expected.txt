@@ -1,0 +1,30 @@
+IBM
+no newline
+round trip
+(4,True,True)
+abcd
+desserts
+abc
+def
+xyz!
+('h','o')
+ello
+hell
+(True,False)
+(True,False)
+'e'
+q
+[65,66]
+[2,3,4]
+hi
+hi a
+hi b
+"HAL"
+(True,False)
+(False,True)
+"tab\there \"quoted\""
+True
+"xy"
+True
+2
+"\200A"

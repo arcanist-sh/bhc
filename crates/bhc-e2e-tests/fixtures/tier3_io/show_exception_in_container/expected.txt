@@ -1,0 +1,10 @@
+Left divide by zero
+caught: divide by zero
+Left divide by zero
+Right 5
+Left user error (bad)
+[Right 4,Left divide by zero,Right 3]
+("divide by zero",Right 6)
+(Left divide by zero,7)
+Just divide by zero
+handled: divide by zero

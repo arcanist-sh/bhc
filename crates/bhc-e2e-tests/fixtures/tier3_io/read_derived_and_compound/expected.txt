@@ -1,0 +1,28 @@
+Blue
+P {name = "a", age = 3}
+[(1,"a"),(2,"b")]
+Green
+[Red,Blue]
+[Circle 1.5,Rect 2.0 3.0,Unit]
+Node (Node Leaf 1 Leaf) 2 Leaf
+Node Leaf "x" Leaf
+Age 41
+(1,True,'c',"s",2.5)
+Just (-3)
+[Left 1,Right "r"]
+[[1,2],[3]]
+123456789012345678901234567890
+()
+[LT,GT]
+Just Green
+Nothing
+Just (P {name = "b", age = 4})
+Nothing
+Just (1,2)
+Nothing
+[(Blue," rest")]
+[]
+[((1,2)," tail")]
+(42,2.5,[1,2,3])
+Just 9
+True

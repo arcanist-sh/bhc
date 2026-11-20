@@ -210,7 +210,11 @@ impl<'src> Parser<'src> {
             if is_minus {
                 let start = tok.span;
                 self.advance();
-                let expr = self.parse_prefix_expr()?;
+                // Negation has precedence 6 (Haskell 2010 §3.4): its operand
+                // takes the operators that bind tighter, so `-7 \`mod\` 3` is
+                // `-(7 \`mod\` 3)` and `-2 ^ 2` is `-4`. Parsing only a term
+                // gave `(-7) \`mod\` 3`.
+                let expr = self.parse_infix_expr(7)?;
                 let span = start.to(expr.span());
                 return Ok(Expr::Neg(Box::new(expr), span));
             }

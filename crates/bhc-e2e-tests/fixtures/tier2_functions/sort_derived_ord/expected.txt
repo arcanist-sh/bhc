@@ -1,0 +1,11 @@
+[Lo,Mid,Hi]
+[Lo,Mid,Hi]
+[Circle 1.0,Rect 1.0 1.0,Rect 2.0 3.0]
+(Rect 2.0 3.0,Circle 1.0)
+(Hi,Mid)
+[Rect 1.0 1.0,Circle 1.0,Rect 2.0 3.0]
+[Rect 1.0 1.0,Circle 1.0,Rect 2.0 3.0]
+["a","bb","ccc"]
+[3,2,1]
+["ab","12","cd","345"]
+False

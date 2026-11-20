@@ -120,6 +120,13 @@ pub enum LowerError {
         span: Span,
     },
 
+    /// A `do` block that ends in a binding or a `let`: it has no result.
+    #[error("the last statement in a `do` block must be an expression")]
+    DoWithoutResult {
+        /// Source location of the block.
+        span: Span,
+    },
+
     /// Multiple errors collected during lowering.
     #[error("{}", display_multiple(.0))]
     Multiple(Vec<LowerError>),
@@ -149,12 +156,29 @@ pub enum LowerWarning {
         /// What kind of stub (value, type, or constructor).
         kind: &'static str,
     },
-    /// A builtin that type-checks but has no implementation yet, so calling
-    /// it aborts at run time (the concurrency primitives, #38).
+    /// A builtin that type-checks but has no implementation on this target,
+    /// so calling it aborts at run time (the concurrency primitives on
+    /// WebAssembly, #75).
     NotImplemented {
         /// The builtin's name.
         name: String,
         /// Source location of the first use.
+        span: Span,
+    },
+    /// A Template Haskell declaration splice bhc does not recognize was
+    /// skipped: the declarations it would generate do not exist.
+    SpliceSkipped {
+        /// The function the splice applies (`deriveJSON`).
+        name: String,
+        /// Source location of the splice.
+        span: Span,
+    },
+    /// A `deriving` clause names a standard class bhc cannot derive, so no
+    /// instance is generated.
+    DerivingUnsupported {
+        /// The class name.
+        class: String,
+        /// Source location of the type declaration.
         span: Span,
     },
     /// A LANGUAGE pragma extension is not yet implemented.
@@ -179,6 +203,17 @@ pub enum LowerWarning {
         /// Source location of the import.
         span: Span,
     },
+    /// An import list names something the imported module does not export
+    /// (`import A (Hidden)`). GHC rejects this; it is a warning here because
+    /// some module interfaces bhc provides are not complete.
+    NotExported {
+        /// The imported module.
+        module: String,
+        /// The name it does not export.
+        name: String,
+        /// Source location of the import.
+        span: Span,
+    },
 }
 
 impl std::fmt::Display for LowerWarning {
@@ -199,12 +234,29 @@ impl std::fmt::Display for LowerWarning {
             LowerWarning::NotImplemented { name, .. } => {
                 write!(
                     f,
-                    "`{name}` is not implemented yet: calling it aborts at run time \
-                     (concurrency is not wired to the runtime, see issue #38)"
+                    "`{name}` is not implemented on WebAssembly yet: calling it aborts \
+                     at run time (threads run on native targets only, see issue #75)"
+                )
+            }
+            LowerWarning::SpliceSkipped { name, .. } => {
+                write!(
+                    f,
+                    "Template Haskell splice `{name}` is not supported and was skipped: \
+                     the declarations it generates do not exist"
+                )
+            }
+            LowerWarning::DerivingUnsupported { class, .. } => {
+                write!(
+                    f,
+                    "bhc cannot derive `{class}`: no instance is generated, so using one \
+                     is a compile error"
                 )
             }
             LowerWarning::UnknownExtension { name, .. } => {
                 write!(f, "unknown extension `{name}`")
+            }
+            LowerWarning::NotExported { module, name, .. } => {
+                write!(f, "module `{module}` does not export `{name}`")
             }
             LowerWarning::ModuleNotFound { name, .. } => {
                 write!(

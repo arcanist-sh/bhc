@@ -4,7 +4,6 @@
 //! LLVM-generated code. Lists are represented as heap-allocated
 //! ADT nodes with Nil (tag=0) and Cons (tag=1, head, tail) layout.
 
-use std::alloc::{alloc, Layout};
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -13,30 +12,26 @@ use std::collections::HashSet;
 
 /// Read the tag (i64) at offset 0 of an ADT node.
 unsafe fn get_tag(ptr: *mut u8) -> i64 {
-    *(ptr as *const i64)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::tag(ptr) }
 }
 
 /// Read field at `index` (0-based) starting at offset 8.
 unsafe fn get_field(ptr: *mut u8, index: usize) -> *mut u8 {
-    *(ptr.add(8 + index * 8) as *const *mut u8)
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::field(ptr, index) }
 }
 
 /// Allocate a Nil node (tag=0, 8 bytes).
 unsafe fn alloc_nil() -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(8, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::nil() }
 }
 
 /// Allocate a Cons node (tag=1, head at offset 8, tail at offset 16).
 unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(24, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 1;
-    *(ptr.add(8) as *mut *mut u8) = head;
-    *(ptr.add(16) as *mut *mut u8) = tail;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
 // ---------------------------------------------------------------------------
@@ -47,12 +42,7 @@ unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
 /// or Bool ADT (heap pointer with tag 0=False, 1=True from even, odd, etc.).
 /// Heap pointers are always >> 1 so we can distinguish the two representations.
 unsafe fn extract_bool(val: *mut u8) -> bool {
-    let v = val as usize;
-    if v <= 1 {
-        v != 0
-    } else {
-        get_tag(val) != 0
-    }
+    bhc_rts_alloc::object::bool_of(val)
 }
 
 /// Call a 2-arg equality closure and extract the Bool result.
@@ -78,35 +68,26 @@ unsafe fn extract_ordering(val: *mut u8) -> std::cmp::Ordering {
 
 unsafe fn call_eq_closure(eq_fn: *mut u8, a: *mut u8, b: *mut u8) -> bool {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(eq_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(eq_fn));
     extract_bool(fn_ptr(eq_fn, a, b))
 }
 
 /// Allocate Nothing ADT (tag=0, 8 bytes).
 unsafe fn alloc_nothing() -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(8, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::NOTHING, &[]) }
 }
 
 /// Allocate Just x ADT (tag=1, field at offset 8, 16 bytes).
 unsafe fn alloc_just(value: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(16, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 1;
-    *(ptr.add(8) as *mut *mut u8) = value;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::JUST, &[value]) }
 }
 
 /// Allocate a 2-tuple (tag=0, fst at offset 8, snd at offset 16, 24 bytes).
 unsafe fn alloc_tuple(fst: *mut u8, snd: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align_unchecked(24, 8);
-    let ptr = alloc(layout);
-    *(ptr as *mut i64) = 0;
-    *(ptr.add(8) as *mut *mut u8) = fst;
-    *(ptr.add(16) as *mut *mut u8) = snd;
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(bhc_rts_alloc::object::TUPLE, &[fst, snd]) }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +132,7 @@ unsafe fn vec_to_list(slice: &[*mut u8]) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
     let mut vec = list_to_vec(list);
-    vec.sort_by_key(|&e| e as i64);
+    vec.sort_by_key(|&e| bhc_rts_alloc::object::order_key(e));
     vec_to_list(&vec)
 }
 
@@ -172,11 +153,46 @@ pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(cmp_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(cmp_fn));
 
     let mut vec = list_to_vec(list);
     vec.sort_by(|&a, &b| extract_ordering(fn_ptr(cmp_fn, a, b)));
     vec_to_list(&vec)
+}
+
+/// The greatest (`want_max`) or least element of a non-empty list under a
+/// comparison closure, as `maximum`/`minimum` at a type with a derived `Ord`.
+/// Like `foldr1 max`, the LAST of equal maxima and the FIRST of equal minima.
+///
+/// # Safety
+///
+/// As for [`bhc_list_sort_by`]; `list` must be non-empty (an empty one
+/// returns null).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_extreme_by(
+    cmp_fn: *mut u8,
+    list: *mut u8,
+    want_max: i64,
+) -> *mut u8 {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(cmp_fn));
+    let vec = list_to_vec(list);
+    let mut best = match vec.first() {
+        Some(&e) => e,
+        None => return std::ptr::null_mut(),
+    };
+    for &e in &vec[1..] {
+        let ord = extract_ordering(fn_ptr(cmp_fn, e, best));
+        let better = if want_max != 0 {
+            ord != std::cmp::Ordering::Less
+        } else {
+            ord == std::cmp::Ordering::Less
+        };
+        if better {
+            best = e;
+        }
+    }
+    best
 }
 
 /// Remove duplicate elements from a list (by `i64` value comparison).
@@ -190,7 +206,10 @@ pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mu
 pub unsafe extern "C" fn bhc_list_nub(list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
     let mut seen = HashSet::new();
-    let deduped: Vec<*mut u8> = vec.into_iter().filter(|&e| seen.insert(e as i64)).collect();
+    let deduped: Vec<*mut u8> = vec
+        .into_iter()
+        .filter(|&e| seen.insert(bhc_rts_alloc::object::order_key(e)))
+        .collect();
     vec_to_list(&deduped)
 }
 
@@ -212,7 +231,9 @@ pub unsafe extern "C" fn bhc_list_group(list: *mut u8) -> *mut u8 {
     let mut current_group: Vec<*mut u8> = vec![vec[0]];
 
     for &elem in &vec[1..] {
-        if elem as i64 == *current_group.last().unwrap() as i64 {
+        if bhc_rts_alloc::object::order_key(elem)
+            == bhc_rts_alloc::object::order_key(*current_group.last().unwrap())
+        {
             current_group.push(elem);
         } else {
             groups.push(std::mem::take(&mut current_group));
@@ -306,14 +327,14 @@ pub unsafe extern "C" fn bhc_list_transpose(lists: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(key_fn as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(key_fn));
 
     let vec = list_to_vec(list);
     let mut decorated: Vec<(i64, *mut u8)> = vec
         .iter()
         .map(|&elem| {
             let key = fn_ptr(key_fn, elem);
-            (key as i64, elem)
+            (bhc_rts_alloc::object::order_key(key), elem)
         })
         .collect();
     decorated.sort_by_key(|&(k, _)| k);
@@ -462,6 +483,98 @@ pub unsafe extern "C" fn bhc_list_intersect_by(
     vec_to_list(&result)
 }
 
+/// `sequence` in the list monad: every list made of one element from each
+/// list, in order (`sequence [[1, 2], [3]] = [[1, 3], [2, 3]]`).
+///
+/// # Safety
+///
+/// `lists` must be a BHC list of BHC lists.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_sequence(lists: *mut u8) -> *mut u8 {
+    let mut combos: Vec<Vec<*mut u8>> = vec![Vec::new()];
+    for list in list_to_vec(lists) {
+        let elems = list_to_vec(bhc_prelude::force_heap_object(list));
+        let mut next = Vec::with_capacity(combos.len() * elems.len());
+        for combo in &combos {
+            for &e in &elems {
+                let mut c = combo.clone();
+                c.push(e);
+                next.push(c);
+            }
+        }
+        combos = next;
+    }
+    let rows: Vec<*mut u8> = combos.iter().map(|c| vec_to_list(c)).collect();
+    vec_to_list(&rows)
+}
+
+/// Whether `val` is in `list` under an equality closure (`elem` at a type
+/// whose values are boxed). Returns 1 or 0.
+///
+/// # Safety
+///
+/// As for [`bhc_list_nub_by`].
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_elem_by(eq_fn: *mut u8, val: *mut u8, list: *mut u8) -> i64 {
+    i64::from(
+        list_to_vec(list)
+            .iter()
+            .any(|&e| call_eq_closure(eq_fn, val, e)),
+    )
+}
+
+/// `xs \\ ys` under an equality closure: each element of `ys` removes the
+/// first equal element of `xs`.
+///
+/// # Safety
+///
+/// As for [`bhc_list_nub_by`].
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_difference_by(
+    eq_fn: *mut u8,
+    xs: *mut u8,
+    ys: *mut u8,
+) -> *mut u8 {
+    let mut result = list_to_vec(xs);
+    for y in list_to_vec(ys) {
+        if let Some(i) = result.iter().position(|&x| call_eq_closure(eq_fn, x, y)) {
+            result.remove(i);
+        }
+    }
+    vec_to_list(&result)
+}
+
+/// The code of an equality closure on `[Char]` (`eq_fn` for the `*_by`
+/// functions at `String`): equal when the two lists hold the same
+/// characters. Returns a Bool immediate (0 or 1).
+///
+/// # Safety
+///
+/// `a` and `b` must be BHC character lists (or thunks evaluating to them).
+unsafe extern "C" fn char_list_eq_code(_closure: *mut u8, a: *mut u8, b: *mut u8) -> *mut u8 {
+    let a = list_to_vec(bhc_prelude::force_heap_object(a));
+    let b = list_to_vec(bhc_prelude::force_heap_object(b));
+    use bhc_rts_alloc::object;
+    let equal = a.len() == b.len()
+        && a.iter()
+            .zip(&b)
+            .all(|(x, y)| object::char_of(*x) == object::char_of(*y));
+    object::word_of_bool(equal)
+}
+
+/// A closure comparing `[Char]` values, for the `*_by` list functions at
+/// `String` (`nub`, `group`, `elem`, … compared the lists' addresses).
+#[no_mangle]
+pub extern "C" fn bhc_string_eq_closure() -> *mut u8 {
+    use bhc_rts_alloc::object;
+    let words = vec![0usize; object::closure_size(0) / object::WORD].into_boxed_slice();
+    let closure = Box::into_raw(words).cast::<u8>();
+    // SAFETY: `closure` has room for a closure that captures nothing, and
+    // the code takes the closure and two arguments.
+    unsafe { object::init_closure(closure, char_list_eq_code as *const u8, 2, &[]) };
+    closure
+}
+
 /// Strip a prefix from a list, returning `Just remainder` or `Nothing`.
 ///
 /// Elements are compared as `i64` (pointer cast).
@@ -484,7 +597,7 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -
         }
         let p_head = get_field(p, 0);
         let l_head = get_field(l, 0);
-        if p_head as i64 != l_head as i64 {
+        if bhc_rts_alloc::object::order_key(p_head) != bhc_rts_alloc::object::order_key(l_head) {
             return alloc_nothing();
         }
         p = bhc_prelude::force_heap_object(get_field(p, 1));
@@ -504,10 +617,10 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
-    let v = val as i64;
+    let v = bhc_rts_alloc::object::order_key(val);
     let pos = vec
         .iter()
-        .position(|&e| (e as i64) > v)
+        .position(|&e| bhc_rts_alloc::object::order_key(e) > v)
         .unwrap_or(vec.len());
     let mut result = vec;
     result.insert(pos, val);
@@ -530,7 +643,7 @@ pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(f as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(f));
 
     let vec = list_to_vec(list);
     let mut current_acc = acc;
@@ -562,7 +675,7 @@ pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *m
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_r(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
-        std::mem::transmute(*(f as *const *mut u8));
+        std::mem::transmute(bhc_rts_alloc::object::closure_code(f));
 
     let vec = list_to_vec(list);
     let mut current_acc = acc;
@@ -588,7 +701,7 @@ pub extern "C" fn bhc_enum_from_to_double(from: f64, to: f64) -> *mut u8 {
     let mut elems: Vec<*mut u8> = Vec::new();
     let mut x = from;
     while x <= limit {
-        elems.push(x.to_bits() as usize as *mut u8);
+        elems.push(bhc_rts_alloc::object::word_of_double(x));
         x += 1.0;
     }
     unsafe { vec_to_list(&elems) }
@@ -599,12 +712,18 @@ mod tests {
     use super::*;
 
     unsafe fn make_list(elems: &[i64]) -> *mut u8 {
-        let ptrs: Vec<*mut u8> = elems.iter().map(|&v| v as *mut u8).collect();
+        let ptrs: Vec<*mut u8> = elems
+            .iter()
+            .map(|&v| bhc_rts_alloc::object::word_of_int(v))
+            .collect();
         vec_to_list(&ptrs)
     }
 
     unsafe fn collect_i64(list: *mut u8) -> Vec<i64> {
-        list_to_vec(list).into_iter().map(|p| p as i64).collect()
+        list_to_vec(list)
+            .into_iter()
+            .map(|p| bhc_rts_alloc::object::int_of(p))
+            .collect()
     }
 
     unsafe fn collect_nested(list: *mut u8) -> Vec<Vec<i64>> {

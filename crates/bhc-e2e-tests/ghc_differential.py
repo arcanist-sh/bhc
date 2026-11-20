@@ -68,7 +68,11 @@ META = {"expected.txt", "stdin.txt", "test.toml"}
 #
 # Nothing belongs here that has not been diagnosed. "It fails and I do not know
 # why" is a red build, not an entry.
-KNOWN_FAILURES = {}
+KNOWN_FAILURES = {
+    "tier3_io/with_file": "GHC 9.8's withFile prefixes an exception raised in "
+    "its body with the file name and `withFile:`; bhc reports the exception "
+    "itself, as base did before",
+}
 
 
 def find_ghc():
@@ -149,7 +153,9 @@ def ghc_output(srcs, stdin):
         shutil.copy(s, os.path.join(GHC_WORK, os.path.basename(s)))
     names = [os.path.basename(s) for s in srcs]
     art = "ghc_out"
-    rc, _, err = run([GHC, "-v0", "-o", art, *names], GHC_WORK)
+    # A program GHC built may use a 6 GiB heap: past that it fails with a
+    # heap overflow instead of taking the CI runner's memory.
+    rc, _, err = run([GHC, "-v0", "-with-rtsopts=-M6g", "-o", art, *names], GHC_WORK)
     if rc != 0:
         return False, "", f"compile: {err.strip()[:200]}"
     rc, out, err = run([os.path.join(GHC_WORK, art)], GHC_WORK, stdin=stdin)
@@ -224,6 +230,9 @@ def main():
             cat = "KNOWN FAILURE NOW PASSES"
 
         cats[cat] = cats.get(cat, 0) + 1
+        # One line per fixture as it finishes, so a run that dies shows how
+        # far it got.
+        print(f"  {cat}: {name}", flush=True)
         if cat in ("DIVERGE", "bhc fails"):
             rows.append((cat, name, b_out, g_out, b_err))
         elif cat == "known failure":

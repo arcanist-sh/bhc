@@ -1,0 +1,11 @@
+("banana","apple")
+(2.5,-1.5)
+((1,'c'),[2,9])
+(7,'a',1180591620717411303424)
+(2.0,Just 1)
+LT
+LT
+EQ
+(False,True,Node (Node Leaf 2 Leaf) 3 (Node Leaf 4 Leaf))
+(LT,GT,True)
+([1.0,4.0,1.0,2.0],[1.0,3.0])

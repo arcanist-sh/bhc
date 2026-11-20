@@ -23,7 +23,6 @@ thiserror = { workspace = true }
 rustc-hash = { workspace = true }
 indexmap = { workspace = true }
 smallvec = { workspace = true }
-im = { workspace = true }
 stacker = { workspace = true }
 
 [dev-dependencies]

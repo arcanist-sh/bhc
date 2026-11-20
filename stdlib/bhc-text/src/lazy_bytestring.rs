@@ -13,7 +13,6 @@
 //!
 //! This matches GHC's `Empty | Chunk !StrictByteString LazyByteString`.
 
-use std::alloc::{self, Layout};
 use std::io::{Read, Write};
 
 use crate::bytestring::{alloc_bs_from_bytes, bs_bytes};
@@ -28,39 +27,29 @@ const LAZY_CHUNK_TAG: i64 = 1;
 
 /// Read the tag from a lazy value.
 pub(crate) unsafe fn lazy_tag(ptr: *const u8) -> i64 {
-    *(ptr as *const i64)
+    bhc_rts_alloc::object::tag(ptr)
 }
 
 /// Read the strict chunk pointer from a Chunk node (at offset 8).
 pub(crate) unsafe fn lazy_chunk(ptr: *const u8) -> *const u8 {
-    *((ptr as *const *const u8).add(1))
+    bhc_rts_alloc::object::field(ptr, 0) as *const u8
 }
 
 /// Read the rest pointer from a Chunk node (at offset 16).
 pub(crate) unsafe fn lazy_rest(ptr: *const u8) -> *const u8 {
-    *((ptr as *const *const u8).add(2))
+    bhc_rts_alloc::object::field(ptr, 1) as *const u8
 }
 
 /// Allocate an Empty lazy node (tag=0, 8 bytes).
 pub(crate) fn alloc_lazy_empty() -> *mut u8 {
-    let layout = Layout::from_size_align(8, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(LAZY_EMPTY_TAG);
-        ptr
-    }
+    // SAFETY: no fields.
+    unsafe { bhc_rts_alloc::object::alloc_con(LAZY_EMPTY_TAG, &[]) }
 }
 
 /// Allocate a Chunk lazy node (tag=1, 24 bytes).
 pub(crate) fn alloc_lazy_chunk(chunk: *mut u8, rest: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(LAZY_CHUNK_TAG);
-        (ptr as *mut *mut u8).add(1).write(chunk);
-        (ptr as *mut *mut u8).add(2).write(rest);
-        ptr
-    }
+    // SAFETY: the caller supplies a chunk and the rest of the lazy value.
+    unsafe { bhc_rts_alloc::object::alloc_con(LAZY_CHUNK_TAG, &[chunk, rest]) }
 }
 
 /// Collect all strict chunk byte slices from a lazy ByteString.
@@ -87,17 +76,18 @@ unsafe fn extract_path(path_ptr: *const u8) -> String {
         if current.is_null() {
             break;
         }
-        let tag = *(current as *const i64);
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+        let tag = bhc_rts_alloc::object::tag(current);
         if tag == 0 {
             break;
         }
-        let fields_base = (current as *const *const u8).add(1);
-        let head_raw = *fields_base;
-        let codepoint = head_raw as i64;
+        let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
+        let codepoint = i64::from(bhc_rts_alloc::object::char_of(head_raw));
         if let Some(c) = char::from_u32(codepoint as u32) {
             path_str.push(c);
         }
-        current = *fields_base.add(1);
+        current = bhc_rts_alloc::object::field(current, 1) as *const u8;
     }
     path_str
 }
@@ -119,43 +109,30 @@ unsafe fn flatten_to_bytes(ptr: *const u8) -> Vec<u8> {
 
 /// Allocate a Nil node (tag=0, 8 bytes).
 fn alloc_nil() -> *mut u8 {
-    let layout = Layout::from_size_align(8, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(0);
-        ptr
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::nil() }
 }
 
 /// Allocate a Cons node (tag=1, head, tail — 24 bytes).
 fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
-    let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-    unsafe {
-        let ptr = alloc::alloc(layout);
-        (ptr as *mut i64).write(1);
-        (ptr as *mut *mut u8).add(1).write(head);
-        (ptr as *mut *mut u8).add(2).write(tail);
-        ptr
-    }
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::cons(head, tail) }
 }
 
-// Handle sentinel constants (matching bhc-rts)
-const HANDLE_STDIN: usize = 1;
-const HANDLE_STDOUT: usize = 2;
-const HANDLE_STDERR: usize = 3;
+use bhc_rts_alloc::handle::{
+    Handle as BhcHandle, STDERR as HANDLE_STDERR, STDIN as HANDLE_STDIN, STDOUT as HANDLE_STDOUT,
+};
 
-/// Mirror of BhcHandle from bhc-rts.
-#[repr(C)]
-struct BhcHandle {
-    file: Option<std::fs::File>,
-    readable: bool,
-    writable: bool,
-    closed: bool,
+/// Which stream a handle is: 0 for an opened file (or null), otherwise one
+/// of the `HANDLE_STD*` numbers.
+fn handle_stream(handle: *mut u8) -> usize {
+    // SAFETY: every handle compiled code holds came from the runtime.
+    unsafe { bhc_rts_alloc::handle::stream(handle) }
 }
 
+/// Whether `handle` is one of the standard streams.
 fn is_sentinel(handle: *mut u8) -> bool {
-    let h = handle as usize;
-    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+    handle_stream(handle) != 0
 }
 
 // ============================================================
@@ -199,17 +176,19 @@ pub extern "C" fn bhc_lazy_bs_to_strict(lazy: *const u8) -> *mut u8 {
 
 /// Convert a BHC cons-list of strict ByteString values to lazy ByteString.
 #[no_mangle]
-pub extern "C" fn bhc_lazy_bs_from_chunks(list: *const u8) -> *mut u8 {
+pub extern "C" fn bhc_lazy_bs_from_chunks(mut list: *const u8) -> *mut u8 {
     if list.is_null() {
         return alloc_lazy_empty();
     }
     unsafe {
-        let tag = *(list as *const i64);
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        list = bhc_prelude::force_heap_object(list as *mut u8) as _;
+        let tag = bhc_rts_alloc::object::tag(list);
         if tag == 0 {
             return alloc_lazy_empty();
         }
-        let head = *((list as *const *const u8).add(1));
-        let tail = *((list as *const *const u8).add(2));
+        let head = bhc_rts_alloc::object::field(list, 0) as *const u8;
+        let tail = bhc_rts_alloc::object::field(list, 1) as *const u8;
         let rest = bhc_lazy_bs_from_chunks(tail);
         alloc_lazy_chunk(head as *mut u8, rest)
     }
@@ -280,13 +259,15 @@ pub extern "C" fn bhc_lazy_bs_pack(list: *const u8) -> *mut u8 {
             if current.is_null() {
                 break;
             }
-            let tag = *(current as *const i64);
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let head = *((current as *const *const u8).add(1));
+            let head = bhc_rts_alloc::object::field(current, 0) as *const u8;
             bytes.push(head as u8);
-            current = *((current as *const *const u8).add(2));
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
         }
     }
     let strict = alloc_bs_from_bytes(&bytes);
@@ -441,7 +422,12 @@ pub extern "C" fn bhc_lazy_bs_filter(
         let all_bytes = flatten_to_bytes(lazy);
         let filtered: Vec<u8> = all_bytes
             .iter()
-            .filter(|&&b| crate::text::pred_holds(fn_ptr(env_ptr, b as i64)))
+            .filter(|&&b| {
+                crate::text::pred_holds(fn_ptr(
+                    env_ptr,
+                    bhc_rts_alloc::object::word_of_int(i64::from(b)) as i64,
+                ))
+            })
             .copied()
             .collect();
         if filtered.is_empty() {
@@ -495,7 +481,7 @@ pub extern "C" fn bhc_lazy_bs_read_file(path_ptr: *const u8) -> *mut u8 {
             let empty = alloc_lazy_empty();
             alloc_lazy_chunk(strict, empty)
         }
-        Err(_) => alloc_lazy_empty(),
+        Err(e) => crate::io_error::raise(&path_str, "openBinaryFile", &e),
     }
 }
 
@@ -511,7 +497,9 @@ pub extern "C" fn bhc_lazy_bs_write_file(path_ptr: *const u8, lazy: *const u8) {
     } else {
         unsafe { flatten_to_bytes(lazy) }
     };
-    let _ = std::fs::write(&path_str, &bytes);
+    if let Err(e) = std::fs::write(&path_str, &bytes) {
+        crate::io_error::raise(&path_str, "withBinaryFile", &e);
+    }
 }
 
 /// Write a lazy ByteString to stdout.
@@ -540,7 +528,7 @@ pub extern "C" fn bhc_lazy_bs_h_put_str(handle: *mut u8, lazy: *const u8) {
     unsafe {
         let bytes = flatten_to_bytes(lazy);
         if is_sentinel(handle) {
-            let h = handle as usize;
+            let h = handle_stream(handle);
             if h == HANDLE_STDOUT {
                 let stdout = std::io::stdout();
                 let mut lock = stdout.lock();
@@ -571,7 +559,7 @@ pub extern "C" fn bhc_lazy_bs_h_get_contents(handle: *mut u8) -> *mut u8 {
     unsafe {
         let mut buf = Vec::new();
         if is_sentinel(handle) {
-            let h = handle as usize;
+            let h = handle_stream(handle);
             if h == HANDLE_STDIN {
                 let stdin = std::io::stdin();
                 let mut lock = stdin.lock();
@@ -607,13 +595,11 @@ pub extern "C" fn bhc_lazy_bs_char8_unpack(lazy: *const u8) -> *mut u8 {
         // Build cons-list from end
         let mut list = alloc_nil();
         for &b in bytes.iter().rev() {
-            // Char is stored as tagged int (codepoint as pointer)
-            let char_val = b as i64;
-            let layout = Layout::from_size_align(24, 8).expect("invalid layout");
-            let cons = alloc::alloc(layout);
-            (cons as *mut i64).write(1); // tag = 1 (Cons)
-            (cons as *mut *mut u8).add(1).write(char_val as *mut u8); // head = char as ptr
-            (cons as *mut *mut u8).add(2).write(list); // tail
+            // A Char in a value word
+            let cons = bhc_rts_alloc::object::cons(
+                bhc_rts_alloc::object::word_of_char(u32::from(b)),
+                list,
+            );
             list = cons;
         }
         list
@@ -658,14 +644,16 @@ pub extern "C" fn bhc_lazy_bs_char8_unlines(list: *const u8) -> *mut u8 {
             if current.is_null() {
                 break;
             }
-            let tag = *(current as *const i64);
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let head = *((current as *const *const u8).add(1));
+            let head = bhc_rts_alloc::object::field(current, 0) as *const u8;
             let bytes = flatten_to_bytes(head);
             parts.push(bytes);
-            current = *((current as *const *const u8).add(2));
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
         }
         if parts.is_empty() {
             return alloc_lazy_empty();
@@ -706,7 +694,10 @@ pub extern "C" fn bhc_lazy_bs_char8_drop_while(
         let bytes = flatten_to_bytes(lazy);
         let mut skip = 0;
         for &b in &bytes {
-            if crate::text::pred_holds(fn_ptr(env_ptr, b as i64)) {
+            if crate::text::pred_holds(fn_ptr(
+                env_ptr,
+                bhc_rts_alloc::object::word_of_int(i64::from(b)) as i64,
+            )) {
                 skip += 1;
             } else {
                 break;

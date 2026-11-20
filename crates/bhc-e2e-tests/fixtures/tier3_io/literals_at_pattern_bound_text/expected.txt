@@ -1,0 +1,7 @@
+Opts {lineAnchors = False, numberLines = True, classCount = 2}
+Opts {lineAnchors = True, numberLines = False, classCount = 1}
+Opts {lineAnchors = False, numberLines = False, classCount = 0}
+(False,True,False)
+(True,False,True)
+(True,False)
+(False,True)

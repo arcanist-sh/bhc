@@ -68,7 +68,6 @@ mod unify;
 
 pub use context::TyCtxt;
 pub use env::{DataConInfo, TypeEnv};
-pub use kind_check::KindEnv;
 
 use bhc_diagnostics::Diagnostic;
 use bhc_hir::{DefId, Module};
@@ -105,6 +104,14 @@ pub struct TypedModule {
     pub resolved_expr_types: FxHashMap<Span, Ty>,
     /// Type schemes for each definition (indexed by `DefId`).
     pub def_schemes: FxHashMap<DefId, Scheme>,
+    /// The type of every variable a pattern binds (lambda parameters, case
+    /// and let patterns, function arguments), with the final substitution
+    /// applied to a fixpoint and type families reduced.
+    ///
+    /// Kept apart from [`def_schemes`](Self::def_schemes), which lowering
+    /// consults to decide how a definition is called: these say only what a
+    /// binder holds (#94, #95).
+    pub binder_types: FxHashMap<DefId, Ty>,
     /// Type synonyms in scope at this module's compilation (local + imported),
     /// mapping the synonym name to its `(parameters, right-hand side)`. Exposed
     /// so interface generation can expand synonyms in exported signatures,
@@ -816,9 +823,30 @@ pub fn type_check_module_with_imports(
         }
     }
 
+    // The types this module declares, for the missing-instance check.
+    for item in &hir.items {
+        match item {
+            bhc_hir::Item::Data(data) => {
+                ctx.local_types.entry(data.name).or_default();
+            }
+            bhc_hir::Item::Newtype(newtype) => {
+                ctx.local_types.entry(newtype.name).or_default();
+            }
+            _ => {}
+        }
+    }
+    for item in &hir.items {
+        if let bhc_hir::Item::StandaloneDeriving(sd) = item {
+            if let Some(classes) = ctx.local_types.get_mut(&sd.type_name) {
+                classes.push(sd.class);
+            }
+        }
+    }
+
     // Register type classes and instances
     for item in &hir.items {
         if let bhc_hir::Item::Class(class) = item {
+            ctx.local_classes.insert(class.name);
             ctx.register_class(class);
         }
     }
@@ -852,6 +880,9 @@ pub fn type_check_module_with_imports(
         }
     }
 
+    // Every type the module writes must be well-kinded.
+    kind_check::check_module_kinds(&mut ctx, hir);
+
     // Compute binding groups (SCCs) for mutual recursion
     let groups = binding_groups::compute_binding_groups(&hir.items);
 
@@ -862,11 +893,21 @@ pub fn type_check_module_with_imports(
 
     // Solve type class constraints (defaults ambiguous type variables)
     ctx.solve_constraints();
+    ctx.check_class_ops_not_at_functions();
+    ctx.check_class_method_instances();
 
     if ctx.has_errors() {
         Err(ctx.take_diagnostics())
     } else {
-        Ok(ctx.into_typed_module(hir.clone()))
+        let saw_error_expr = ctx.saw_error_expr;
+        let typed = ctx.into_typed_module(hir.clone());
+        // `Ty::Error` unifies with anything, so it must only stand for a
+        // type the checker has already reported an error about (#97).
+        debug_assert!(
+            saw_error_expr || typed.expr_types.values().all(|ty| !contains_error_type(ty)),
+            "a module with no type errors has an expression of type `Ty::Error`"
+        );
+        Ok(typed)
     }
 }
 
@@ -908,6 +949,19 @@ pub fn main_action_error(typed: &TypedModule, file_id: FileId) -> Option<Diagnos
         .with_code("E0001")
         .with_label(FullSpan::new(file_id, def.span), "expected `IO t`")
     })
+}
+
+/// Whether `ty` contains `Ty::Error`, the type of an expression whose error
+/// has been reported.
+fn contains_error_type(ty: &Ty) -> bool {
+    match ty {
+        Ty::Error => true,
+        Ty::App(a, b) | Ty::Fun(a, b) => contains_error_type(a) || contains_error_type(b),
+        Ty::List(elem) => contains_error_type(elem),
+        Ty::Tuple(elems) => elems.iter().any(contains_error_type),
+        Ty::Forall(_, body) => contains_error_type(body),
+        Ty::Var(_) | Ty::Con(_) | Ty::Prim(_) | Ty::Nat(_) | Ty::TyList(_) => false,
+    }
 }
 
 #[cfg(test)]

@@ -1055,3 +1055,58 @@ fn test_tier3_file_append_roundtrip_wasm() {
 fn test_tier3_show_string_list_wasm() {
     run_wasm_test("tier3_io/show_string_list", Profile::Default);
 }
+
+// A `Monad m =>` function called at IO selects the IO dictionary's methods
+// as values (#65).
+#[test]
+fn test_tier3_monad_poly_recursive_bind_wasm() {
+    run_wasm_test("tier3_io/monad_poly_recursive_bind", Profile::Default);
+}
+
+// `show` of a Maybe that a call returns renders its payload by type, and
+// `fmap` over one takes the Maybe arm.
+#[test]
+fn test_tier2_maybe_show_results_wasm() {
+    run_wasm_test("tier2_functions/maybe_show_results", Profile::Default);
+}
+
+// A top-level infix definition whose left operand is a constructor pattern.
+#[test]
+fn test_tier2_infix_constructor_lhs_wasm() {
+    run_wasm_test("tier2_functions/infix_constructor_lhs", Profile::Default);
+}
+
+// Numeric conversions bound locally: `where w = fromInteger n` and a
+// let-bound `fromIntegral k` used as a Double.
+#[test]
+fn test_tier2_local_numeric_conversion_wasm() {
+    run_wasm_test("tier2_functions/local_numeric_conversion", Profile::Default);
+}
+
+/// A program that uses a function the WASM backend does not implement must
+/// not compile: it used to get the constant 0 in its place (#99).
+#[test]
+fn test_rejected_unimplemented_function_wasm() {
+    let path = bhc_e2e_tests::fixtures_dir()
+        .join("rejected")
+        .join("wasm_unimplemented_function.hs");
+    let out = tempfile::tempdir().expect("temporary directory");
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--", "--target=wasi"])
+        .arg(&path)
+        .arg("-o")
+        .arg(out.path().join("program.wasm"))
+        .env_remove("BHC_ALLOW_STUBS")
+        .output()
+        .expect("failed to run the compiler");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "the program was built:\n{text}");
+    assert!(
+        text.contains("not implemented by the WASM backend: doesFileExist"),
+        "the program was rejected, but not for doesFileExist:\n{text}"
+    );
+}

@@ -23,26 +23,35 @@ use bhc_span::Span;
 
 /// Expand recognized TH declaration splices in `decls`, returning a new decl
 /// list with each recognized `$(deriver ...)` replaced by the declarations it
-/// generates. Unrecognized splices are dropped (matching the prior "ignored"
-/// behavior). If there are no splices, the input is returned unchanged.
+/// generates, and the splices that were not recognized as `(name, span)`,
+/// where `name` is the function the splice applies (`deriveJSON`). Those are
+/// dropped; the caller reports them, so what they would have generated is not
+/// missing silently (#99). If there are no splices, the input is returned
+/// unchanged.
 #[must_use]
-pub fn expand_th_splices(decls: Vec<Decl>) -> Vec<Decl> {
+pub fn expand_th_splices(decls: Vec<Decl>) -> (Vec<Decl>, Vec<(String, Span)>) {
     if !decls.iter().any(|d| matches!(d, Decl::Splice(_, _))) {
-        return decls;
+        return (decls, Vec::new());
     }
     let mut out: Vec<Decl> = Vec::with_capacity(decls.len());
+    let mut skipped = Vec::new();
     for decl in &decls {
         match decl {
-            Decl::Splice(body, _) => {
+            Decl::Splice(body, span) => {
                 if let Some(generated) = try_expand_splice(body, &decls) {
                     out.extend(generated);
+                } else {
+                    let name = match app_spine(body).0 {
+                        Expr::Var(v, _) => v.name.as_str().to_string(),
+                        _ => "a declaration splice".to_string(),
+                    };
+                    skipped.push((name, *span));
                 }
-                // Unrecognized splice: drop it (no-op).
             }
             other => out.push(other.clone()),
         }
     }
-    out
+    (out, skipped)
 }
 
 /// Decompose a curried application into `(head, args)` left-to-right.

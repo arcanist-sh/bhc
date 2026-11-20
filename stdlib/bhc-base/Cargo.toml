@@ -13,6 +13,7 @@ description = "Base library for BHC: Data.*, Control.*, System.* modules"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
+bhc-rts-alloc = { workspace = true }
 bhc-prelude = { version = "0.2.3", path = "../bhc-prelude" }
 
 [dev-dependencies]

@@ -49,6 +49,9 @@ mod report;
 
 pub use report::ComprehensiveKernelReport;
 
+/// Allow runtime stubs for what bhc does not implement (`--allow-stubs`).
+pub use bhc_codegen::set_allow_stubs;
+
 use bhc_ast::Module as AstModule;
 use bhc_codegen::{
     llvm::{
@@ -1634,6 +1637,7 @@ impl Compiler {
             Some(&typed.resolved_expr_types),
             imports,
             Some(&typed.type_aliases),
+            Some(&typed.binder_types),
         )
         .map_err(CompileError::from)?;
 
@@ -1740,7 +1744,14 @@ impl Compiler {
         // Copies of class-polymorphic bindings at representation-sensitive
         // types (`sq :: Num a => …` at `Integer`; #57). Same span-keyed types,
         // so it also runs before the simplifier.
-        if loaded_bodies.is_none() && mentions_numeric {
+        // A library body that shows a value is copied at any concrete type
+        // (see `numeric_specialize`), so the bodies are also wanted when the
+        // module calls an imported `Show`-constrained function. Loading them
+        // for every module with imports made the pandoc chain ten times
+        // slower.
+        if loaded_bodies.is_none()
+            && (mentions_numeric || Self::calls_imported_show_poly(&core, lower_ctx))
+        {
             let (bodies, _, imported_cons) = self.load_imported_core_bodies(hir);
             // A copy may build the source module's private constructors.
             for con in imported_cons {
@@ -1905,6 +1916,53 @@ impl Compiler {
     }
 
     /// Whether `ty` mentions `Integer`, `Double`, `Float` or `Rational`.
+    /// Whether `core` refers to an imported value whose interface scheme is
+    /// constrained by `Show`, by name. A false positive only costs loading
+    /// the imported bodies.
+    fn calls_imported_show_poly(core: &CoreModule, lower_ctx: &LowerContext) -> bool {
+        let shown: FxHashSet<Symbol> = lower_ctx
+            .defs
+            .values()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    bhc_lower::DefKind::ImportedValue | bhc_lower::DefKind::Value
+                ) && d
+                    .type_scheme
+                    .as_ref()
+                    .is_some_and(|s| s.constraints.iter().any(|c| c.class.as_str() == "Show"))
+            })
+            .map(|d| d.name)
+            .collect();
+        if shown.is_empty() {
+            return false;
+        }
+        fn walk(e: &Expr, shown: &FxHashSet<Symbol>) -> bool {
+            match e {
+                Expr::Var(v, _) => shown.contains(&v.name),
+                Expr::App(f, x, _) => walk(f, shown) || walk(x, shown),
+                Expr::TyApp(f, _, _)
+                | Expr::Lam(_, f, _)
+                | Expr::TyLam(_, f, _)
+                | Expr::Lazy(f, _)
+                | Expr::Cast(f, _, _)
+                | Expr::Tick(_, f, _) => walk(f, shown),
+                Expr::Let(bind, body, _) => walk_bind(bind, shown) || walk(body, shown),
+                Expr::Case(scrut, alts, _, _) => {
+                    walk(scrut, shown) || alts.iter().any(|a| walk(&a.rhs, shown))
+                }
+                _ => false,
+            }
+        }
+        fn walk_bind(bind: &Bind, shown: &FxHashSet<Symbol>) -> bool {
+            match bind {
+                Bind::NonRec(_, e) => walk(e, shown),
+                Bind::Rec(bs) => bs.iter().any(|(_, e)| walk(e, shown)),
+            }
+        }
+        core.bindings.iter().any(|b| walk_bind(b, &shown))
+    }
+
     fn mentions_numeric_ty(ty: &bhc_types::Ty) -> bool {
         use bhc_types::Ty;
         match ty {
@@ -4582,14 +4640,9 @@ impl Compiler {
                             ))
                         })
                     {
-                        // A parameterless type's constructor keeps fresh field
-                        // types (pinning them all broke checking elsewhere) —
-                        // except an `Integer` field (a literal argument must
-                        // be typed `Integer` to be built as a bignum:
-                        // `ModifiedJulianDay 0` stored a raw 0) and a ground
-                        // field mentioning `Text` (pandoc's `Header _ attr _`
-                        // pattern left `attr`'s key-value list untyped, and
-                        // its comparison fell back to comparing pointers).
+                        // A parameterless type's constructor has its declared
+                        // field types (see `pinnable_field`); a field that
+                        // still converts with a variable keeps a fresh one.
                         let mut quantified = Vec::new();
                         let mut field_tys = Vec::with_capacity(con.fields.len());
                         for (i, f) in con.fields.iter().enumerate() {
@@ -5045,21 +5098,27 @@ impl Compiler {
                 .with_library_path(Utf8PathBuf::from_path_buf(release_path).unwrap_or_default());
         }
 
-        // Add the BHC RTS library
-        // The RTS provides: bhc_init, bhc_rts_init, bhc_shutdown, bhc_alloc, etc.
-        config = config.with_library(LinkLibrary::named("bhc_rts"));
-
-        // Add the BHC Text library
-        // Provides: bhc_text_pack, bhc_text_unpack, bhc_text_append, etc.
-        config = config.with_library(LinkLibrary::named("bhc_text"));
-
-        // Add the BHC Base library
-        // Provides: bhc_char_is_alpha, bhc_char_is_digit, bhc_char_to_upper, etc.
-        config = config.with_library(LinkLibrary::named("bhc_base"));
-
-        // Add the BHC Containers library
-        // Provides: bhc_map_empty, bhc_map_insert, bhc_map_lookup, bhc_set_* etc.
-        config = config.with_library(LinkLibrary::named("bhc_containers"));
+        // The BHC runtime and standard library archives. Each is linked by
+        // the path of its static archive when a search directory has one:
+        // the stdlib crates are also built as shared libraries, and `-l`
+        // prefers `libbhc_text.so` (or `.dylib`) next to the archive, which
+        // the program then cannot find when it runs unless the loader's path
+        // happens to include that directory (CI's coverage build exited with
+        // 127). The RTS provides bhc_init, bhc_alloc, …; text, base and
+        // containers provide the Text, Char and Map/Set primitives.
+        for name in ["bhc_rts", "bhc_text", "bhc_base", "bhc_containers"] {
+            let archive = format!("lib{name}.a");
+            let library = config
+                .library_paths
+                .iter()
+                .map(|dir| dir.join(&archive))
+                .find(|path| path.exists())
+                .map_or_else(
+                    || LinkLibrary::named(name),
+                    |path| LinkLibrary::with_path(name, path),
+                );
+            config = config.with_library(library);
+        }
 
         // Add system libraries needed by the RTS
         #[cfg(target_os = "linux")]
@@ -7373,27 +7432,16 @@ fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
 }
 
 /// Whether an imported constructor field's real type is kept (see the
-/// parameterless-type constructor scheme): ground and `Integer`, or ground and
-/// mentioning `Text`.
+/// parameterless-type constructor scheme): any field without a type variable.
+///
+/// This was once only `Integer` and plain `Text` shapes, because a field
+/// naming another data type rejected Text.Pandoc.Parsing.GridTable. The
+/// checker has since caught up (all of Pandoc checks with every such field
+/// kept), and the placeholder cost more than it saved: a variable bound by
+/// matching `Plain xs` had no type, so pandoc-types' `walkBlockM` could not
+/// tell its seven `Walkable` dictionaries apart and took the last.
 fn pinnable_field(ty: &bhc_types::Ty) -> bool {
-    // Only plain data shapes: pinning a field that mentions another data
-    // type (a `[Block]`, an external package's type) rejected
-    // Text.Pandoc.Parsing.GridTable, which the placeholder let through.
-    fn plain_shape(ty: &bhc_types::Ty) -> bool {
-        use bhc_types::Ty;
-        match ty {
-            Ty::Con(c) => {
-                matches!(
-                    c.name.as_str(),
-                    "Text" | "Int" | "Integer" | "Bool" | "Char" | "Double"
-                ) || c.name.as_str().ends_with(".Text")
-            }
-            Ty::List(e) => plain_shape(e),
-            Ty::Tuple(es) => es.iter().all(plain_shape),
-            _ => false,
-        }
-    }
-    !ty_has_vars(ty) && (ty_is_integer(ty) || (ty_mentions_text(ty) && plain_shape(ty)))
+    !ty_has_vars(ty)
 }
 
 /// Expand a parameterless interface type synonym (`Attr`), once.
@@ -8086,6 +8134,81 @@ exposed-modules: Data.Text Data.Text.Internal
             })
             .collect();
         assert_eq!(missing, ["Foo.Bar.Baz"]);
+    }
+
+    /// An import list naming something the module does not export warns
+    /// (GHC rejects it; bhc accepted it silently), and names it does export,
+    /// including a type known only through its constructors, do not.
+    #[test]
+    fn test_import_of_unexported_name_warns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("A.hs"),
+            "module A (Color(..), Shape(Circle), area) where\n\
+             data Color = Red | Green\n\
+             data Shape = Circle Int | Square Int\n\
+             area :: Shape -> Int\n\
+             area (Circle r) = r\n\
+             area (Square s) = s\n",
+        )
+        .unwrap();
+        let src = "import A (Color(..), Shape(..), area, Hidden, hidden)\nmain = print (area (Circle 2))\n";
+        let unit = CompilationUnit::from_source("Main", src);
+        let compiler = CompilerBuilder::new()
+            .import_path(Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap())
+            .build()
+            .unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let missing: Vec<&str> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::NotExported { module, name, .. } => {
+                    assert_eq!(module, "A");
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(missing, ["Hidden", "hidden"]);
+    }
+
+    /// A Template Haskell splice bhc does not recognize, and a `deriving`
+    /// of a standard class it cannot derive, each warn instead of leaving
+    /// the declarations or instance missing silently (#99). A recognized
+    /// splice and `deriving Typeable` (which every type has) do not warn.
+    #[test]
+    fn test_skipped_splice_and_underivable_class_warn() {
+        let src = "{-# LANGUAGE TemplateHaskell, DeriveDataTypeable #-}\n\
+                   import Data.Data (Data, Typeable)\n\
+                   data R = R { _rx :: Int } deriving (Show, Typeable)\n\
+                   data T = A | B deriving (Eq, Data)\n\
+                   makeThing :: Int -> Int\n\
+                   makeThing = id\n\
+                   $(makeLenses ''R)\n\
+                   $(makeThing 3)\n\
+                   main :: IO ()\n\
+                   main = print (R 1)\n";
+        let unit = CompilationUnit::from_source("Main", src);
+        let compiler = CompilerBuilder::new().build().unwrap();
+        let ast = compiler.parse(&unit, FileId::new(0)).unwrap();
+        let (_hir, ctx) = compiler.lower(&ast).unwrap();
+        let mut reported: Vec<String> = ctx
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                bhc_lower::LowerWarning::SpliceSkipped { name, .. } => {
+                    Some(format!("splice {name}"))
+                }
+                bhc_lower::LowerWarning::DerivingUnsupported { class, .. } => {
+                    Some(format!("deriving {class}"))
+                }
+                _ => None,
+            })
+            .collect();
+        reported.sort();
+        assert_eq!(reported, ["deriving Data", "splice makeThing"]);
     }
 
     /// The interpreter forces `fst`/`snd` components and evaluates floating

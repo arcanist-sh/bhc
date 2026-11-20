@@ -54,6 +54,12 @@ struct Cli {
     #[arg(long)]
     kernel_report: bool,
 
+    /// Compile a program that uses something bhc does not implement, with a
+    /// runtime abort in its place, instead of failing to compile it.
+    /// `BHC_ALLOW_STUBS=1` has the same effect.
+    #[arg(long = "allow-stubs", global = true)]
+    allow_stubs: bool,
+
     /// Explicitly enable the tensor fusion pipeline (regardless of profile).
     /// The Numeric profile always fuses; accepted for toolchain compatibility.
     #[arg(long = "tensor-fusion", global = true)]
@@ -280,6 +286,9 @@ fn real_main() -> Result<()> {
     }
     // Validate --dump-ir/--emit up front so a bad value fails before compiling.
     dump_options(&cli)?;
+    if cli.allow_stubs {
+        bhc_driver::set_allow_stubs(true);
+    }
     if cli.edition.is_some() {
         eprintln!("warning: --edition has no effect yet; all modules use bhc's defaults");
     }
@@ -877,10 +886,11 @@ fn start_repl(cli: &Cli) -> Result<()> {
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
     if !bhci_exe.exists() {
-        // Release archives ship only `bhc` so far (#50).
+        // Release archives ship `bhci` from v0.2.30 on (#50); an older install
+        // or a source build of `bhc` alone lacks it.
         anyhow::bail!(
-            "the REPL needs `bhci` next to `bhc` ({} is missing); release builds do not \
-             include it yet, so build it from source with `cargo build --release -p bhci` \
+            "the REPL needs `bhci` next to `bhc` ({} is missing); reinstall a release \
+             from v0.2.30 on, or build it from source with `cargo build --release -p bhci` \
              and copy target/release/bhci next to bhc",
             bhci_exe.display()
         );

@@ -9,10 +9,11 @@
 //! A BhcText is laid out as:
 //!
 //! ```text
-//! [u64 data_ptr][u64 offset][u64 byte_len][...UTF-8 bytes...]
+//! [i64 kind][u64 data_ptr][u64 offset][u64 byte_len][...UTF-8 bytes...]
 //! ```
 //!
-//! The header is 24 bytes. `data_ptr` points to the start of the
+//! The header is 32 bytes and is stated in `bhc_rts_alloc::object`, which
+//! this module reads and writes it through. `data_ptr` points to the start of the
 //! byte buffer (which may be shared across slices). For self-contained
 //! texts, `data_ptr` points to `header + HEADER_SIZE`.
 
@@ -20,10 +21,12 @@ use std::alloc::{self, Layout};
 use std::ptr;
 use std::str;
 
+use bhc_rts_alloc::object;
+
 use crate::simd::{bhc_ascii_to_lower, bhc_ascii_to_upper, bhc_is_ascii, bhc_text_find_substring};
 
-/// Header: data_ptr (8) + offset (8) + byte_len (8) = 24 bytes.
-pub(crate) const HEADER_SIZE: usize = 24;
+/// The header before a text's own bytes.
+pub(crate) const HEADER_SIZE: usize = object::BYTES_HEADER;
 
 // ============================================================
 // Internal helpers
@@ -31,21 +34,26 @@ pub(crate) const HEADER_SIZE: usize = 24;
 
 /// Read the data pointer from a BhcText header.
 unsafe fn text_data_ptr(text: *const u8) -> *const u8 {
-    *(text as *const *const u8)
+    object::bytes_buffer(text)
 }
 
 /// Read the byte offset from a BhcText header.
 unsafe fn text_offset(text: *const u8) -> usize {
-    *((text as *const u64).add(1)) as usize
+    object::bytes_offset(text)
 }
 
 /// Read the byte length from a BhcText header.
 unsafe fn text_byte_len(text: *const u8) -> usize {
-    *((text as *const u64).add(2)) as usize
+    object::bytes_len(text)
 }
 
 /// Get a slice view of the text's active bytes.
+///
+/// The Text may still be a thunk: an element of a list built lazily
+/// (`map tshow (zipWith f [k ..] xs)`) reaches `T.concat` or
+/// `T.intercalate` unevaluated, and its words were read as a Text's.
 pub(crate) unsafe fn text_bytes(text: *const u8) -> &'static [u8] {
+    let text = bhc_prelude::force_heap_object(text.cast_mut()).cast_const();
     let data = text_data_ptr(text);
     let off = text_offset(text);
     let len = text_byte_len(text);
@@ -68,13 +76,9 @@ pub(crate) fn alloc_text_from_bytes(bytes: &[u8]) -> *mut u8 {
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        // data_ptr = ptr + HEADER_SIZE
+        // The bytes follow the header, and the header points at them.
         let data_start = ptr.add(HEADER_SIZE);
-        (ptr as *mut *mut u8).write(data_start);
-        // offset = 0
-        (ptr as *mut u64).add(1).write(0);
-        // byte_len = bytes.len()
-        (ptr as *mut u64).add(2).write(bytes.len() as u64);
+        object::init_bytes(ptr, data_start, 0, bytes.len());
         // Copy data
         if !bytes.is_empty() {
             ptr::copy_nonoverlapping(bytes.as_ptr(), data_start, bytes.len());
@@ -94,9 +98,7 @@ fn alloc_text_slice(source_data_ptr: *const u8, offset: usize, byte_len: usize) 
         if ptr.is_null() {
             return ptr::null_mut();
         }
-        (ptr as *mut *const u8).write(source_data_ptr);
-        (ptr as *mut u64).add(1).write(offset as u64);
-        (ptr as *mut u64).add(2).write(byte_len as u64);
+        object::init_bytes(ptr, source_data_ptr, offset, byte_len);
         ptr
     }
 }
@@ -361,8 +363,9 @@ pub extern "C" fn bhc_text_map(
         let s = text_as_str(text);
         let mut result = String::with_capacity(s.len());
         for c in s.chars() {
-            let mapped = fn_ptr(env_ptr, c as i64);
-            let mapped_char = char::from_u32(mapped as u32).unwrap_or('\u{FFFD}');
+            let mapped = fn_ptr(env_ptr, char_word(c));
+            let mapped_char =
+                char::from_u32(object::char_of(mapped as *const u8)).unwrap_or('\u{FFFD}');
             result.push(mapped_char);
         }
         alloc_text_from_bytes(result.as_bytes())
@@ -667,20 +670,21 @@ pub extern "C" fn bhc_text_pack(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 // Nil
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let head_raw = *fields_base;
-            // Head is a Char encoded as a pointer (boxed int)
-            let codepoint = head_raw as i64;
+            let head_raw = bhc_rts_alloc::object::field(current, 0) as *const u8;
+            // Head is a Char in a value word
+            let codepoint = i64::from(object::char_of(head_raw));
             let c = char::from_u32(codepoint as u32).unwrap_or('\u{FFFD}');
             result.push(c);
             // Tail
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -776,8 +780,8 @@ pub extern "C" fn bhc_text_filter(
         let s = text_as_str(text);
         let mut result = String::with_capacity(s.len());
         for c in s.chars() {
-            let keep = fn_ptr(env_ptr, c as i64);
-            if keep != 0 {
+            let keep = fn_ptr(env_ptr, char_word(c));
+            if pred_holds(keep) {
                 result.push(c);
             }
         }
@@ -803,7 +807,7 @@ pub extern "C" fn bhc_text_foldl(
         let s = text_as_str(text);
         let mut acc = init;
         for c in s.chars() {
-            acc = fn_ptr(env_ptr, acc, c as i64);
+            acc = fn_ptr(env_ptr, acc, char_word(c));
         }
         acc
     }
@@ -821,17 +825,18 @@ pub extern "C" fn bhc_text_concat(list_ptr: *const u8) -> *mut u8 {
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
             // Cons: tag == 1, fields at offset 8
-            let fields_base = (current as *const *const u8).add(1);
-            let text_ptr = *fields_base;
+            let text_ptr = bhc_rts_alloc::object::field(current, 0) as *const u8;
             if !text_ptr.is_null() {
                 combined.extend_from_slice(text_bytes(text_ptr));
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -856,18 +861,19 @@ pub extern "C" fn bhc_text_intercalate(sep: *const u8, list_ptr: *const u8) -> *
     let mut current = list_ptr;
     unsafe {
         loop {
-            let tag = *(current as *const i64);
+            // A cell may be a thunk: a lazily built list yields its tail on demand.
+            current = bhc_prelude::force_heap_object(current as *mut u8) as _;
+            let tag = bhc_rts_alloc::object::tag(current);
             if tag == 0 {
                 break;
             }
-            let fields_base = (current as *const *const u8).add(1);
-            let text_ptr = *fields_base;
+            let text_ptr = bhc_rts_alloc::object::field(current, 0) as *const u8;
             if !text_ptr.is_null() {
                 parts.push(text_bytes(text_ptr));
             } else {
                 parts.push(&[]);
             }
-            current = *fields_base.add(1);
+            current = bhc_rts_alloc::object::field(current, 1) as *const u8;
             if current.is_null() {
                 break;
             }
@@ -906,22 +912,12 @@ pub extern "C" fn bhc_text_strip(text: *const u8) -> *mut u8 {
 /// Helper to build a BHC cons-list of Text values from a vector of byte slices.
 unsafe fn build_text_list(parts: &[&[u8]]) -> *mut u8 {
     // Build from the end: start with Nil, then prepend each element
-    let mut list: *mut u8 = {
-        // Nil: tag=0, no fields -> 8 bytes
-        let layout = std::alloc::Layout::from_size_align(8, 8).expect("invalid layout");
-        let ptr = std::alloc::alloc(layout);
-        (ptr as *mut i64).write(0); // tag = 0 (Nil)
-        ptr
-    };
+    let mut list: *mut u8 = bhc_rts_alloc::object::nil();
 
     for part in parts.iter().rev() {
         let text = alloc_text_from_bytes(part);
         // Cons: tag=1, fields[0]=text, fields[1]=tail -> 24 bytes (tag + 2 ptrs)
-        let layout = std::alloc::Layout::from_size_align(24, 8).expect("invalid layout");
-        let cons = std::alloc::alloc(layout);
-        (cons as *mut i64).write(1); // tag = 1 (Cons)
-        (cons as *mut *mut u8).add(1).write(text); // field 0 = head
-        (cons as *mut *mut u8).add(2).write(list); // field 1 = tail
+        let cons = bhc_rts_alloc::object::cons(text, list);
         list = cons;
     }
     list
@@ -977,7 +973,7 @@ pub extern "C" fn bhc_text_split(
         let mut pieces: Vec<&[u8]> = Vec::new();
         let mut start = 0usize;
         for (i, c) in s.char_indices() {
-            if pred_holds(fn_ptr(env_ptr, c as i64)) {
+            if pred_holds(fn_ptr(env_ptr, char_word(c))) {
                 pieces.push(&bytes[start..i]);
                 start = i + c.len_utf8();
             }
@@ -1052,25 +1048,21 @@ unsafe fn collect_text_list(list: *const u8) -> Vec<*const u8> {
     let mut out = Vec::new();
     let mut cur = list;
     while !cur.is_null() {
-        let tag = *(cur as *const i64);
+        // A cell may be a thunk: a lazily built list yields its tail on demand.
+        cur = bhc_prelude::force_heap_object(cur as *mut u8) as _;
+        let tag = bhc_rts_alloc::object::tag(cur);
         if tag == 0 {
             break;
         }
-        out.push(*(cur as *const *const u8).add(1));
-        cur = *(cur as *const *const u8).add(2);
+        out.push(bhc_rts_alloc::object::field(cur, 0) as *const u8);
+        cur = bhc_rts_alloc::object::field(cur, 1) as *const u8;
     }
     out
 }
 
 unsafe fn alloc_adt(tag: i64, fields: &[*mut u8]) -> *mut u8 {
-    let size = 8 + fields.len() * 8;
-    let layout = std::alloc::Layout::from_size_align(size, 8).expect("invalid layout");
-    let ptr = std::alloc::alloc(layout);
-    (ptr as *mut i64).write(tag);
-    for (i, f) in fields.iter().enumerate() {
-        (ptr as *mut *mut u8).add(1 + i).write(*f);
-    }
-    ptr
+    // SAFETY: forwarded to the caller; see `bhc_rts_alloc::object`.
+    unsafe { bhc_rts_alloc::object::alloc_con(tag, fields) }
 }
 
 /// `T.unlines`: join a cons-list of Texts, appending '\n' after each.
@@ -1153,7 +1145,7 @@ pub extern "C" fn bhc_text_uncons(text: *const u8) -> *mut u8 {
             None => alloc_adt(0, &[]),
             Some(c) => {
                 let rest = alloc_text_from_bytes(&s.as_bytes()[c.len_utf8()..]);
-                let pair = alloc_adt(0, &[c as i64 as *mut u8, rest]);
+                let pair = alloc_adt(0, &[object::word_of_char(c as u32), rest]);
                 alloc_adt(1, &[pair])
             }
         }
@@ -1172,7 +1164,7 @@ pub extern "C" fn bhc_text_unsnoc(text: *const u8) -> *mut u8 {
             None => alloc_adt(0, &[]),
             Some(c) => {
                 let head = alloc_text_from_bytes(&s.as_bytes()[..s.len() - c.len_utf8()]);
-                let pair = alloc_adt(0, &[head, c as i64 as *mut u8]);
+                let pair = alloc_adt(0, &[head, object::word_of_char(c as u32)]);
                 alloc_adt(1, &[pair])
             }
         }
@@ -1257,12 +1249,13 @@ pub extern "C" fn bhc_text_intersperse(c: i64, text: *const u8) -> *mut u8 {
 /// hold for pandoc's `strToHtml`, whose `isSpecial` falls back to a boxed
 /// `False`.
 pub(crate) fn pred_holds(v: i64) -> bool {
-    if (0..=1).contains(&v) {
-        return v != 0;
-    }
-    // SAFETY: values above 1 are heap pointers to an evaluated Bool
-    // constructor; its tag (0 = False, 1 = True) is the first word.
-    unsafe { *(v as *const i64) != 0 }
+    // SAFETY: a predicate answers 0, 1 or a pointer to an evaluated `Bool`.
+    unsafe { object::bool_of(v as *const u8) }
+}
+
+/// The value word for a `Char`, as the `i64` a closure's code takes.
+pub(crate) fn char_word(c: char) -> i64 {
+    object::word_of_char(c as u32) as i64
 }
 
 /// `T.any p t`.
@@ -1278,7 +1271,7 @@ pub extern "C" fn bhc_text_any(
     unsafe {
         text_as_str(text)
             .chars()
-            .any(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
+            .any(|c| pred_holds(fn_ptr(env_ptr, char_word(c)))) as i64
     }
 }
 
@@ -1295,7 +1288,7 @@ pub extern "C" fn bhc_text_all(
     unsafe {
         text_as_str(text)
             .chars()
-            .all(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
+            .all(|c| pred_holds(fn_ptr(env_ptr, char_word(c)))) as i64
     }
 }
 
@@ -1312,7 +1305,7 @@ unsafe fn split_at_pred(
     let s = text_as_str(text);
     let mut idx = s.len();
     for (i, c) in s.char_indices() {
-        let hit = pred_holds(fn_ptr(env_ptr, c as i64));
+        let hit = pred_holds(fn_ptr(env_ptr, char_word(c)));
         if hit == stop_when {
             idx = i;
             break;
@@ -1336,7 +1329,7 @@ pub extern "C" fn bhc_text_break(
         let s = text_as_str(text);
         let mut idx = s.len();
         for (i, c) in s.char_indices() {
-            if pred_holds(fn_ptr(env_ptr, c as i64)) {
+            if pred_holds(fn_ptr(env_ptr, char_word(c))) {
                 idx = i;
                 break;
             }
@@ -1414,7 +1407,7 @@ pub extern "C" fn bhc_text_drop_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
+            if !pred_holds(fn_ptr(env_ptr, char_word(c))) {
                 idx = i + c.len_utf8();
                 break;
             }
@@ -1437,7 +1430,7 @@ pub extern "C" fn bhc_text_take_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
+            if !pred_holds(fn_ptr(env_ptr, char_word(c))) {
                 idx = i + c.len_utf8();
                 break;
             }

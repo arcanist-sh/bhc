@@ -83,6 +83,7 @@ pub(crate) fn retype_pattern_binders(ctx: &mut LowerContext, pat: &Pat, ty: &Ty)
                     name: *name,
                     id,
                     ty: ty.clone(),
+                    checked_ty: Ty::Error,
                 },
             );
         }
@@ -109,6 +110,7 @@ fn preregister_pattern(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<Var> {
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             // Register so it can be looked up later
             ctx.register_var(*def_id, var.clone());
@@ -141,6 +143,7 @@ fn preregister_pattern(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<Var> {
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var.clone());
             Ok(var)
@@ -173,6 +176,7 @@ fn preregister_pattern_nested(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var);
             Ok(())
@@ -196,6 +200,7 @@ fn preregister_pattern_nested(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             };
             ctx.register_var(*def_id, var);
             Ok(())
@@ -339,6 +344,7 @@ fn extract_binding_info(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<(Var, 
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 }
             };
             Ok((var, vec![*name]))
@@ -367,6 +373,7 @@ fn extract_binding_info(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<(Var, 
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 }
             };
             let mut names = vec![*name];
@@ -523,6 +530,7 @@ mod tests {
                 name: x,
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
             Span::default(),
         );
@@ -542,12 +550,14 @@ mod tests {
                 name: x,
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
             Box::new(core::Expr::Var(
                 Var {
                     name: y,
                     id: VarId::new(1),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 Span::default(),
             )),

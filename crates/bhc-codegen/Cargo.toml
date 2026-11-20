@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The heap object layout, which generated code and the runtime share.
+bhc-rts-alloc = { workspace = true }
 # Internal crates
 bhc-span = { workspace = true }
 bhc-data-structures = { workspace = true }

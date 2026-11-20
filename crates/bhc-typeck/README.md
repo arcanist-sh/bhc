@@ -23,7 +23,6 @@ This crate implements Hindley-Milner type inference (Algorithm W) for BHC. It op
 | `TyCtxt` | Type checking context with type environment |
 | `TypeEnv` | Environment mapping names to type schemes |
 | `TypedModule` | Result of type checking with inferred types |
-| `KindEnv` | Kind environment for kind checking |
 
 ## Usage
 

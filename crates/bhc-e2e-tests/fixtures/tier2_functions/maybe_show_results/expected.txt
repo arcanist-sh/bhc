@@ -1,0 +1,12 @@
+Just 5
+Nothing
+Just 3
+Just 9
+Just "b"
+Nothing
+Just 2
+Just (-4)
+Just 2.5
+Just True
+Just 4
+Just 2

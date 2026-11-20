@@ -1,0 +1,12 @@
+(False,True,GT,True)
+(False,True,GT,Just 5)
+(LT,False,EQ,EQ)
+(LT,False,True)
+([False,True,True],[Nothing,Just 1,Just 3],[LT,EQ,GT])
+[Left 1,Left 2,Right 'a',Right 'b']
+(False,True)
+(Nothing,Just 3)
+(-1.5,GT)
+([(False,'c'),(True,'a'),(True,'b')],GT)
+([Nothing,Just R,Just G],(1,B),GT)
+([(2,Nothing),(3,Just 'a'),(1,Just 'b')],[(False,2),(True,1)])

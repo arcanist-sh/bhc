@@ -1,4 +1,4 @@
-data Color = Red | Green | Blue
+data Color = Red | Green | Blue deriving Show
 
 main :: IO ()
 main = do

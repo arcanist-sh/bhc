@@ -45,6 +45,16 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             let scheme = ctx.env.lookup_def_id(def_ref.def_id).cloned();
             if let Some(s) = scheme {
                 let result = ctx.instantiate(&s);
+                if let Some(class) = ctx.local_class_methods.get(&def_ref.def_id).copied() {
+                    record_class_method_use(ctx, class, def_ref, &result);
+                }
+                if let Some((class, of_result)) = ctx.class_op_defs.get(&def_ref.def_id).copied() {
+                    if let Ty::Fun(argument, returned) = &result {
+                        let operand = if of_result { returned } else { argument };
+                        ctx.class_op_uses
+                            .push((class, operand.as_ref().clone(), def_ref.span));
+                    }
+                }
                 // For rank-2: if the result resolves to a Forall type (e.g., a lambda
                 // parameter with type `forall a. a -> a`), instantiate it so each use
                 // gets independent type variables.
@@ -95,6 +105,16 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                     ctx.subsume(&arg_ty, expected_arg, *span);
                     return expected_ret.as_ref().clone();
                 }
+            }
+
+            // A lambda passed where its parameter is expected to be
+            // polymorphic (`mask $ \restore -> …`, with `restore :: forall a.
+            // IO a -> IO a`) must see that type while its body is inferred,
+            // or the first use fixes the parameter to one type.
+            if let (Ty::Fun(expected_arg, _), Expr::Lam(pats, _, _)) =
+                (ctx.subst.apply_resolved(&func_ty), arg.as_ref())
+            {
+                prebind_rank2_lambda_params(ctx, pats, &expected_arg);
             }
 
             // Standard case: infer argument type and unify
@@ -314,6 +334,52 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             scheme
                                 .vars
                                 .retain(|v| !applied.iter().any(|a| a.id == v.id));
+                            // A numeric conversion's result is constrained
+                            // (`Num b`), which the restriction keeps
+                            // monomorphic: `where w = fromInteger n` takes its
+                            // type from the use `w + 1 :: Int`. Builtin
+                            // numeric classes leave no constraint here, so
+                            // generalized, `w` stayed `forall b. b`, the
+                            // conversion was typed `Integer -> b`, and codegen
+                            // compiled it as the identity (an Integer box read
+                            // as an Int).
+                            if !ctx.numeric_conversion_defs.is_empty() {
+                                let mut refs = Vec::new();
+                                crate::binding_groups::collect_expr_references(
+                                    &binding.rhs,
+                                    &mut refs,
+                                );
+                                if refs.iter().any(|r| ctx.numeric_conversion_defs.contains(r)) {
+                                    scheme.vars.clear();
+                                }
+                            }
+                            // Likewise a value binding that uses a method or
+                            // function of a DICTIONARY-passed class: a use of
+                            // one leaves no constraint here (a method's scheme
+                            // is registered without its class), so nothing
+                            // above kept its variable. Generalized, `let c =
+                            // pick def def in useV c` instantiated a fresh copy
+                            // at `V` while `def` itself stayed unresolved, and
+                            // printed an address. This is the monomorphism
+                            // restriction, which Haskell applies here too.
+                            if crate::io_closure_mode()
+                                && !matches!(binding.rhs, Expr::Lam(..))
+                                && !scheme.vars.is_empty()
+                            {
+                                let mut refs = Vec::new();
+                                crate::binding_groups::collect_expr_references(
+                                    &binding.rhs,
+                                    &mut refs,
+                                );
+                                let dict_constrained = refs.iter().any(|r| {
+                                    ctx.def_schemes.get(r).is_some_and(|s| {
+                                        s.constraints.iter().any(|c| !is_builtin_class(c.class))
+                                    })
+                                });
+                                if dict_constrained {
+                                    scheme.vars.clear();
+                                }
+                            }
                             scheme
                         } else if crate::io_closure_mode() {
                             // A local function used as a value stays general
@@ -688,7 +754,11 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             }
         }
 
-        Expr::Error(_) => Ty::Error,
+        Expr::Error(_) => {
+            // Lowering reported this expression's error already.
+            ctx.saw_error_expr = true;
+            Ty::Error
+        }
     }
 }
 
@@ -700,6 +770,54 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
 ///
 /// The constraints are collected during inference and solved after,
 /// potentially defaulting ambiguous type variables to standard types.
+/// Record the type `class`'s variable takes at this use of one of its
+/// methods, whose instantiated type is `used_at`, for
+/// [`TyCtxt::check_class_method_instances`].
+fn record_class_method_use(
+    ctx: &mut TyCtxt,
+    class: Symbol,
+    def_ref: &bhc_hir::DefRef,
+    used_at: &Ty,
+) {
+    let Some(scheme) = ctx.def_schemes.get(&def_ref.def_id).cloned() else {
+        return;
+    };
+    let Some(constraint) = scheme.constraints.iter().find(|c| c.class == class) else {
+        return;
+    };
+    let [class_arg] = constraint.args.as_slice() else {
+        return;
+    };
+    let (ty, fresh) = crate::instantiate::instantiate_scoped(ctx, &scheme);
+    let class_arg = substitute(class_arg, &fresh);
+    // The two instantiations have one shape; tying them together only
+    // connects the class variable to this use, so its errors are not the
+    // program's.
+    let saved = ctx.take_diagnostics();
+    ctx.unify(&ty, used_at, def_ref.span);
+    let _ = ctx.take_diagnostics();
+    ctx.restore_diagnostics(saved);
+    ctx.class_method_uses.push((class, class_arg, def_ref.span));
+}
+
+/// Give each variable parameter of a lambda whose expected type (`expected`,
+/// a function type) is a `forall` that polymorphic type, so every use in
+/// the body instantiates it afresh (the pattern keeps it: see
+/// `infer_pattern`).
+fn prebind_rank2_lambda_params(ctx: &mut TyCtxt, pats: &[bhc_hir::Pat], expected: &Ty) {
+    let mut expected = ctx.subst.apply_resolved(expected);
+    for pat in pats {
+        let Ty::Fun(param, rest) = expected else {
+            return;
+        };
+        if let (Ty::Forall(vars, body), bhc_hir::Pat::Var(_, def_id, _)) = (param.as_ref(), pat) {
+            ctx.env
+                .insert_global(*def_id, Scheme::poly(vars.clone(), body.as_ref().clone()));
+        }
+        expected = ctx.subst.apply_resolved(&rest);
+    }
+}
+
 fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
     match lit {
         Lit::Int(_) => {
@@ -780,13 +898,30 @@ pub(crate) fn is_builtin_class(class: Symbol) -> bool {
 /// are not listed: Core's numeric specialization gives each use type its own
 /// copy, as under the eager model, so `let inc x = x + 1` works at `Integer`
 /// and `Double` alike (#57).
+///
+/// Every variable along the substitution's chain counts, not only the one a
+/// single application reaches: the substitution is triangular, and the
+/// binding's own type is often a later link. Read one layer deep, `let c =
+/// "pre " <> a` saw only the literal's variable, generalized `c` over its own,
+/// and the use at a user `IsString` type instantiated a fresh copy while the
+/// literals defaulted to `String` (pandoc's footnote `className` was built
+/// with list append and read as an attribute value).
 fn value_class_constrained_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
     for c in &ctx.constraints {
         if c.class.as_str() != "IsString" {
             continue;
         }
         for arg in &c.args {
-            out.extend(ctx.apply_subst(arg).free_vars());
+            let mut layer = arg.clone();
+            // Bounded like `apply_resolved`, against a cyclic chain.
+            for _ in 0..100 {
+                out.extend(layer.free_vars());
+                let next = ctx.apply_subst(&layer);
+                if next == layer {
+                    break;
+                }
+                layer = next;
+            }
         }
     }
 }

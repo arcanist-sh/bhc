@@ -1,0 +1,6 @@
+Plain [Str "img!",Emph [Str "e!"]]
+[Quote [Plain [Str "img!",Emph [Str "e!"]]],Fig (Cap [Plain [Str "img!",Emph [Str "e!"]]]) [Plain [Str "img!",Emph [Str "e!"]],Rule,Code "c"]]
+Cap [Plain [Str "img!",Emph [Str "e!"]]]
+Box3 [Str "k!"]
+Box [Str "k!"]
+Box2 [Str "k!"]

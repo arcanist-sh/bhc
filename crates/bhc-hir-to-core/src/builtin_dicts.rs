@@ -69,6 +69,7 @@ impl Builder<'_> {
                 name: Symbol::intern(name),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
             self.span,
         )

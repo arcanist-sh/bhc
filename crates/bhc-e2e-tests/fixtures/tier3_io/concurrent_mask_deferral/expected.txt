@@ -1,0 +1,9 @@
+masked sleep done
+after kill 1
+masked work done
+after kill 2
+interrupted while masked: thread killed
+masked part ran
+raised on unmask: thread killed
+after kill 4
+end

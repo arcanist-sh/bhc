@@ -19,7 +19,7 @@
 //! for direct compilation without the matrix machinery.
 
 use bhc_core::{self as core, Alt, AltCon, DataCon, Literal, Var, VarId};
-use bhc_hir::{self as hir, Pat, ValueDef};
+use bhc_hir::{self as hir, DefId, Pat, ValueDef};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -74,6 +74,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             });
             // Default pattern with a binder
             Ok(Alt {
@@ -118,7 +119,15 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     .filter(|t| !crate::context::has_type_variables(t))
                     .cloned()
                     .unwrap_or(Ty::Error);
+                // The declared field type is the binder's checked type even
+                // where it mentions the data type's parameters.
+                let declared_ty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
                 let binder = ctx.fresh_var(&binder_name, binder_ty, span);
+                let binder = if matches!(binder.checked_ty, Ty::Error) {
+                    binder.with_checked_ty(declared_ty)
+                } else {
+                    binder
+                };
 
                 match sub_pat {
                     Pat::Var(name, def_id, _) => {
@@ -131,6 +140,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                 name: *name,
                                 id: ctx.fresh_id(),
                                 ty: Ty::Error,
+                                checked_ty: Ty::Error,
                             }
                         };
                         binders.push(var);
@@ -297,6 +307,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                                     name: *name,
                                     id: ctx.fresh_id(),
                                     ty: Ty::Error,
+                                    checked_ty: Ty::Error,
                                 }
                             };
                             binders.push(var);
@@ -363,6 +374,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, v.clone());
                 v
@@ -544,6 +556,34 @@ struct ClauseRow {
     span: Span,
     /// Original row index (for overlap detection).
     row_index: usize,
+    /// Every variable the row's ORIGINAL patterns bind, kept through
+    /// specialization so its leaf can record where each is bound on its path.
+    binders: Vec<DefId>,
+}
+
+/// The variables a pattern binds, in order.
+fn pattern_binders(pat: &Pat, out: &mut Vec<DefId>) {
+    match pat {
+        Pat::Var(_, def_id, _) => out.push(*def_id),
+        Pat::As(_, def_id, inner, _) => {
+            out.push(*def_id);
+            pattern_binders(inner, out);
+        }
+        Pat::Con(_, subs, _) => subs.iter().for_each(|p| pattern_binders(p, out)),
+        Pat::RecordCon(_, fields, _) => fields.iter().for_each(|f| pattern_binders(&f.pat, out)),
+        Pat::Or(left, _, _) => pattern_binders(left, out),
+        Pat::Ann(inner, _, _) | Pat::View(_, inner, _) => pattern_binders(inner, out),
+        Pat::Wild(_) | Pat::Lit(..) | Pat::Error(_) => {}
+    }
+}
+
+/// Where each of `binders` is bound now: the variables registered for them on
+/// the path being built.
+fn current_bindings(ctx: &LowerContext, binders: &[DefId]) -> Vec<(DefId, Var)> {
+    binders
+        .iter()
+        .filter_map(|d| ctx.lookup_var(*d).map(|v| (*d, v.clone())))
+        .collect()
 }
 
 /// The match matrix: rows of patterns compiled against a vector of scrutinees.
@@ -558,11 +598,13 @@ struct MatchMatrix {
 enum DecisionTree {
     /// Leaf: matched successfully.
     Leaf {
-        /// Variable bindings from pattern matching.
-        // WIP lowering: bindings are currently registered via the context; this
-        // field will carry them explicitly once decision-tree codegen uses it.
-        #[allow(dead_code)]
-        bindings: Vec<(VarId, core::Expr)>,
+        /// Where each of the row's pattern variables is bound on this leaf's
+        /// path. The context's binding of a variable is one shared slot: a row
+        /// copied into several branches re-registers its variables in each,
+        /// and the right-hand sides, lowered after the whole tree is built,
+        /// all saw the last branch's variable. `Toks xs <> Toks ys` then
+        /// referred to a `ys` that only one branch binds (a runtime stub).
+        bindings: Vec<(DefId, Var)>,
         /// Guard condition (if any).
         guard: Option<hir::Expr>,
         /// Right-hand side.
@@ -623,6 +665,7 @@ pub fn compile_match_to_expr(
                     name: tuple_con_name,
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 value_def.span,
             );
@@ -649,12 +692,18 @@ pub fn compile_match_to_expr(
         // Flatten or-patterns into separate rows
         let expanded = expand_equation_or_patterns(eq);
         for expanded_eq in expanded {
+            let mut binders = Vec::new();
+            expanded_eq
+                .0
+                .iter()
+                .for_each(|p| pattern_binders(p, &mut binders));
             rows.push(ClauseRow {
                 pats: expanded_eq.0,
                 guard: expanded_eq.1,
                 rhs: expanded_eq.2,
                 span: eq.span,
                 row_index: i,
+                binders,
             });
         }
     }
@@ -890,7 +939,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
         let row_index = matrix.rows[0].row_index;
 
         return DecisionTree::Leaf {
-            bindings: vec![],
+            bindings: current_bindings(ctx, &matrix.rows[0].binders),
             guard: None,
             rhs,
             span: row_span,
@@ -907,7 +956,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
     if matrix.scrutinees.is_empty() {
         let first = &matrix.rows[0];
         return DecisionTree::Leaf {
-            bindings: vec![],
+            bindings: current_bindings(ctx, &first.binders),
             guard: first.guard.clone(),
             rhs: first.rhs.clone(),
             span: first.span,
@@ -984,12 +1033,25 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                             .collect()
                     })
                 });
+                // The declared field types, type parameters included, for
+                // the binders' checked types.
+                let declared_tys: Vec<Ty> = ctx
+                    .constructor_field_types(*con_name)
+                    .filter(|declared| declared.len() == *arity as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 let field_vars: Vec<Var> = (0..*arity)
                     .map(|i| {
                         let ty = field_tys
                             .as_ref()
                             .map_or(Ty::Error, |tys| tys[i as usize].clone());
-                        ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span)
+                        let var = ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span);
+                        match declared_tys.get(i as usize) {
+                            Some(declared) if matches!(var.checked_ty, Ty::Error) => {
+                                var.with_checked_ty(declared.clone())
+                            }
+                            _ => var,
+                        }
                     })
                     .collect();
 
@@ -1141,6 +1203,7 @@ fn specialize_matrix(
             rhs: row.rhs.clone(),
             span: row.span,
             row_index: row.row_index,
+            binders: row.binders.clone(),
         });
     }
 
@@ -1183,6 +1246,7 @@ fn default_matrix(
                 rhs: row.rhs.clone(),
                 span: row.span,
                 row_index: row.row_index,
+                binders: row.binders.clone(),
             }
         })
         .collect();
@@ -1277,12 +1341,15 @@ fn register_wildcard_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee:
 fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core::Expr> {
     match tree {
         DecisionTree::Leaf {
-            bindings: _,
+            bindings,
             guard,
             rhs,
             span,
             row_index: _,
         } => {
+            for (def_id, var) in bindings {
+                ctx.register_var(def_id, var);
+            }
             let core_rhs = lower_expr(ctx, &rhs)?;
 
             if let Some(guard_expr) = guard {
@@ -1357,6 +1424,22 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
                     binders: vec![],
                     rhs: def_rhs,
                 });
+            } else {
+                // No clause covers the rest: a value that reaches here must
+                // fail. Without an alternative for it the case had only the
+                // branches that were written, and code generation runs the
+                // last of them for a value that matches none: `f (C 7)` with
+                // clauses for `A` and `B` answered as `f B`, and `k 3` with
+                // clauses for 1 and 2 as `k 2`. The compiler warned and the
+                // program went on with a wrong value.
+                let uncovered = alts_leave_values_uncovered(ctx, &alts);
+                if uncovered {
+                    alts.push(Alt {
+                        con: AltCon::Default,
+                        binders: vec![],
+                        rhs: make_pattern_error(span),
+                    });
+                }
             }
 
             // If no default and no branches, generate error
@@ -1373,6 +1456,30 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
         }
 
         DecisionTree::Fail(span) => Ok(make_pattern_error(span)),
+    }
+}
+
+/// Whether some value of the scrutinee's type matches none of `alts`: there
+/// is no default, and a constructor of the type has no alternative, or the
+/// alternatives are literals (which never cover their type).
+///
+/// Such a case needs an alternative that fails. Code generation runs the
+/// last alternative for a value that matches none.
+pub(crate) fn alts_leave_values_uncovered(ctx: &LowerContext, alts: &[Alt]) -> bool {
+    if alts.iter().any(|alt| matches!(alt.con, AltCon::Default)) {
+        return false;
+    }
+    match alts.first().map(|alt| &alt.con) {
+        Some(AltCon::DataCon(first)) => {
+            let all = ctx.constructors_for_type_name(first.ty_con.name);
+            all.iter().any(|(_, name, _)| {
+                !alts
+                    .iter()
+                    .any(|alt| matches!(&alt.con, AltCon::DataCon(dc) if dc.name == *name))
+            })
+        }
+        Some(AltCon::Lit(_)) => true,
+        _ => false,
     }
 }
 
@@ -1797,6 +1904,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *_name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1830,6 +1938,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 ctx.register_var(*def_id, var);
             }
@@ -1926,6 +2035,7 @@ fn compile_tuple_pattern(
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 binders.push(var);
             }
@@ -1980,6 +2090,7 @@ fn args_tuple(args: &[Var], span: Span) -> core::Expr {
             name: tuple_con_name,
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         },
         span,
     );
@@ -2301,6 +2412,7 @@ pub fn make_pattern_error(span: Span) -> core::Expr {
         name: Symbol::intern("error"),
         id: VarId::new(0),
         ty: Ty::Error,
+        checked_ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
         Literal::String(Symbol::intern(&format!(
@@ -2411,12 +2523,15 @@ mod tests {
 
     /// Helper: build a ClauseRow from patterns and a literal RHS.
     fn clause(pats: Vec<Pat>, rhs_val: i128, idx: usize) -> ClauseRow {
+        let mut binders = Vec::new();
+        pats.iter().for_each(|p| pattern_binders(p, &mut binders));
         ClauseRow {
             pats,
             guard: None,
             rhs: hir::Expr::Lit(hir::Lit::Int(rhs_val), Span::default()),
             span: Span::default(),
             row_index: idx,
+            binders,
         }
     }
 

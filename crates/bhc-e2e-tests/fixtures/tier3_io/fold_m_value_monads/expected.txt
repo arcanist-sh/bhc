@@ -1,0 +1,11 @@
+Just 6
+Just 10
+Nothing
+Just 7
+Just 10
+Right 6
+Left "negative: -2"
+Just [2,1]
+6
+16
+(24,4)

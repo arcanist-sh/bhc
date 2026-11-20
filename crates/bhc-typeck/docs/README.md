@@ -20,7 +20,6 @@ Hindley-Milner type inference for the Basel Haskell Compiler.
 | `TyCtxt` | Type checking context |
 | `TypeEnv` | Type environment |
 | `TypedModule` | Output with type annotations |
-| `KindEnv` | Kind checking environment |
 
 ## Quick Start
 
@@ -245,13 +244,17 @@ impl TypeEnv {
 
 ## Kind Checking
 
-Types are kind-checked:
+Every module is kind-checked before its bindings are type-checked
+(`kind_check::check_module_kinds`). Kinds of the module's own data types,
+newtypes, synonyms and classes are inferred with kind variables and
+generalised; the Prelude's types and classes have their standard kinds; any
+other type constructor gets a fresh kind, so an unknown type never causes
+an error.
 
-```rust
-// Maybe Int -- valid: Maybe :: * -> *, Int :: *
-// Int Maybe -- invalid: Int :: *, can't apply to type
-
-pub fn kind_check(ty: &Ty, env: &KindEnv) -> Result<Kind, KindError>;
+```haskell
+f :: Maybe Int -> Int    -- valid: Maybe :: * -> *, Int :: *
+g :: Int Maybe -> Int    -- kind mismatch: `Int` has kind `*` and cannot be applied
+h :: Maybe -> Int        -- kind mismatch: `Maybe` has kind `* -> *`, but `*` is expected
 ```
 
 ## M9: Shape Inference

@@ -135,8 +135,8 @@ validated against mocks only.
 | `bhi` | An IR and kernel-report inspector |
 | `bhc-docs` | Generates the standard library [API reference](https://docs.arcanist.sh/bhc/api/) |
 
-Release archives ship `bhc` and its libraries; `bhci`, `bhi` and `bhc-lsp` come
-from a source build for now (#50).
+Release archives ship `bhc`, `bhci`, `bhi` and the libraries; `bhc-lsp` comes
+from a source build for now.
 
 The [playground](https://arcanist.sh/bhc/playground/) runs bhc's front end and
 interpreter, compiled to WebAssembly, in the browser.

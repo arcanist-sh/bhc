@@ -1,0 +1,7 @@
+[(Green,"")]
+[(Green," rest")]
+[(Blue,"")]
+[]
+[]
+[(42," x")]
+[Just Ext_raw,Just Ext_raw_html,Just Ext_smart,Just Ext_raw_tex,Nothing,Nothing]

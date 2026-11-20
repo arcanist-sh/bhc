@@ -113,14 +113,20 @@ impl DerivingContext {
         Self::head_type_con(ty).filter(|n| self.local_ord.contains(n))
     }
 
-    /// The head type-constructor name of a field type, for a directly-named
-    /// user ADT (`Color`, `Tree`). Parameterized types (`Maybe a`, `[a]`,
-    /// tuples) and type variables return `None` — those keep the generic
-    /// `==`/`compare`, which the library/backends handle.
+    /// The head type-constructor name of a field type: a user ADT named
+    /// directly (`Color`) or applied to arguments (`Tree a`, the recursive
+    /// field of a parameterized type). Callers keep only names that derive
+    /// the class in this module, so `Maybe a`, `[a]`, tuples and type
+    /// variables still get the generic `==`/`compare`.
     fn head_type_con(ty: &Ty) -> Option<Symbol> {
         let mut t = ty;
         while let Ty::Forall(_, inner) = t {
             t = inner;
+        }
+        // Without this, `Node l x r == Node l' x' r'` compared the subtrees
+        // `l` and `l'` with the generic `==`, by address.
+        while let Ty::App(f, _) = t {
+            t = f;
         }
         match t {
             Ty::Con(c) => Some(c.name),
@@ -141,11 +147,37 @@ impl DerivingContext {
         let n = self.fresh_counter;
         self.fresh_counter += 1;
         let name = Symbol::intern(&format!("{prefix}_{n}"));
+        // A type given here is the variable's type.
+        let checked_ty = bhc_core::fresh_checked_ty(prefix, &ty);
         Var {
             name,
             id: VarId::new(n as usize),
             ty,
+            checked_ty,
         }
+    }
+
+    /// A fresh variable for a value of the type being derived for: the
+    /// argument of a derived `show`, `==`, `compare`, … Its `ty` stays
+    /// empty, as codegen expects; the checked type says what it holds.
+    fn fresh_value_var(&mut self, prefix: &str, type_name: Symbol, params: &[TyVar]) -> Var {
+        let instance_ty = self.build_instance_type(type_name, params);
+        self.fresh_var(prefix, Ty::Error)
+            .with_checked_ty(instance_ty)
+    }
+
+    /// Fresh variables for a constructor's fields, `{prefix}0`, `{prefix}1`,
+    /// …, each with its field's declared type as the checked type. A field
+    /// at one of the data type's parameters is a type variable.
+    fn fresh_field_vars(&mut self, prefix: &str, fields: &ConFields) -> Vec<Var> {
+        Self::con_field_types(fields)
+            .into_iter()
+            .enumerate()
+            .map(|(i, field_ty)| {
+                self.fresh_var(&format!("{prefix}{i}"), Ty::Error)
+                    .with_checked_ty(field_ty)
+            })
+            .collect()
     }
 
     /// Like [`fresh_var`](Self::fresh_var) but keeps `name` verbatim (no
@@ -163,6 +195,7 @@ impl DerivingContext {
             name: Symbol::intern(name),
             id: VarId::new(n as usize),
             ty,
+            checked_ty: Ty::Error,
         }
     }
 
@@ -287,7 +320,7 @@ impl DerivingContext {
         // Newtype: single constructor, single field
         // from (NT x) = M1 (M1 (M1 (K1 x)))
         let from_body = {
-            let x_var = self.fresh_var("x", Ty::Error);
+            let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
             let type_con = TyCon::new(newtype_def.name, Kind::Star);
             let data_con = DataCon {
                 name: newtype_def.con.name,
@@ -414,7 +447,7 @@ impl DerivingContext {
     ///
     /// `from x = M1 (case x of { Con1 f1..fn -> <sum_path>(M1(<product>)); ... })`
     fn generate_generic_from(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let type_con = TyCon::new(data_def.name, Kind::Star);
         let num_cons = data_def.cons.len();
 
@@ -434,9 +467,7 @@ impl DerivingContext {
             };
 
             // Bind field variables
-            let fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("f{i}"), Ty::Error))
-                .collect();
+            let fields: Vec<Var> = self.fresh_field_vars("f", &con.fields);
 
             // Build the product representation for this constructor's fields
             let product_rep = self.build_from_product(&fields, span);
@@ -879,8 +910,8 @@ impl DerivingContext {
 
     /// Generate the body of the (==) method for a data type.
     fn generate_eq_body(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
-        let x_var = self.fresh_var("x", Ty::Error);
-        let y_var = self.fresh_var("y", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
+        let y_var = self.fresh_value_var("y", data_def.name, &data_def.params);
 
         // Check if all constructors have no fields (simple enum)
         let is_simple_enum = data_def.cons.iter().all(|con| match &con.fields {
@@ -977,14 +1008,10 @@ impl DerivingContext {
             };
 
             // Generate fresh variables for x's fields
-            let x_fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("x{i}"), Ty::Error))
-                .collect();
+            let x_fields: Vec<Var> = self.fresh_field_vars("x", &con.fields);
 
             // Generate fresh variables for y's fields
-            let y_fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("y{i}"), Ty::Error))
-                .collect();
+            let y_fields: Vec<Var> = self.fresh_field_vars("y", &con.fields);
 
             // Generate the comparison: x0 == y0 && x1 == y1 && ...
             let field_tys = Self::con_field_types(&con.fields);
@@ -1061,6 +1088,7 @@ impl DerivingContext {
                 name: Symbol::intern("=="),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
         };
         let eq_expr = core::Expr::Var(eq_var, span);
@@ -1078,6 +1106,7 @@ impl DerivingContext {
             name: Symbol::intern("&&"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let and_expr = core::Expr::Var(and_var, span);
         let app1 = core::Expr::App(Box::new(and_expr), Box::new(left), span);
@@ -1100,8 +1129,8 @@ impl DerivingContext {
             Ty::Error,
         );
 
-        let x_var = self.fresh_var("x", Ty::Error);
-        let y_var = self.fresh_var("y", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
+        let y_var = self.fresh_value_var("y", newtype_def.name, &newtype_def.params);
         let inner_x = self.fresh_var("inner_x", Ty::Error);
         let inner_y = self.fresh_var("inner_y", Ty::Error);
 
@@ -1200,8 +1229,8 @@ impl DerivingContext {
 
     /// Generate the body of the compare method.
     fn generate_compare_body(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
-        let x_var = self.fresh_var("x", Ty::Error);
-        let y_var = self.fresh_var("y", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
+        let y_var = self.fresh_value_var("y", data_def.name, &data_def.params);
 
         let is_simple_enum = data_def.cons.iter().all(|con| match &con.fields {
             ConFields::Positional(fields) => fields.is_empty(),
@@ -1305,9 +1334,7 @@ impl DerivingContext {
                 arity: x_field_count as u32,
             };
 
-            let x_fields: Vec<Var> = (0..x_field_count)
-                .map(|i| self.fresh_var(&format!("x{i}"), Ty::Error))
-                .collect();
+            let x_fields: Vec<Var> = self.fresh_field_vars("x", &x_con.fields);
 
             let mut inner_alts = Vec::new();
 
@@ -1324,9 +1351,7 @@ impl DerivingContext {
                     arity: y_field_count as u32,
                 };
 
-                let y_fields: Vec<Var> = (0..y_field_count)
-                    .map(|i| self.fresh_var(&format!("y{i}"), Ty::Error))
-                    .collect();
+                let y_fields: Vec<Var> = self.fresh_field_vars("y", &y_con.fields);
 
                 let result = if x_idx < y_idx {
                     lt_ordering.clone()
@@ -1438,6 +1463,7 @@ impl DerivingContext {
                 name: Symbol::intern("compare"),
                 id: VarId::new(0),
                 ty: Ty::Error,
+                checked_ty: Ty::Error,
             },
         };
         let compare_expr = core::Expr::Var(compare_var, span);
@@ -1459,7 +1485,12 @@ impl DerivingContext {
     /// `newtype Day = Day Integer` compared its fields as pointers).
     fn typed_operand(v: &Var, field_ty: Option<&Ty>) -> Var {
         match field_ty {
-            Some(t @ Ty::Con(c)) if c.name.as_str() == "Integer" => Var {
+            // A field of a ground type carries it, so the comparison is chosen
+            // by type: a `String`/list field by content, `Integer` as a bignum,
+            // `Text` through the RTS. Untyped, `P 1 "a" == P 1 "a"` compared
+            // the two strings' addresses and was False. A field whose type
+            // mentions the data type's parameters stays untyped.
+            Some(t) if !crate::context::has_type_variables(t) => Var {
                 ty: t.clone(),
                 ..v.clone()
             },
@@ -1478,8 +1509,8 @@ impl DerivingContext {
             Ty::Error,
         );
 
-        let x_var = self.fresh_var("x", Ty::Error);
-        let y_var = self.fresh_var("y", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
+        let y_var = self.fresh_value_var("y", newtype_def.name, &newtype_def.params);
         let inner_x = self.fresh_var("inner_x", Ty::Error);
         let inner_y = self.fresh_var("inner_y", Ty::Error);
 
@@ -1574,12 +1605,13 @@ impl DerivingContext {
             let body = self.generate_show_body(data_def, span);
             self.show_targs = None;
             let showt_body = core::Expr::Lam(targs, Box::new(body), span);
-            let x = self.fresh_var("x", Ty::Error);
+            let x = self.fresh_value_var("x", data_def.name, &data_def.params);
             let null_targs = core::Expr::Var(
                 Var {
                     name: Symbol::intern("$null_targs"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             );
@@ -1619,7 +1651,7 @@ impl DerivingContext {
 
     /// Generate the body of the show method.
     fn generate_show_body(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let type_con = TyCon::new(data_def.name, Kind::Star);
 
         let mut alts = Vec::new();
@@ -1746,6 +1778,7 @@ impl DerivingContext {
                     name: Symbol::intern(name),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 },
                 span,
             )
@@ -1790,6 +1823,7 @@ impl DerivingContext {
                     name: Symbol::intern("$show_field"),
                     id: VarId::new(0),
                     ty: Ty::Error,
+                    checked_ty: Ty::Error,
                 };
                 return core::Expr::App(
                     Box::new(core::Expr::App(
@@ -1806,6 +1840,7 @@ impl DerivingContext {
             name: Symbol::intern("show"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::Var(show_var, span)),
@@ -1820,6 +1855,7 @@ impl DerivingContext {
             name: Symbol::intern("++"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let append_expr = core::Expr::Var(append_var, span);
         let app1 = core::Expr::App(Box::new(append_expr), Box::new(left), span);
@@ -2034,6 +2070,7 @@ impl DerivingContext {
             name: Symbol::intern("=="),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let eq_expr = core::Expr::Var(eq_var, span);
         let app1 = core::Expr::App(
@@ -2090,6 +2127,7 @@ impl DerivingContext {
             name: Symbol::intern("read"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::Var(read_var, span)),
@@ -2163,7 +2201,7 @@ impl DerivingContext {
 
     /// Generate the body of fromEnum: converts constructor to its tag.
     fn generate_from_enum_body(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let ty_con = TyCon::new(data_def.name, Kind::Star);
 
         let alts: Vec<Alt> = data_def
@@ -2366,7 +2404,7 @@ impl DerivingContext {
         span: Span,
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let ty_con = TyCon::new(data_def.name, Kind::Star);
 
         let alts: Vec<Alt> = data_def
@@ -2567,17 +2605,44 @@ impl DerivingContext {
             );
             let f = self.fresh_var("f", Ty::Error);
             let m = self.fresh_var("m", Ty::Error);
-            let body = core::Expr::Lam(
-                f.clone(),
-                Box::new(core::Expr::Lam(
-                    m.clone(),
-                    Box::new(self.make_fmap(
-                        core::Expr::Var(f, span),
-                        core::Expr::Var(m, span),
+            // A `Seq` is a cons list at runtime and has no `fmap` of its own
+            // for codegen to choose: the generic `<$>` over one was compiled
+            // as an action in the ambient monad, so `fmap f` on pandoc's
+            // `Many a` (a newtype over `Seq a`) returned a closure where a
+            // list of blocks was expected. Map it as the list it is.
+            let field_is_seq = matches!(
+                &field_ty,
+                Ty::App(head, _) if matches!(
+                    head.as_ref(),
+                    Ty::Con(c) if matches!(c.name.as_str(), "Seq" | "Data.Sequence.Seq")
+                )
+            );
+            let mapped = if field_is_seq {
+                let map_var = Var {
+                    name: Symbol::intern("map"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                    checked_ty: Ty::Error,
+                };
+                core::Expr::App(
+                    Box::new(core::Expr::App(
+                        Box::new(core::Expr::Var(map_var, span)),
+                        Box::new(core::Expr::Var(f.clone(), span)),
                         span,
                     )),
+                    Box::new(core::Expr::Var(m.clone(), span)),
                     span,
-                )),
+                )
+            } else {
+                self.make_fmap(
+                    core::Expr::Var(f.clone(), span),
+                    core::Expr::Var(m.clone(), span),
+                    span,
+                )
+            };
+            let body = core::Expr::Lam(
+                f,
+                Box::new(core::Expr::Lam(m, Box::new(mapped), span)),
                 span,
             );
             let mut methods = FxHashMap::default();
@@ -2603,7 +2668,7 @@ impl DerivingContext {
         let fmap_var = self.named_instance_var(&format!("$instance_fmap_{inst_enc}"), Ty::Error);
 
         let f_var = self.fresh_var("f", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let inner_var = self.fresh_var("inner", Ty::Error);
 
         let ty_con = TyCon::new(newtype_def.name, Kind::Star);
@@ -2707,7 +2772,7 @@ impl DerivingContext {
                 Box::new(field_ty.clone()),
             ),
         );
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let pure_body = core::Expr::Lam(
             x_var.clone(),
             Box::new(self.make_pure(core::Expr::Var(x_var, span), span)),
@@ -2726,7 +2791,7 @@ impl DerivingContext {
             ),
         );
         let ap_f = self.fresh_var("f", Ty::Error);
-        let ap_x = self.fresh_var("x", Ty::Error);
+        let ap_x = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let ap_apply = self.make_ap(
             core::Expr::Var(ap_f.clone(), span),
             core::Expr::Var(ap_x.clone(), span),
@@ -2819,7 +2884,7 @@ impl DerivingContext {
                 Box::new(field_ty.clone()),
             ),
         );
-        let rx = self.fresh_var("x", Ty::Error);
+        let rx = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let return_body = core::Expr::Lam(
             rx.clone(),
             Box::new(self.make_pure(core::Expr::Var(rx, span), span)),
@@ -2973,7 +3038,7 @@ impl DerivingContext {
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
         let z_var = self.fresh_var("z", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let ty_con = TyCon::new(data_def.name, Kind::Star);
 
         let alts: Vec<Alt> = data_def
@@ -3099,6 +3164,7 @@ impl DerivingContext {
             name: Symbol::intern("foldr"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let call = app2(core::Expr::Var(foldr_var, span), step, acc);
         core::Expr::App(Box::new(call), Box::new(x), span)
@@ -3138,7 +3204,7 @@ impl DerivingContext {
 
         let f_var = self.fresh_var("f", Ty::Error);
         let z_var = self.fresh_var("z", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let inner_var = self.fresh_var("inner", Ty::Error);
 
         let ty_con = TyCon::new(newtype_def.name, Kind::Star);
@@ -3252,7 +3318,7 @@ impl DerivingContext {
         span: Span,
     ) -> core::Expr {
         let f_var = self.fresh_var("f", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", data_def.name, &data_def.params);
         let ty_con = TyCon::new(data_def.name, Kind::Star);
 
         let alts: Vec<Alt> = data_def
@@ -3428,7 +3494,7 @@ impl DerivingContext {
         );
 
         let f_var = self.fresh_var("f", Ty::Error);
-        let x_var = self.fresh_var("x", Ty::Error);
+        let x_var = self.fresh_value_var("x", newtype_def.name, &newtype_def.params);
         let inner_var = self.fresh_var("inner", Ty::Error);
 
         let ty_con = TyCon::new(newtype_def.name, Kind::Star);
@@ -3510,6 +3576,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(0),
             ty: Ty::Con(bool_con),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3533,6 +3600,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(0),
             ty: Ty::Con(ordering_con),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3555,6 +3623,7 @@ impl DerivingContext {
             name: data_con.name,
             id: VarId::new(data_con.tag as usize),
             ty: Ty::Con(data_con.ty_con.clone()),
+            checked_ty: Ty::Error,
         };
         core::Expr::Var(var, span)
     }
@@ -3579,6 +3648,7 @@ impl DerivingContext {
             name: Symbol::intern("error"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         let msg_expr = self.make_string(msg, span);
         core::Expr::App(
@@ -3639,6 +3709,7 @@ impl DerivingContext {
             name: Symbol::intern("pure"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(Box::new(core::Expr::Var(pure_var, span)), Box::new(x), span)
     }
@@ -3651,6 +3722,7 @@ impl DerivingContext {
             name: Symbol::intern("<*>"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(
@@ -3669,6 +3741,7 @@ impl DerivingContext {
             name: Symbol::intern(">>="),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(
@@ -3687,6 +3760,7 @@ impl DerivingContext {
             name: Symbol::intern("<$>"),
             id: VarId::new(0),
             ty: Ty::Error,
+            checked_ty: Ty::Error,
         };
         core::Expr::App(
             Box::new(core::Expr::App(

@@ -158,7 +158,7 @@ jobs:
       - name: Differential against GHC
         run: |
           echo "BHC_GHC=$(which ghc)" >> $GITHUB_ENV
-          BHC_GHC=$(which ghc) python3 crates/bhc-e2e-tests/ghc_differential.py
+          BHC_GHC=$(which ghc) python3 -u crates/bhc-e2e-tests/ghc_differential.py
 
   miri:
     name: Miri

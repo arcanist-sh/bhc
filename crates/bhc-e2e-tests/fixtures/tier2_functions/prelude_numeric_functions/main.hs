@@ -16,7 +16,10 @@ main = do
   print (realToFrac (1.5 :: Float) + (1 :: Double))
   print (logBase 2 8 :: Double, logBase 10 1000 :: Double)
   print (sinh 1 :: Double, cosh 1 :: Double, tanh 1 :: Double)
-  print (asinh 1 :: Double, acosh 2 :: Double, atanh 0.5 :: Double)
+  -- Rounded: the last digit of acosh and atanh differs between the macOS
+  -- and glibc maths libraries, which GHC uses too.
+  print (map (\x -> fromIntegral (round (x * 1e12) :: Integer) / 1e12 :: Double)
+    [asinh 1, acosh 2, atanh 0.5])
   print (asin 1 :: Double, acos 1 :: Double, atan 1 :: Double, atan2 1 1 :: Double)
   print (isNaN (0 / 0 :: Double), isNaN (1 :: Double), isInfinite (1 / 0 :: Double), isInfinite (1 :: Double))
   print (floor (2.7 :: Double) :: Integer, ceiling (2.1 :: Double) :: Integer)

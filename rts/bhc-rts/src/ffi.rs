@@ -3463,7 +3463,7 @@ pub extern "C" fn bhc_io_error_is(exc: *mut u8, kind: i64) -> i64 {
     i64::from(head == *phrase || head.ends_with(&format!(": {phrase}")))
 }
 
-/// [`throw_io_error`] for a library that has only the OS error code: the
+/// `throw_io_error` for a library that has only the OS error code: the
 /// text library, which does not link the runtime, is handed this function
 /// at startup (`bhc_text_set_io_error_hook`).
 ///

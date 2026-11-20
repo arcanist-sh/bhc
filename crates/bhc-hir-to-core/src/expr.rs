@@ -7919,12 +7919,7 @@ fn lower_from_string_at_type(
         return None;
     }
     // Only the class method: a program's own `fromString` is left alone.
-    if ctx
-        .class_method_of_def(def_id, Symbol::intern("fromString"))
-        .is_none()
-    {
-        return None;
-    }
+    ctx.class_method_of_def(def_id, Symbol::intern("fromString"))?;
     let Ty::Fun(_, result) = refined_occurrence_ty(ctx, span)? else {
         return None;
     };

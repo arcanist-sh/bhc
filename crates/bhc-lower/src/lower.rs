@@ -10366,6 +10366,42 @@ fn lower_foreign_decl(
     })
 }
 
+/// Whether `export` of the strict `Data.ByteString` or of
+/// `Data.ByteString.Char8` is implemented: by a strict-ByteString primitive
+/// (the Char8 functions are those primitives at `Char`; hir-to-core renames
+/// them) or by a rewrite there (`map`).
+fn implemented_bytestring_export(module: &str, export: &str) -> bool {
+    matches!(module, "Data.ByteString" | "Data.ByteString.Char8")
+        && matches!(
+            export,
+            "empty"
+                | "singleton"
+                | "pack"
+                | "unpack"
+                | "null"
+                | "length"
+                | "head"
+                | "last"
+                | "tail"
+                | "init"
+                | "append"
+                | "cons"
+                | "snoc"
+                | "take"
+                | "drop"
+                | "reverse"
+                | "elem"
+                | "index"
+                | "isPrefixOf"
+                | "isSuffixOf"
+                | "readFile"
+                | "writeFile"
+                | "putStr"
+                | "putStrLn"
+                | "map"
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10432,40 +10468,4 @@ mod tests {
 
         assert!(matches!(result, hir::Expr::App(_, _, _)));
     }
-}
-
-/// Whether `export` of the strict `Data.ByteString` or of
-/// `Data.ByteString.Char8` is implemented: by a strict-ByteString primitive
-/// (the Char8 functions are those primitives at `Char`; hir-to-core renames
-/// them) or by a rewrite there (`map`).
-fn implemented_bytestring_export(module: &str, export: &str) -> bool {
-    matches!(module, "Data.ByteString" | "Data.ByteString.Char8")
-        && matches!(
-            export,
-            "empty"
-                | "singleton"
-                | "pack"
-                | "unpack"
-                | "null"
-                | "length"
-                | "head"
-                | "last"
-                | "tail"
-                | "init"
-                | "append"
-                | "cons"
-                | "snoc"
-                | "take"
-                | "drop"
-                | "reverse"
-                | "elem"
-                | "index"
-                | "isPrefixOf"
-                | "isSuffixOf"
-                | "readFile"
-                | "writeFile"
-                | "putStr"
-                | "putStrLn"
-                | "map"
-        )
 }

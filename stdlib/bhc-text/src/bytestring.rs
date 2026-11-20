@@ -535,7 +535,7 @@ pub extern "C" fn bhc_bs_read_file(path_ptr: *const u8) -> *mut u8 {
     }
     match std::fs::read(&path_str) {
         Ok(bytes) => alloc_bs_from_bytes(&bytes),
-        Err(e) => crate::io_error::raise(&path_str, "openBinaryFile", &e),
+        Err(e) => crate::io_error::raise(&path_str, "withBinaryFile", &e),
     }
 }
 

@@ -546,14 +546,17 @@ pub unsafe extern "C" fn bhc_show_ffloat(digits: *mut u8, x: f64, suffix: *mut u
 }
 
 /// `printf`'s `%.Nf`: `x` fixed-point with `digits` decimals (GHC's
-/// rounding, as `showFFloat`).
+/// rounding, as `showFFloat`). A negative `digits` is `%f` with no
+/// precision, which GHC's `printf` formats with the shortest digits
+/// (`showFFloat Nothing`): `3.14159`, not C's `3.141590`.
 ///
 /// # Safety
 ///
 /// Always safe; `unsafe` only for the list allocation.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_printf_fixed(digits: i64, x: f64) -> *mut u8 {
-    unsafe { chars_onto(&format_ffloat(x, Some(digits.max(0) as usize)), alloc_nil()) }
+    let decimals = usize::try_from(digits).ok();
+    unsafe { chars_onto(&format_ffloat(x, decimals), alloc_nil()) }
 }
 
 /// `printf`'s field width: `text` padded to `width` characters, on the

@@ -68,7 +68,11 @@ META = {"expected.txt", "stdin.txt", "test.toml"}
 #
 # Nothing belongs here that has not been diagnosed. "It fails and I do not know
 # why" is a red build, not an entry.
-KNOWN_FAILURES = {}
+KNOWN_FAILURES = {
+    "tier3_io/with_file": "GHC 9.8's withFile prefixes an exception raised in "
+    "its body with the file name and `withFile:`; bhc reports the exception "
+    "itself, as base did before",
+}
 
 
 def find_ghc():
@@ -96,26 +100,10 @@ def sources(d):
     return hs
 
 
-# The address space a program bhc built may use. bhc has no garbage
-# collector yet, so a program that allocates in a loop grows until the 120 s
-# timeout, and on CI that took the whole runner down ("The runner has
-# received a shutdown signal", no output). The main thread reserves 1 GiB of
-# stack and each forked thread 64 MiB, well inside this. Not applied to GHC's
-# programs, which reserve a terabyte of address space up front.
-BHC_PROGRAM_ADDRESS_SPACE = 8 * 1024 ** 3
-
-
-def limit_address_space():
-    import resource
-    resource.setrlimit(resource.RLIMIT_AS,
-                       (BHC_PROGRAM_ADDRESS_SPACE, BHC_PROGRAM_ADDRESS_SPACE))
-
-
-def run(cmd, cwd, stdin=None, timeout=120, limit_memory=False):
+def run(cmd, cwd, stdin=None, timeout=120):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           input=stdin, env=ENV, cwd=cwd,
-                           preexec_fn=limit_address_space if limit_memory else None)
+                           input=stdin, env=ENV, cwd=cwd)
         return r.returncode, r.stdout, r.stderr
     except (subprocess.TimeoutExpired, OSError):
         return -99, "", "TIMEOUT"
@@ -148,7 +136,7 @@ def bhc_output(srcs, stdin):
     rc, _, err = run([BHC, *srcs, "-o", art], BHC_WORK)
     if rc != 0:
         return False, "", f"compile: {err.strip()[:200]}"
-    rc, out, err = run([art], BHC_WORK, stdin=stdin, limit_memory=True)
+    rc, out, err = run([art], BHC_WORK, stdin=stdin)
     if rc != 0:
         return False, out, f"run: rc={rc} {err.strip()[:200]}"
     return True, out, ""

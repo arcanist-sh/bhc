@@ -7527,7 +7527,9 @@ fn try_lower_printf(
                     'f' => app(
                         app(
                             nullary_var("$printf_fixed", span),
-                            lit_int(precision.unwrap_or(6) as i64),
+                            // No precision is the shortest digits, as
+                            // GHC's `showFFloat Nothing` (C's default is 6).
+                            lit_int(precision.map_or(-1, |p| p as i64)),
                         ),
                         lowered,
                     ),

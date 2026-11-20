@@ -256,7 +256,7 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 
 [[package]]
 name = "bhc"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "bhc-ast",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-arena"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bumpalo",
  "parking_lot",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-ast"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-index",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-base"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "bhc-rts-alloc",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-codegen"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-core",
  "bhc-data-structures",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-concurrent"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "criterion",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-containers"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "bhc-rts-alloc",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-core"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-data-structures",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-data-structures"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-diagnostics"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "ariadne",
  "bhc-span",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-docs"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "axum",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-driver"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "bhc-ast",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-e2e-tests"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-driver",
  "bhc-target",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-ffi"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "bhc-rts-gc",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-gpu"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-codegen",
  "bhc-ffi",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-hir"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-data-structures",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-hir-to-core"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-core",
  "bhc-hir",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-index"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-interface"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-ast",
  "bhc-hir",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-intern"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "parking_lot",
  "pretty_assertions",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-lexer"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-diagnostics",
  "bhc-intern",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-linker"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-session",
  "bhc-target",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-loop-ir"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-data-structures",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-lower"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-ast",
  "bhc-diagnostics",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-lsp"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "bhc-ast",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-macros"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "pretty_assertions",
  "proc-macro2",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-numeric"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "bhc-rts-alloc",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-package"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-session",
  "camino",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-parser"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-ast",
  "bhc-diagnostics",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-playground"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-ast",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-prelude"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "criterion",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-query"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-data-structures",
  "bhc-span",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-rts"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "bhc-rts-arena",
@@ -823,14 +823,14 @@ dependencies = [
 
 [[package]]
 name = "bhc-rts-alloc"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "bhc-rts-arena"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "pretty_assertions",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-rts-gc"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "parking_lot",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-rts-scheduler"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-rts-alloc",
  "crossbeam",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-session"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-data-structures",
  "bhc-diagnostics",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-span"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-system"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "criterion",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-target"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "pretty_assertions",
  "rustc-hash 1.1.0",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-tensor-ir"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-core",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-text"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "bhc-rts-alloc",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-transformers"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "criterion",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-typeck"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-diagnostics",
  "bhc-hir",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-types"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-arena",
  "bhc-data-structures",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-utils"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-prelude",
  "criterion",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "bhc-wasm"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "bhc-codegen",
  "bhc-core",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "bhci"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "bhc-ast",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "bhi"
-version = "0.2.29"
+version = "0.2.30"
 dependencies = [
  "anyhow",
  "bhc-ast",

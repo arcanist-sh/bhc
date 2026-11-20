@@ -6,6 +6,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.30] - 2026-11-20
+
+A program bhc cannot run correctly no longer compiles: a function bhc does
+not implement is a compile error that names it, and the type checker checks
+kinds, signatures, instances and numeric literals. A runtime panic is one
+line asking for a bug report. Many library and code generation fixes from the
+pandoc work, and CI is green again on every job.
+
 ### Added
 
 - `(**)`, `(^^)` and `realToFrac`, which aborted as stubs, and the Prelude's
@@ -27,8 +35,6 @@ All notable changes to BHC are recorded here. The format follows
   only the RTS (#47). It needs a `HOMEBREW_TAP_TOKEN` secret, and prints the
   formula to apply by hand without one.
 
-### Added
-
 - `unsafePerformIO`, `unsafeDupablePerformIO`, `Debug.Trace.trace` and
   `traceIO` run; they were stubs that aborted. `trace` writes its message to
   stderr before its value is evaluated.
@@ -36,6 +42,16 @@ All notable changes to BHC are recorded here. The format follows
   in base through `trace` and `show`, so a user type's derived `Show` works.
 - An E2E fixture may give an `expected_stderr.txt`, checked like
   `expected.txt`.
+
+### Changed
+
+- A program that would reach a function bhc does not implement no longer
+  compiles and aborts when it gets there: it is a compile error naming the
+  function. `--allow-stubs` or `BHC_ALLOW_STUBS=1` builds it anyway. The
+  WebAssembly backend likewise rejects a call it would have compiled as `0`
+  (#99).
+- A Template Haskell splice that is skipped, and `deriving (Data)`, `(Ix)`
+  or `(Lift)`, which bhc cannot derive, give a warning (#99).
 
 ### Fixed
 
@@ -296,16 +312,6 @@ All notable changes to BHC are recorded here. The format follows
   dictionary (#96).
 - `mask`'s `restore` is polymorphic (`forall a. IO a -> IO a`), and
   `showFFloat` takes any floating type, as in base.
-
-### Changed
-
-- A program that would reach a function bhc does not implement no longer
-  compiles and aborts when it gets there: it is a compile error naming the
-  function. `--allow-stubs` or `BHC_ALLOW_STUBS=1` builds it anyway. The
-  WebAssembly backend likewise rejects a call it would have compiled as `0`
-  (#99).
-- A Template Haskell splice that is skipped, and `deriving (Data)`, `(Ix)`
-  or `(Lift)`, which bhc cannot derive, give a warning (#99).
 
 ## [0.2.29] - 2026-11-08
 
@@ -869,7 +875,8 @@ extension can be enabled without crashing.
 Earlier releases are recorded as git tags; see the
 [releases page](https://github.com/arcanist-sh/bhc/releases).
 
-[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.29...HEAD
+[Unreleased]: https://github.com/arcanist-sh/bhc/compare/v0.2.30...HEAD
+[0.2.30]: https://github.com/arcanist-sh/bhc/compare/v0.2.29...v0.2.30
 [0.2.29]: https://github.com/arcanist-sh/bhc/compare/v0.2.28...v0.2.29
 [0.2.28]: https://github.com/arcanist-sh/bhc/compare/v0.2.27...v0.2.28
 [0.2.27]: https://github.com/arcanist-sh/bhc/compare/v0.2.26...v0.2.27

@@ -268,6 +268,45 @@ All notable changes to BHC are recorded here. The format follows
   model the body never ran, so `forkFinally` and anything else built on
   `mask` did not work (#91).
 
+- A runtime panic, including one on the thread that runs `main`, is reported
+  as one line, `internal error: <message>`, with a request to report it, and
+  status 1, instead of a Rust panic message and an abort (#99).
+- The type checker rejects programs it accepted before (#97):
+  - Distinct numeric types do not unify: `Int` with `Integer`, `Float` with
+    `Double` or `Rational`, and some unrelated names (`Int` with `Handle`).
+  - `show`, `==` or `compare` at a type this module declares with no
+    instance (`print A` without `deriving Show`), and `fromIntegral` at a
+    `Double`.
+  - Ill-kinded types: `f :: Maybe -> Int`, `Int Int`, `data W = W (Maybe
+    Maybe)`, a synonym used without its argument, `instance C Maybe` for a
+    class of `*`. Kinds are inferred, so a type the checker does not know
+    never causes an error.
+  - A definition less polymorphic than its signature (`g :: a -> a; g x =
+    True`). Every signature's `a` was one shared variable, so checking one
+    definition could fix another's type.
+  - A numeric literal used as a list, tuple, function or `IO` action
+    (`head 1`, `x <- 3`).
+  - An instance method whose body has the wrong type, a method the class
+    does not declare, and a method of a class declared in the module used at
+    a type with no instance.
+- Comparing values of a newtype that derives `Ord` failed to compile.
+- A hand-written instance for a type with parameters (`instance Show a =>
+  Show (C a)`) was never selected: `show` printed an address and `==` was
+  `False`. A method at a field of the parameter's type still has no
+  dictionary (#96).
+- `mask`'s `restore` is polymorphic (`forall a. IO a -> IO a`), and
+  `showFFloat` takes any floating type, as in base.
+
+### Changed
+
+- A program that would reach a function bhc does not implement no longer
+  compiles and aborts when it gets there: it is a compile error naming the
+  function. `--allow-stubs` or `BHC_ALLOW_STUBS=1` builds it anyway. The
+  WebAssembly backend likewise rejects a call it would have compiled as `0`
+  (#99).
+- A Template Haskell splice that is skipped, and `deriving (Data)`, `(Ix)`
+  or `(Lift)`, which bhc cannot derive, give a warning (#99).
+
 ## [0.2.29] - 2026-11-08
 
 Threads take turns fairly, reading stdin no longer stops other threads, deep

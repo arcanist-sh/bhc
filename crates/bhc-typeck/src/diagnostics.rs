@@ -35,17 +35,32 @@ use crate::suggest::{find_similar_names, format_suggestions};
 /// - Aligned type comparison for easy visual diff
 /// - Suggestions for common fixes
 pub fn emit_type_mismatch(ctx: &mut TyCtxt, expected: &Ty, found: &Ty, span: Span) {
-    let expected_str = pretty_ty(expected);
-    let found_str = pretty_ty(found);
+    let (expected_str, found_str) = readable_pair(expected, found);
 
     let diag = Diagnostic::error(format!(
         "type mismatch: expected `{expected_str}`, found `{found_str}`"
     ))
     .with_code("E0001")
-    .with_label(ctx.full_span(span), format!("expected `{expected_str}`"))
-    .with_note(format_type_comparison(expected, found));
+    .with_label(ctx.full_span(span), format!("expected `{expected_str}`"));
 
     ctx.emit_error(diag);
+}
+
+/// Two types printed for one message, their type variables named `a`, `b`,
+/// ... in order of appearance across both: inference variables carry only
+/// ids, and printed `t1073742361` (#146).
+fn readable_pair(expected: &Ty, found: &Ty) -> (String, String) {
+    let mut vars: Vec<TyVar> = Vec::new();
+    for v in expected.free_vars().into_iter().chain(found.free_vars()) {
+        if !vars.iter().any(|w| w.id == v.id) {
+            vars.push(v);
+        }
+    }
+    let names = crate::context::signature_variable_names(&vars);
+    (
+        pretty_ty(&crate::context::rename_vars(expected, &names)),
+        pretty_ty(&crate::context::rename_vars(found, &names)),
+    )
 }
 
 /// Emit a type mismatch error with additional context about where the expectation came from.
@@ -57,8 +72,7 @@ pub fn emit_type_mismatch_with_context(
     span: Span,
     context: &str,
 ) {
-    let expected_str = pretty_ty(expected);
-    let found_str = pretty_ty(found);
+    let (expected_str, found_str) = readable_pair(expected, found);
 
     let diag = Diagnostic::error(format!(
         "type mismatch: expected `{expected_str}`, found `{found_str}`"
@@ -67,23 +81,9 @@ pub fn emit_type_mismatch_with_context(
     .with_label(
         ctx.full_span(span),
         format!("expected `{expected_str}` because {context}"),
-    )
-    .with_note(format_type_comparison(expected, found));
+    );
 
     ctx.emit_error(diag);
-}
-
-/// Format a visual comparison of two types for error messages.
-fn format_type_comparison(expected: &Ty, found: &Ty) -> String {
-    let expected_str = pretty_ty(expected);
-    let found_str = pretty_ty(found);
-
-    // Calculate padding for alignment
-    let max_len = expected_str.len().max(found_str.len());
-    let expected_padded = format!("{expected_str:>width$}", width = max_len);
-    let found_padded = format!("{found_str:>width$}", width = max_len);
-
-    format!("expected: {expected_padded}\n   found: {found_padded}")
 }
 
 /// Emit an occurs check error (infinite type).
@@ -102,7 +102,11 @@ pub fn emit_occurs_check_error(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Spa
 
 /// Emit an unbound variable error.
 pub fn emit_unbound_var(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
-    let diag = Diagnostic::error(format!("cannot find value `{def_id:?}` in this scope"))
+    let name = ctx
+        .def_names
+        .get(&def_id)
+        .map_or_else(|| "a value".to_string(), |n| format!("`{}`", n.as_str()));
+    let diag = Diagnostic::error(format!("cannot find {name} in this scope"))
         .with_code("E0003")
         .with_label(ctx.full_span(span), "not found in this scope")
         .with_note("variables must be defined before use");
@@ -149,12 +153,14 @@ pub fn emit_unbound_var_named(
 
 /// Emit an unbound constructor error.
 pub fn emit_unbound_constructor(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
-    let diag = Diagnostic::error(format!(
-        "cannot find data constructor `{def_id:?}` in this scope"
-    ))
-    .with_code("E0004")
-    .with_label(ctx.full_span(span), "constructor not found")
-    .with_note("data constructors must be imported or defined before use");
+    let name = ctx.def_names.get(&def_id).map_or_else(
+        || "a data constructor".to_string(),
+        |n| format!("data constructor `{}`", n.as_str()),
+    );
+    let diag = Diagnostic::error(format!("cannot find {name} in this scope"))
+        .with_code("E0004")
+        .with_label(ctx.full_span(span), "constructor not found")
+        .with_note("data constructors must be imported or defined before use");
 
     ctx.emit_error(diag);
 }
@@ -1019,14 +1025,36 @@ pub fn emit_matmul_swap_suggestion(
     emit_shape_mismatch(ctx, left_shape, right_shape, span);
 }
 
-/// Pretty-print a type.
+/// Pretty-print a type for a message, its type variables named `a`, `b`,
+/// ... in order of appearance: inference variables carry only ids, and
+/// printed as `t1073742366` (#146).
 pub(crate) fn pretty_ty(ty: &Ty) -> String {
+    let vars = ty.free_vars();
+    if vars.is_empty() {
+        return pretty_ty_named(ty);
+    }
+    let names = crate::context::signature_variable_names(&vars);
+    pretty_ty_named(&crate::context::rename_vars(ty, &names))
+}
+
+/// Pretty-print a type as it is, a type variable by its id.
+fn pretty_ty_named(ty: &Ty) -> String {
     match ty {
         Ty::Var(v) => pretty_tyvar(v),
         Ty::Con(c) => c.name.as_str().to_string(),
         Ty::Prim(p) => p.name().to_string(),
         Ty::App(f, a) => format!("({} {})", pretty_ty(f), pretty_ty(a)),
-        Ty::Fun(from, to) => format!("({} -> {})", pretty_ty(from), pretty_ty(to)),
+        // `(a -> b -> c)`, not `(a -> (b -> c))`: `->` associates right.
+        Ty::Fun(from, to) => {
+            let mut parts = vec![pretty_ty(from)];
+            let mut rest = to.as_ref();
+            while let Ty::Fun(next, after) = rest {
+                parts.push(pretty_ty(next));
+                rest = after;
+            }
+            parts.push(pretty_ty(rest));
+            format!("({})", parts.join(" -> "))
+        }
         Ty::Tuple(tys) if tys.is_empty() => "()".to_string(),
         Ty::Tuple(tys) => {
             let inner: Vec<_> = tys.iter().map(pretty_ty).collect();

@@ -80,7 +80,7 @@ pub(crate) fn rank2_restore(io_con: TyCon) -> Ty {
 
 /// Names for a signature's type variables in an error message, `a`, `b`, …
 /// in order of appearance: the variables themselves carry only ids.
-fn signature_variable_names(vars: &[TyVar]) -> FxHashMap<u32, String> {
+pub(crate) fn signature_variable_names(vars: &[TyVar]) -> FxHashMap<u32, String> {
     vars.iter()
         .enumerate()
         .map(|(i, v)| {
@@ -94,7 +94,7 @@ fn signature_variable_names(vars: &[TyVar]) -> FxHashMap<u32, String> {
 }
 
 /// `ty` with the named type variables written as their names, for printing.
-fn rename_vars(ty: &Ty, names: &FxHashMap<u32, String>) -> Ty {
+pub(crate) fn rename_vars(ty: &Ty, names: &FxHashMap<u32, String>) -> Ty {
     match ty {
         Ty::Var(v) => names.get(&v.id).map_or_else(
             || ty.clone(),
@@ -246,6 +246,9 @@ pub struct TyCtxt {
     /// checked once the module is solved
     /// ([`Self::check_class_ops_not_at_functions`]).
     pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
+    /// The source names of the module's definitions, for messages about a
+    /// `DefId` (an unbound variable printed as `DefId(1234)`, #146).
+    pub(crate) def_names: FxHashMap<DefId, Symbol>,
     /// The operands of the fractional operations among `class_op_uses`
     /// (`/`, `**`, `sqrt`, `round`, ...). A `Num` variable that is one of
     /// them defaults to `Double`: the builtin types carry no `Fractional`
@@ -411,6 +414,7 @@ impl TyCtxt {
             numeric_conversion_defs: rustc_hash::FxHashSet::default(),
             class_op_defs: FxHashMap::default(),
             class_op_uses: Vec::new(),
+            def_names: FxHashMap::default(),
             fractional_operands: Vec::new(),
             local_types: FxHashMap::default(),
             local_class_methods: FxHashMap::default(),
@@ -1935,6 +1939,8 @@ impl TyCtxt {
         local_value_ids: &rustc_hash::FxHashSet<DefId>,
     ) {
         use bhc_lower::DefKind;
+        self.def_names
+            .extend(defs.iter().map(|(id, info)| (*id, info.name)));
         use bhc_types::TyVar;
 
         // Type variables for polymorphic types

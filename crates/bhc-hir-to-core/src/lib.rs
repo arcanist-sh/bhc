@@ -92,6 +92,25 @@ thread_local! {
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
+thread_local! {
+    static LOWERING_WARNINGS: std::cell::RefCell<Vec<bhc_diagnostics::Diagnostic>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep the warnings of the module just lowered for
+/// [`take_lowering_warnings`].
+pub(crate) fn record_lowering_warnings(warnings: Vec<bhc_diagnostics::Diagnostic>) {
+    LOWERING_WARNINGS.with(|w| w.borrow_mut().extend(warnings));
+}
+
+/// The warnings (non-exhaustive and redundant patterns) of the modules this
+/// thread lowered since the last call, located in their module
+/// (`FileId(0)`). The driver prints them with the module's source; they
+/// were printed here as plain text with no location (#146).
+pub fn take_lowering_warnings() -> Vec<bhc_diagnostics::Diagnostic> {
+    LOWERING_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
 /// Record the functional dependencies of the classes the next module imports
 /// (from their interfaces), for [`lower_module_with_imports`] to read.
 /// Dictionary construction uses them to fill a class argument only in the

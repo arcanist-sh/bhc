@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 # Internal crates
 bhc-span = { workspace = true }
+bhc-diagnostics = { workspace = true }
 bhc-hir = { workspace = true }
 bhc-core = { workspace = true }
 bhc-types = { workspace = true }

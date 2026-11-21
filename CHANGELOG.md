@@ -6,6 +6,22 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Type and parse errors are printed with the file, line and column, the
+  source line with the offending part underlined, the label and any notes,
+  in the style of rustc (in colour on a terminal). They were printed as
+  `1: message [span FullSpan { file: FileId(0), span: Span { lo: BytePos(99),
+  ... } }]`. Type variables in messages are named `a`, `b`, ... instead of
+  `t1073742361`, function types read `(a -> b -> c)`, and an unbound name is
+  named instead of printed as `DefId(1234)` (#146).
+- The non-exhaustive and redundant pattern warnings are printed the same
+  way, pointing at the definition or at the equation that is never reached.
+  They were plain text with no location.
+- `bhc check` ends with "`<file>` failed to check" instead of "Type checking
+  failed", which it also said for a parse error, and error counts read
+  "1 error".
+
 ### Fixed
 
 - A definition that needs a standard class on one of its signature's type

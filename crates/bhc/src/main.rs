@@ -718,7 +718,7 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         );
 
         if failed > 0 {
-            anyhow::bail!("Type checking failed");
+            anyhow::bail!("{failed} of {total} modules failed to check");
         }
     } else if utf8_paths.len() == 1 {
         // Single file — use existing check_file
@@ -726,7 +726,9 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
             Ok(()) => println!("  {} OK", utf8_paths[0]),
             Err(e) => {
                 eprintln!("  {} FAILED: {}", utf8_paths[0], e);
-                anyhow::bail!("Type checking failed");
+                // The reason (a parse, lowering or type error) is on the line
+                // above; "Type checking failed" said type errors for all.
+                anyhow::bail!("{} failed to check", utf8_paths[0]);
             }
         }
     }

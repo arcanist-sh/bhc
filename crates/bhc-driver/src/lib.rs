@@ -104,7 +104,7 @@ pub enum CompileError {
     },
 
     /// Parse error.
-    #[error("parse error: {0} errors")]
+    #[error("parse error: {}", error_count(*.0))]
     ParseError(usize),
 
     /// AST to HIR lowering failed.
@@ -112,12 +112,12 @@ pub enum CompileError {
     LowerError(#[from] bhc_lower::LowerError),
 
     /// Type checking failed.
-    #[error("type checking failed: {0} errors")]
+    #[error("type checking failed: {}", error_count(*.0))]
     TypeError(usize),
 
     /// Type checking failed but module exports are still available.
     /// This allows downstream modules to continue checking.
-    #[error("type checking failed: {count} errors")]
+    #[error("type checking failed: {}", error_count(*count))]
     TypeErrorWithInfo {
         /// Number of type errors.
         count: usize,
@@ -320,6 +320,56 @@ pub struct CompiledModuleInfo {
 pub struct ModuleRegistry {
     /// Compiled modules indexed by module name.
     pub modules: FxHashMap<String, CompiledModuleInfo>,
+}
+
+/// `1 error`, `2 errors`.
+fn error_count(n: usize) -> String {
+    if n == 1 {
+        "1 error".to_string()
+    } else {
+        format!("{n} errors")
+    }
+}
+
+thread_local! {
+    /// The module this thread parsed last: its name, its path, and the text
+    /// the lexer read (after CPP), so its type errors can be rendered with a
+    /// file, line, column and source snippet. Every module is compiled with
+    /// `FileId(0)`, and spans are byte offsets into that text.
+    static PARSED_SOURCE: std::cell::RefCell<Option<(String, String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Print diagnostics (errors or warnings) for `module`: rendered with its source (location,
+/// snippet, labels and notes) when it is the module this thread parsed
+/// last, else as plain messages. A span is never printed as its `Debug`
+/// form (#146).
+fn report_diagnostics(module: &str, diagnostics: &[bhc_diagnostics::Diagnostic]) {
+    use std::io::IsTerminal;
+    let rendered = PARSED_SOURCE.with(|parsed| {
+        let parsed = parsed.borrow();
+        let Some((name, path, text)) = parsed.as_ref().filter(|(name, _, _)| name == module) else {
+            return false;
+        };
+        let _ = name;
+        let mut map = bhc_diagnostics::SourceMap::new();
+        map.add_file(path.clone(), text.clone());
+        let config = if std::io::stderr().is_terminal() {
+            bhc_diagnostics::render::RenderConfig::colored()
+        } else {
+            bhc_diagnostics::render::RenderConfig::plain()
+        };
+        bhc_diagnostics::render::CargoRenderer::with_config(&map, config).render_all(diagnostics);
+        true
+    });
+    if !rendered {
+        for diag in diagnostics {
+            eprintln!("{}: {}", diag.severity.label(), diag.message);
+            for note in &diag.notes {
+                eprintln!("  = note: {note}");
+            }
+        }
+    }
 }
 
 /// The main compiler driver.
@@ -1236,6 +1286,24 @@ impl Compiler {
         };
 
         let (maybe_module, diagnostics) = bhc_parser::parse_module(&source, file_id);
+        // Named as lowering names the HIR module (`Main` without a header).
+        let parsed_name = maybe_module
+            .as_ref()
+            .and_then(|m| m.name.as_ref())
+            .map_or_else(
+                || "Main".to_string(),
+                |n| {
+                    n.parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                },
+            );
+        PARSED_SOURCE.with(|parsed| {
+            *parsed.borrow_mut() =
+                Some((parsed_name.clone(), unit.path.to_string(), source.clone()));
+        });
 
         // Report any diagnostics
         for diag in &diagnostics {
@@ -1259,22 +1327,21 @@ impl Compiler {
                 Ok(module)
             }
             None => {
-                // Surface each parse error's message and location — otherwise
-                // callers only see "parse error: N errors" with no clue what or
-                // where the offending syntax is.
-                for diag in &diagnostics {
-                    let loc = diag
-                        .labels
-                        .first()
-                        .map(|l| {
-                            let (line, col) =
-                                Self::byte_to_line_col(&source, l.span.span.lo.0 as usize);
-                            format!(" at {line}:{col}")
-                        })
-                        .unwrap_or_default();
-                    eprintln!("  parse error{loc}: {}", diag.message);
-                }
-                Err(CompileError::ParseError(diagnostics.len()))
+                // Surface each parse error's message, location and snippet —
+                // otherwise callers only see "parse error: N errors" with no
+                // clue what or where the offending syntax is.
+                let errors: Vec<_> = diagnostics
+                    .iter()
+                    .filter(|d| d.is_error())
+                    .cloned()
+                    .collect();
+                let shown = if errors.is_empty() {
+                    &diagnostics
+                } else {
+                    &errors
+                };
+                report_diagnostics(&parsed_name, shown);
+                Err(CompileError::ParseError(shown.len()))
             }
         }
     }
@@ -1347,24 +1414,6 @@ impl Compiler {
         if self.session.options.dump_ir.dump_hir {
             Self::print_dump("HIR", hir.name.as_str(), &format!("{hir:#?}"));
         }
-    }
-
-    /// Map a byte offset in `src` to a 1-based (line, column).
-    fn byte_to_line_col(src: &str, off: usize) -> (usize, usize) {
-        let mut line = 1usize;
-        let mut col = 1usize;
-        for (i, ch) in src.char_indices() {
-            if i >= off {
-                break;
-            }
-            if ch == '\n' {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        (line, col)
     }
 
     /// Lower an AST module to HIR, returning both the HIR and the lowering context.
@@ -1498,15 +1547,7 @@ impl Compiler {
         ) {
             Ok(typed) => Ok(typed),
             Err(diagnostics) => {
-                eprintln!("Type errors:");
-                for (i, diag) in diagnostics.iter().enumerate() {
-                    let span_info = diag
-                        .labels
-                        .first()
-                        .map(|l| format!(" [span {:?}]", l.span))
-                        .unwrap_or_default();
-                    eprintln!("  {}: {}{}", i + 1, diag.message, span_info);
-                }
+                report_diagnostics(hir.name.as_str(), &diagnostics);
                 Err(CompileError::TypeError(diagnostics.len()))
             }
         }
@@ -1522,8 +1563,7 @@ impl Compiler {
     ) -> CompileResult<TypedModule> {
         let typed = self.type_check(hir, file_id, lower_ctx)?;
         if let Some(diag) = bhc_typeck::main_action_error(&typed, file_id) {
-            eprintln!("Type errors:");
-            eprintln!("  1: {}", diag.message);
+            report_diagnostics(hir.name.as_str(), std::slice::from_ref(&diag));
             return Err(CompileError::TypeError(1));
         }
         Ok(typed)
@@ -1640,6 +1680,10 @@ impl Compiler {
             Some(&typed.binder_types),
         )
         .map_err(CompileError::from)?;
+        let warnings = bhc_hir_to_core::take_lowering_warnings();
+        if !warnings.is_empty() {
+            report_diagnostics(hir.name.as_str(), &warnings);
+        }
 
         // Type expansions (name -> (params, underlying type)) so a concrete monad
         // written over a transformer stack via a newtype (pandoc's PandocIO, the

@@ -717,7 +717,7 @@ pub fn compile_match_to_expr(
     let tree = build_decision_tree(ctx, matrix, value_def.span);
 
     // Check exhaustiveness
-    check_exhaustiveness_tree(ctx, &tree, value_def.name.as_str());
+    check_exhaustiveness_tree(ctx, &tree, value_def.name.as_str(), value_def.span);
 
     // Check for redundant equations. The tree is built from PATTERNS alone, so
     // an equation reached only when an earlier guard fails looks unreachable
@@ -725,7 +725,14 @@ pub fn compile_match_to_expr(
     let total_equations = value_def.equations.len();
     let any_guards = value_def.equations.iter().any(|eq| !eq.guards.is_empty());
     if !any_guards {
-        check_overlap(ctx, &tree, total_equations, value_def.name.as_str());
+        let equation_spans: Vec<Span> = value_def.equations.iter().map(|eq| eq.span).collect();
+        check_overlap(
+            ctx,
+            &tree,
+            total_equations,
+            value_def.name.as_str(),
+            &equation_spans,
+        );
     }
 
     // Convert decision tree to Core expression
@@ -1484,13 +1491,22 @@ pub(crate) fn alts_leave_values_uncovered(ctx: &LowerContext, alts: &[Alt]) -> b
 }
 
 /// Check the decision tree for non-exhaustive patterns and emit warnings.
-fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_name: &str) {
+///
+/// The warning points at the definition, `def_span`.
+fn check_exhaustiveness_tree(
+    ctx: &mut LowerContext,
+    tree: &DecisionTree,
+    func_name: &str,
+    def_span: Span,
+) {
     match tree {
         DecisionTree::Fail(_span) => {
-            ctx.warn(format!(
-                "warning: Pattern match(es) are non-exhaustive in '{func_name}'\n\
-                 Patterns not matched: (could not determine missing patterns)"
-            ));
+            ctx.warn_at(
+                def_span,
+                format!("pattern match(es) are non-exhaustive in `{func_name}`"),
+                "some values match no equation",
+                "patterns not matched: (could not determine missing patterns)".to_string(),
+            );
         }
         DecisionTree::Switch {
             scrutinee: _,
@@ -1521,22 +1537,22 @@ fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_n
 
                     if !missing.is_empty() {
                         let missing_names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
-                        ctx.warn(format!(
-                            "warning: Pattern match(es) are non-exhaustive in '{}'\n\
-                             Patterns not matched: {}",
-                            func_name,
-                            missing_names.join(", ")
-                        ));
+                        ctx.warn_at(
+                            def_span,
+                            format!("pattern match(es) are non-exhaustive in `{func_name}`"),
+                            "some values match no equation",
+                            format!("patterns not matched: {}", missing_names.join(", ")),
+                        );
                     }
                 }
             }
 
             // Recurse into sub-trees
             for (_, _, sub_tree) in branches {
-                check_exhaustiveness_tree(ctx, sub_tree, func_name);
+                check_exhaustiveness_tree(ctx, sub_tree, func_name, def_span);
             }
             if let Some(def) = default {
-                check_exhaustiveness_tree(ctx, def, func_name);
+                check_exhaustiveness_tree(ctx, def, func_name, def_span);
             }
         }
         DecisionTree::Leaf { .. } => {
@@ -1545,24 +1561,29 @@ fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_n
     }
 }
 
-/// Check for redundant/unreachable equations.
+/// Check for redundant/unreachable equations. A warning points at the
+/// equation, by `equation_spans` when given, or else at nothing.
 fn check_overlap(
     ctx: &mut LowerContext,
     tree: &DecisionTree,
     total_equations: usize,
     func_name: &str,
+    equation_spans: &[Span],
 ) {
     let mut reached = std::collections::HashSet::new();
     collect_reached_rows(tree, &mut reached);
 
     for i in 0..total_equations {
         if !reached.contains(&i) {
-            ctx.warn(format!(
-                "warning: Pattern match is redundant in '{}'\n\
-                 Equation {} is never reached",
-                func_name,
-                i + 1
-            ));
+            ctx.warn_at(
+                equation_spans.get(i).copied().unwrap_or_default(),
+                format!("pattern match is redundant in `{func_name}`"),
+                "this equation is never reached",
+                format!(
+                    "every value equation {} of `{func_name}` matches is matched by an earlier one",
+                    i + 1
+                ),
+            );
         }
     }
 }
@@ -2730,7 +2751,7 @@ mod tests {
             ],
         };
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
-        check_exhaustiveness_tree(&mut ctx, &tree, "f");
+        check_exhaustiveness_tree(&mut ctx, &tree, "f", Span::default());
         let warnings = ctx.take_warnings();
         assert!(
             warnings.is_empty(),
@@ -2793,11 +2814,11 @@ mod tests {
             )],
         };
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
-        check_exhaustiveness_tree(&mut ctx, &tree, "f");
+        check_exhaustiveness_tree(&mut ctx, &tree, "f", Span::default());
         let warnings = ctx.take_warnings();
         assert!(!warnings.is_empty(), "Should warn about missing False");
         assert!(
-            warnings[0].contains("False"),
+            warnings[0].notes.iter().any(|n| n.contains("False")),
             "Warning should mention False"
         );
     }
@@ -2815,11 +2836,11 @@ mod tests {
             ],
         };
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
-        check_overlap(&mut ctx, &tree, 2, "f");
+        check_overlap(&mut ctx, &tree, 2, "f", &[]);
         let warnings = ctx.take_warnings();
         assert!(!warnings.is_empty(), "Should warn about redundant equation");
         assert!(
-            warnings[0].contains("redundant"),
+            warnings[0].message.contains("redundant"),
             "Warning should say redundant"
         );
     }
@@ -2886,7 +2907,7 @@ mod tests {
             ],
         };
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
-        check_overlap(&mut ctx, &tree, 2, "f");
+        check_overlap(&mut ctx, &tree, 2, "f", &[]);
         let warnings = ctx.take_warnings();
         assert!(warnings.is_empty(), "No equations should be redundant");
     }

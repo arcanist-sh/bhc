@@ -182,8 +182,9 @@ pub struct LowerContext {
     /// Accumulated errors.
     errors: Vec<LowerError>,
 
-    /// Accumulated warnings (non-fatal diagnostics).
-    warnings: Vec<String>,
+    /// Accumulated warnings (non-fatal diagnostics), located in the module
+    /// being lowered (`FileId(0)`).
+    warnings: Vec<bhc_diagnostics::Diagnostic>,
 
     /// Whether `GeneralizedNewtypeDeriving` is enabled for the current module.
     pub generalized_newtype_deriving: bool,
@@ -1901,13 +1902,19 @@ impl LowerContext {
         std::mem::take(&mut self.errors)
     }
 
-    /// Record a warning (non-fatal diagnostic).
-    pub fn warn(&mut self, message: String) {
-        self.warnings.push(message);
+    /// Record a warning about the source at `span`, with `label` under it
+    /// and `note` after it.
+    pub fn warn_at(&mut self, span: Span, message: String, label: &str, note: String) {
+        let full = bhc_span::FullSpan::new(bhc_span::FileId::new(0), span);
+        self.warnings.push(
+            bhc_diagnostics::Diagnostic::warning(message)
+                .with_label(full, label)
+                .with_note(note),
+        );
     }
 
     /// Take all recorded warnings.
-    pub fn take_warnings(&mut self) -> Vec<String> {
+    pub fn take_warnings(&mut self) -> Vec<bhc_diagnostics::Diagnostic> {
         std::mem::take(&mut self.warnings)
     }
 
@@ -5895,11 +5902,10 @@ impl LowerContext {
             return Err(LowerError::Multiple(self.take_errors()));
         }
 
-        // Print any warnings (non-fatal diagnostics)
+        // Hand the warnings to the driver, which prints them with their
+        // source (`take_lowering_warnings`).
         let warnings = self.take_warnings();
-        for warning in &warnings {
-            eprintln!("{warning}");
-        }
+        crate::record_lowering_warnings(warnings);
 
         // Collect constructor metadata for codegen
         let constructors: Vec<CoreConstructor> = self

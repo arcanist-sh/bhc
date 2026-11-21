@@ -250,6 +250,75 @@ fn test_rejected_signature_missing_constraint() {
     expect_rejected(file, "No instance for `Fractional a` in `half`");
 }
 
+/// Pattern warnings name the definition's or equation's file, line and
+/// column, and the program still builds (#146).
+#[test]
+fn test_pattern_warnings_are_located() {
+    let path = bhc_e2e_tests::fixtures_dir()
+        .join("warnings")
+        .join("patterns.hs");
+    let out = tempfile::tempdir().expect("temporary directory");
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--"])
+        .arg(&path)
+        .arg("-o")
+        .arg(out.path().join("program"))
+        .output()
+        .expect("failed to run the compiler");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "patterns.hs did not build:\n{text}"
+    );
+    for needle in [
+        "warning: pattern match(es) are non-exhaustive in `isTrue`",
+        "patterns.hs:4:1",
+        "patterns not matched: False",
+        "warning: pattern match is redundant in `classify`",
+        "patterns.hs:8:1",
+    ] {
+        assert!(text.contains(needle), "no `{needle}` in:\n{text}");
+    }
+}
+
+/// Every rejected program's errors name a file, line and column, and no
+/// internal `Debug` form of a span, type or type variable reaches the user
+/// (#146).
+#[test]
+fn test_rejected_messages_are_readable() {
+    let dir = bhc_e2e_tests::fixtures_dir().join("rejected");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("rejected fixtures") {
+        let path = entry.expect("fixture").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("hs") {
+            continue;
+        }
+        let output = std::process::Command::new("cargo")
+            .args(["run", "--quiet", "-p", "bhc", "--", "check"])
+            .arg(&path)
+            .output()
+            .expect("failed to run the compiler");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for internal in ["FullSpan", "BytePos", "TyCon {", "Symbol(", "t10737"] {
+            assert!(
+                !text.contains(internal),
+                "{} printed `{internal}`:\n{text}",
+                path.display()
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} rejected fixtures found");
+    expect_rejected(
+        "semigroup_and_ambiguous.hs",
+        "semigroup_and_ambiguous.hs:11:20",
+    );
+}
+
 #[test]
 fn test_rejected_semigroup_and_ambiguous() {
     let file = "semigroup_and_ambiguous.hs";

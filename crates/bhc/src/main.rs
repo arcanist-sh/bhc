@@ -131,13 +131,43 @@ struct Cli {
     #[arg(short = 'D', value_name = "MACRO[=VALUE]")]
     defines: Vec<String>,
 
-    /// Enable all warnings
+    /// Warning flags, as in GHC: -Wall, -Werror, -W<name>, -Wno-<name>
+    /// (names: incomplete-patterns, overlapping-patterns,
+    /// missing-signatures, unsupported-extensions, missing-modules,
+    /// unexported-imports, bhc-stubs, bhc-splices, bhc-deriving,
+    /// bhc-unimplemented)
+    #[arg(short = 'W', value_name = "FLAG", action = clap::ArgAction::Append)]
+    warning_flags: Vec<String>,
+
+    /// Turn every warning off (GHC's -w)
+    #[arg(short = 'w')]
+    no_warnings: bool,
+
+    /// Enable all warnings (same as -Wall)
     #[arg(long = "Wall", hide = true)]
     wall: bool,
 
-    /// Treat warnings as errors
+    /// Treat warnings as errors (same as -Werror)
     #[arg(long = "Werror", hide = true)]
     werror: bool,
+}
+
+/// The CLI's warning flags in the order GHC reads them: `-w` first, then the
+/// `-W` flags as given (the `--Wall`/`--Werror` spellings count as `-Wall`
+/// and `-Werror`).
+fn warning_flags(cli: &Cli) -> Vec<String> {
+    let mut flags = Vec::new();
+    if cli.no_warnings {
+        flags.push("none".to_string());
+    }
+    if cli.wall {
+        flags.push("all".to_string());
+    }
+    flags.extend(cli.warning_flags.iter().cloned());
+    if cli.werror {
+        flags.push("error".to_string());
+    }
+    flags
 }
 
 /// Compilation profile
@@ -527,7 +557,8 @@ fn try_compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .tensor_fusion(cli.tensor_fusion)
         // Whole-program builds compile Data.Monoid/Data.Semigroup from the
         // bundled sources; `-c` keeps them builtin (#52).
-        .bundled_library(!cli.compile_only);
+        .bundled_library(!cli.compile_only)
+        .warning_flags(warning_flags(cli));
 
     // Set target if specified
     if let Some(ref target) = cli.target {
@@ -649,7 +680,8 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Build compiler with import paths and CPP defines
     let mut builder = CompilerBuilder::new()
         .profile(profile)
-        .dump_ir(dump_options(cli)?);
+        .dump_ir(dump_options(cli)?)
+        .warning_flags(warning_flags(cli));
 
     for path in &cli.import_paths {
         builder = builder.import_path(
@@ -837,7 +869,8 @@ fn compile_modules_only(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .compile_only(true)
         .output_type(bhc_session::OutputType::Object)
         .emit_kernel_report(cli.kernel_report)
-        .tensor_fusion(cli.tensor_fusion);
+        .tensor_fusion(cli.tensor_fusion)
+        .warning_flags(warning_flags(cli));
 
     if let Some(ref target) = cli.target {
         builder = builder.target(target.clone());

@@ -271,14 +271,77 @@ fn test_pattern_warnings_are_located() {
         "patterns.hs did not build:\n{text}"
     );
     for needle in [
-        "warning: pattern match(es) are non-exhaustive in `isTrue`",
+        "warning[W0040]: pattern match(es) are non-exhaustive in `isTrue`",
         "patterns.hs:4:1",
         "patterns not matched: False",
-        "warning: pattern match is redundant in `classify`",
+        "warning[W0041]: pattern match is redundant in `classify`",
         "patterns.hs:8:1",
     ] {
         assert!(text.contains(needle), "no `{needle}` in:\n{text}");
     }
+}
+
+/// Build `warnings/<file>` with `flags`, returning whether it built and its
+/// standard error.
+fn build_warnings_fixture(file: &str, flags: &[&str]) -> (bool, String) {
+    let path = bhc_e2e_tests::fixtures_dir().join("warnings").join(file);
+    let out = tempfile::tempdir().expect("temporary directory");
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "-p", "bhc", "--"])
+        .args(flags)
+        .arg(&path)
+        .arg("-o")
+        .arg(out.path().join("program"))
+        .output()
+        .expect("failed to run the compiler");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The `-W` flags, read as GHC reads them: `-Wno-<name>` turns a warning
+/// off, `-w` turns them all off, a later flag overrides an earlier one, and
+/// `-Werror` fails the build when a warning is shown (#146).
+#[test]
+fn test_warning_flags() {
+    let (ok, text) = build_warnings_fixture("patterns.hs", &["-Wno-incomplete-patterns"]);
+    assert!(
+        ok && !text.contains("W0040") && text.contains("W0041"),
+        "{text}"
+    );
+    let (ok, text) = build_warnings_fixture("patterns.hs", &["-w"]);
+    assert!(ok && !text.contains("warning"), "{text}");
+    let (ok, text) = build_warnings_fixture("patterns.hs", &["-w", "-Wincomplete-patterns"]);
+    assert!(
+        ok && text.contains("W0040") && !text.contains("W0041"),
+        "{text}"
+    );
+    let (ok, text) = build_warnings_fixture("patterns.hs", &["-Werror"]);
+    assert!(
+        !ok && text.contains("2 warnings treated as errors (-Werror)"),
+        "{text}"
+    );
+    let (ok, _) = build_warnings_fixture("patterns.hs", &["-w", "-Werror"]);
+    assert!(ok, "-Werror with every warning off still builds");
+}
+
+/// `-Wall` reports top-level bindings without signatures, with the type
+/// bhc inferred; without it they are not reported.
+#[test]
+fn test_missing_signatures_warning() {
+    let (ok, text) = build_warnings_fixture("signatures.hs", &["-Wall"]);
+    assert!(ok, "{text}");
+    for needle in [
+        "warning[W0002]: top-level binding with no type signature: `pair :: a -> b -> (a, b)`",
+        "signatures.hs:5:1",
+        "`lookupOr :: a -> b -> Map b a -> a`",
+    ] {
+        assert!(text.contains(needle), "no `{needle}` in:\n{text}");
+    }
+    assert!(!text.contains("`main ::"), "main has a signature:\n{text}");
+    let (ok, text) = build_warnings_fixture("signatures.hs", &[]);
+    assert!(ok && !text.contains("W0002"), "{text}");
 }
 
 /// Every rejected program's errors name a file, line and column, and no

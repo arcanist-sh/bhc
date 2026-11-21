@@ -22,6 +22,16 @@ All notable changes to BHC are recorded here. The format follows
   `bhc explain E0040` explains it with an example and its fix; `bhc explain`
   lists the codes. Every code the type checker uses is explained, and a
   test keeps it so.
+- Warnings have GHC's flags: `-Wall`, `-Werror`, `-W<name>`, `-Wno-<name>`
+  and `-w`, read in order. `-Wall` adds `-Wmissing-signatures`, which
+  reports a top-level binding with no signature and the type bhc inferred
+  for it (`W0002`). The other warnings, on by default as before, are
+  `incomplete-patterns` (`W0040`), `overlapping-patterns` (`W0041`),
+  `unsupported-extensions`, `missing-modules`, `unexported-imports` and
+  bhc's own `bhc-stubs`, `bhc-splices`, `bhc-deriving` and
+  `bhc-unimplemented`. `-Werror` fails the build when any is shown. The
+  `--Wall` and `--Werror` flags existed but were never read. Lowering's
+  warnings are printed with their location like the others.
 - `bhc check` ends with "`<file>` failed to check" instead of "Type checking
   failed", which it also said for a parse error, and error counts read
   "1 error".

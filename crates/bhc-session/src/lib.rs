@@ -158,6 +158,10 @@ pub struct Options {
     pub warn_all: bool,
     /// Treat warnings as errors.
     pub deny_warnings: bool,
+    /// The `-W` flags in the order given, without the `-W` (`all`,
+    /// `error`, `no-incomplete-patterns`, `missing-signatures`), and `-w`
+    /// as `none`. Later flags override earlier ones, as in GHC.
+    pub warning_flags: Vec<String>,
     /// Generate kernel reports (Numeric profile).
     pub emit_kernel_report: bool,
     /// Explicitly enable the tensor fusion pipeline regardless of profile.
@@ -206,6 +210,7 @@ impl Default for Options {
             libraries: Vec::new(),
             warn_all: false,
             deny_warnings: false,
+            warning_flags: Vec::new(),
             emit_kernel_report: false,
             tensor_fusion: false,
             dump_ir: IrDumpOptions::default(),

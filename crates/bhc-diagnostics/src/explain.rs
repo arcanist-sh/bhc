@@ -1112,6 +1112,102 @@ foo x y = x + y
         },
     );
 
+    map.insert(
+        "W0002",
+        ErrorExplanation {
+            code: "W0002",
+            title: "Top-level binding with no type signature (-Wmissing-signatures)",
+            explanation: r#"
+A top-level binding has no type signature. The program compiles, and the
+warning shows the type bhc inferred for the binding. It can be more specific
+than GHC's (a numeric binding bhc defaulted to `Int`), or leave out a class
+bhc does not track yet (`Foldable`), so check it before pasting it.
+
+A signature documents the binding, and pins its type: without one, a change
+in the body can silently change the type every caller sees.
+
+Part of `-Wall`; turn it on alone with `-Wmissing-signatures`.
+"#,
+            example: Some(
+                r#"
+double x = x * 2   -- W0002: no signature
+"#,
+            ),
+            correct_example: Some(
+                r#"
+double :: Num a => a -> a
+double x = x * 2
+"#,
+            ),
+            doc_link: None,
+            related_codes: &[],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "W0040",
+        ErrorExplanation {
+            code: "W0040",
+            title: "Non-exhaustive pattern match (-Wincomplete-patterns)",
+            explanation: r#"
+Some values match no equation of a function or no alternative of a `case`.
+Calling it with one of them stops the program with a pattern match failure.
+The warning names the constructors that are not matched.
+
+On by default; `-Wno-incomplete-patterns` turns it off.
+"#,
+            example: Some(
+                r#"
+isTrue :: Bool -> Int
+isTrue True = 1          -- W0040: patterns not matched: False
+"#,
+            ),
+            correct_example: Some(
+                r#"
+isTrue :: Bool -> Int
+isTrue True = 1
+isTrue False = 0
+"#,
+            ),
+            doc_link: None,
+            related_codes: &[],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "W0041",
+        ErrorExplanation {
+            code: "W0041",
+            title: "Redundant pattern match (-Woverlapping-patterns)",
+            explanation: r#"
+An equation or alternative can never be reached: every value it matches is
+matched by one before it. It is dead code, and often a sign that the
+equations are in the wrong order.
+
+On by default; `-Wno-overlapping-patterns` turns it off.
+"#,
+            example: Some(
+                r#"
+classify :: Int -> String
+classify _ = "any"
+classify 0 = "zero"      -- W0041: never reached
+"#,
+            ),
+            correct_example: Some(
+                r#"
+classify :: Int -> String
+classify 0 = "zero"
+classify _ = "any"
+"#,
+            ),
+            doc_link: None,
+            related_codes: &[],
+            common_mistakes: &[],
+        },
+    );
+
     map
 });
 

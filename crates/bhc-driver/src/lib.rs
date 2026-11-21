@@ -382,6 +382,109 @@ fn report_diagnostics(module: &str, diagnostics: &[bhc_diagnostics::Diagnostic])
     }
 }
 
+/// Warnings shown unless a flag turns them off: what bhc printed before
+/// warnings had flags.
+const DEFAULT_WARNINGS: &[&str] = &[
+    "incomplete-patterns",
+    "overlapping-patterns",
+    "unsupported-extensions",
+    "missing-modules",
+    "unexported-imports",
+    "bhc-stubs",
+    "bhc-splices",
+    "bhc-deriving",
+    "bhc-unimplemented",
+];
+
+/// Warnings `-Wall` adds to the defaults.
+const WALL_WARNINGS: &[&str] = &["missing-signatures"];
+
+/// Which warnings to show and whether they fail the build, from the `-W`
+/// flags read in order (#146).
+struct WarningPolicy {
+    enabled: rustc_hash::FxHashSet<String>,
+    deny: bool,
+}
+
+impl WarningPolicy {
+    fn from_flags(flags: &[String]) -> Self {
+        let mut enabled: rustc_hash::FxHashSet<String> =
+            DEFAULT_WARNINGS.iter().map(|w| (*w).to_string()).collect();
+        let mut deny = false;
+        for flag in flags {
+            match flag.as_str() {
+                "none" => enabled.clear(),
+                "default" => enabled.extend(DEFAULT_WARNINGS.iter().map(|w| (*w).to_string())),
+                "all" | "extra" | "everything" => enabled.extend(
+                    DEFAULT_WARNINGS
+                        .iter()
+                        .chain(WALL_WARNINGS)
+                        .map(|w| (*w).to_string()),
+                ),
+                "error" => deny = true,
+                "no-error" => deny = false,
+                other => match other.strip_prefix("no-") {
+                    Some(name) => {
+                        enabled.remove(name);
+                    }
+                    // A GHC warning bhc does not have yet is accepted and
+                    // does nothing, as GHC flags are passed through builds.
+                    None => {
+                        enabled.insert(other.to_string());
+                    }
+                },
+            }
+        }
+        Self { enabled, deny }
+    }
+
+    fn shows(&self, flag: &str) -> bool {
+        self.enabled.contains(flag)
+    }
+}
+
+/// The `-W` flag of a warning that carries a code.
+fn warning_flag_of_code(code: Option<&str>) -> &'static str {
+    match code {
+        Some("W0002") => "missing-signatures",
+        Some("W0040") => "incomplete-patterns",
+        Some("W0041") => "overlapping-patterns",
+        _ => "default",
+    }
+}
+
+/// Lowering's warnings as located diagnostics, each with its `-W` flag.
+fn lower_warning_diagnostics(
+    warnings: &[bhc_lower::LowerWarning],
+) -> Vec<(&'static str, bhc_diagnostics::Diagnostic)> {
+    warnings
+        .iter()
+        .map(|w| {
+            let mut diag = bhc_diagnostics::Diagnostic::warning(w.to_string());
+            let span = w.span();
+            if !span.is_dummy() {
+                diag = diag.with_label(bhc_span::FullSpan::new(FileId::new(0), span), "");
+            }
+            (w.flag(), diag)
+        })
+        .collect()
+}
+
+/// A module's name as lowering gives it to the HIR (`Main` without a
+/// header), to match [`PARSED_SOURCE`].
+fn ast_module_name(ast: &AstModule) -> String {
+    ast.name.as_ref().map_or_else(
+        || "Main".to_string(),
+        |n| {
+            n.parts
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        },
+    )
+}
+
 /// The main compiler driver.
 pub struct Compiler {
     session: SessionRef,
@@ -1461,18 +1564,21 @@ impl Compiler {
         let hir = match bhc_lower::lower_module(&mut ctx, ast, &config) {
             Ok(hir) => hir,
             Err(e) => {
-                for warning in &ctx.warnings {
-                    eprintln!("warning: {warning}");
-                }
+                // Failing anyway: shown, but `-Werror` adds nothing.
+                let _ = self.report_warnings(
+                    &ast_module_name(ast),
+                    lower_warning_diagnostics(&ctx.warnings),
+                );
                 return Err(e.into());
             }
         };
 
         // Display lowering warnings first: a missing module explains the
         // unbound-name errors that follow it.
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
-        }
+        self.report_warnings(
+            &ast_module_name(ast),
+            lower_warning_diagnostics(&ctx.warnings),
+        )?;
 
         // Check for lowering errors
         if ctx.has_errors() {
@@ -1531,6 +1637,41 @@ impl Compiler {
         Ok(source_dirs)
     }
 
+    /// Show the warnings the `-W` flags turn on, located in `module`; with
+    /// `-Werror`, fail if any was shown.
+    fn report_warnings(
+        &self,
+        module: &str,
+        warnings: Vec<(&'static str, bhc_diagnostics::Diagnostic)>,
+    ) -> CompileResult<()> {
+        let policy = WarningPolicy::from_flags(&self.session.options.warning_flags);
+        let shown: Vec<bhc_diagnostics::Diagnostic> = warnings
+            .into_iter()
+            .filter(|(flag, _)| policy.shows(flag))
+            .map(|(_, diag)| diag)
+            .collect();
+        if shown.is_empty() {
+            return Ok(());
+        }
+        report_diagnostics(module, &shown);
+        if policy.deny {
+            return Err(CompileError::Other(format!(
+                "{} treated as {} (-Werror)",
+                if shown.len() == 1 {
+                    "1 warning".to_string()
+                } else {
+                    format!("{} warnings", shown.len())
+                },
+                if shown.len() == 1 {
+                    "an error"
+                } else {
+                    "errors"
+                }
+            )));
+        }
+        Ok(())
+    }
+
     /// Type check a HIR module.
     fn type_check(
         &self,
@@ -1555,7 +1696,15 @@ impl Compiler {
                 record_field_types: Some(&lower_ctx.interface_record_field_types),
             },
         ) {
-            Ok(typed) => Ok(typed),
+            Ok(typed) => {
+                let warnings = typed
+                    .warnings
+                    .iter()
+                    .map(|w| (warning_flag_of_code(w.code.as_deref()), w.clone()))
+                    .collect();
+                self.report_warnings(hir.name.as_str(), warnings)?;
+                Ok(typed)
+            }
             Err(diagnostics) => {
                 report_diagnostics(hir.name.as_str(), &diagnostics);
                 Err(CompileError::TypeError(diagnostics.len()))
@@ -1690,10 +1839,11 @@ impl Compiler {
             Some(&typed.binder_types),
         )
         .map_err(CompileError::from)?;
-        let warnings = bhc_hir_to_core::take_lowering_warnings();
-        if !warnings.is_empty() {
-            report_diagnostics(hir.name.as_str(), &warnings);
-        }
+        let warnings = bhc_hir_to_core::take_lowering_warnings()
+            .into_iter()
+            .map(|w| (warning_flag_of_code(w.code.as_deref()), w))
+            .collect();
+        self.report_warnings(hir.name.as_str(), warnings)?;
 
         // Type expansions (name -> (params, underlying type)) so a concrete monad
         // written over a transformer stack via a newtype (pandoc's PandocIO, the
@@ -3789,18 +3939,21 @@ impl Compiler {
         let hir = match bhc_lower::lower_module_with_cache(&mut ctx, ast, &config, cache) {
             Ok(hir) => hir,
             Err(e) => {
-                for warning in &ctx.warnings {
-                    eprintln!("warning: {warning}");
-                }
+                // Failing anyway: shown, but `-Werror` adds nothing.
+                let _ = self.report_warnings(
+                    &ast_module_name(ast),
+                    lower_warning_diagnostics(&ctx.warnings),
+                );
                 return Err(e.into());
             }
         };
 
         // Display lowering warnings first: a missing module explains the
         // unbound-name errors that follow it.
-        for warning in &ctx.warnings {
-            eprintln!("warning: {warning}");
-        }
+        self.report_warnings(
+            &ast_module_name(ast),
+            lower_warning_diagnostics(&ctx.warnings),
+        )?;
 
         if ctx.has_errors() {
             let errors = ctx.take_errors();
@@ -7401,6 +7554,20 @@ impl CompilerBuilder {
         self
     }
 
+    /// Set the warning flags (`-W` flags without the `-W`, in order; see
+    /// [`bhc_session::Options::warning_flags`]).
+    #[must_use]
+    pub fn warning_flags(mut self, flags: Vec<String>) -> Self {
+        self.options.warn_all = flags.iter().any(|f| f == "all");
+        self.options.deny_warnings = flags.iter().rev().find_map(|f| match f.as_str() {
+            "error" => Some(true),
+            "no-error" => Some(false),
+            _ => None,
+        }) == Some(true);
+        self.options.warning_flags = flags;
+        self
+    }
+
     /// Add a CPP preprocessor define (e.g., "FOO" or "BAR=1").
     #[must_use]
     pub fn define(mut self, def: impl Into<String>) -> Self {
@@ -7823,6 +7990,22 @@ fn supply_io_primitives() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `-W` flags in order: defaults, `-Wall`, `-Wno-`, `-w`, `-Werror`.
+    #[test]
+    fn test_warning_policy_reads_flags_in_order() {
+        let flags = |fs: &[&str]| fs.iter().map(|f| (*f).to_string()).collect::<Vec<_>>();
+        let default = WarningPolicy::from_flags(&[]);
+        assert!(default.shows("incomplete-patterns") && !default.shows("missing-signatures"));
+        assert!(!default.deny);
+        let all = WarningPolicy::from_flags(&flags(&["all", "no-incomplete-patterns"]));
+        assert!(all.shows("missing-signatures") && !all.shows("incomplete-patterns"));
+        let none = WarningPolicy::from_flags(&flags(&["all", "none", "overlapping-patterns"]));
+        assert!(none.shows("overlapping-patterns") && !none.shows("missing-signatures"));
+        let deny = WarningPolicy::from_flags(&flags(&["error", "no-error", "error"]));
+        assert!(deny.deny);
+        assert_eq!(warning_flag_of_code(Some("W0002")), "missing-signatures");
+    }
 
     #[test]
     fn test_parse_conf_package() {

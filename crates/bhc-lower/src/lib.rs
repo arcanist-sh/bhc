@@ -216,6 +216,40 @@ pub enum LowerWarning {
     },
 }
 
+impl LowerWarning {
+    /// Where the warning applies.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            LowerWarning::StubUsed { span, .. }
+            | LowerWarning::NotImplemented { span, .. }
+            | LowerWarning::SpliceSkipped { span, .. }
+            | LowerWarning::DerivingUnsupported { span, .. }
+            | LowerWarning::UnimplementedExtension { span, .. }
+            | LowerWarning::UnknownExtension { span, .. }
+            | LowerWarning::ModuleNotFound { span, .. }
+            | LowerWarning::NotExported { span, .. } => *span,
+        }
+    }
+
+    /// The warning's flag name, as `-W<name>` / `-Wno-<name>` turn it on
+    /// and off.
+    #[must_use]
+    pub fn flag(&self) -> &'static str {
+        match self {
+            LowerWarning::StubUsed { .. } => "bhc-stubs",
+            LowerWarning::NotImplemented { .. } => "bhc-unimplemented",
+            LowerWarning::SpliceSkipped { .. } => "bhc-splices",
+            LowerWarning::DerivingUnsupported { .. } => "bhc-deriving",
+            LowerWarning::UnimplementedExtension { .. } | LowerWarning::UnknownExtension { .. } => {
+                "unsupported-extensions"
+            }
+            LowerWarning::ModuleNotFound { .. } => "missing-modules",
+            LowerWarning::NotExported { .. } => "unexported-imports",
+        }
+    }
+}
+
 impl std::fmt::Display for LowerWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

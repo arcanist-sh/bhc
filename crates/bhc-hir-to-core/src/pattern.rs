@@ -1502,6 +1502,7 @@ fn check_exhaustiveness_tree(
     match tree {
         DecisionTree::Fail(_span) => {
             ctx.warn_at(
+                "W0040",
                 def_span,
                 format!("pattern match(es) are non-exhaustive in `{func_name}`"),
                 "some values match no equation",
@@ -1538,6 +1539,7 @@ fn check_exhaustiveness_tree(
                     if !missing.is_empty() {
                         let missing_names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
                         ctx.warn_at(
+                            "W0040",
                             def_span,
                             format!("pattern match(es) are non-exhaustive in `{func_name}`"),
                             "some values match no equation",
@@ -1576,6 +1578,7 @@ fn check_overlap(
     for i in 0..total_equations {
         if !reached.contains(&i) {
             ctx.warn_at(
+                "W0041",
                 equation_spans.get(i).copied().unwrap_or_default(),
                 format!("pattern match is redundant in `{func_name}`"),
                 "this equation is never reached",

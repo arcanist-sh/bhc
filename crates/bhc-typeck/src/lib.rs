@@ -118,6 +118,10 @@ pub struct TypedModule {
     /// making the `.bhi` self-contained: a consumer that does NOT import the
     /// synonym's defining module can still unify against the expanded type.
     pub type_aliases: FxHashMap<Symbol, (Vec<TyVar>, Ty)>,
+    /// Warnings about the module, each with a code the driver maps to a
+    /// `-W` flag (`W0002`, `-Wmissing-signatures`). The driver decides
+    /// which to show.
+    pub warnings: Vec<Diagnostic>,
 }
 
 // Re-export definition types from bhc-lower
@@ -900,7 +904,9 @@ pub fn type_check_module_with_imports(
         Err(ctx.take_diagnostics())
     } else {
         let saw_error_expr = ctx.saw_error_expr;
-        let typed = ctx.into_typed_module(hir.clone());
+        let warnings = ctx.missing_signature_warnings(hir);
+        let mut typed = ctx.into_typed_module(hir.clone());
+        typed.warnings = warnings;
         // `Ty::Error` unifies with anything, so it must only stand for a
         // type the checker has already reported an error about (#97).
         debug_assert!(

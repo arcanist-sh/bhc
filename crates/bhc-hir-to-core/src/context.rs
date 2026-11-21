@@ -1904,10 +1904,13 @@ impl LowerContext {
 
     /// Record a warning about the source at `span`, with `label` under it
     /// and `note` after it.
-    pub fn warn_at(&mut self, span: Span, message: String, label: &str, note: String) {
+    /// The `code` names the warning's `-W` flag (`W0040`,
+    /// `-Wincomplete-patterns`).
+    pub fn warn_at(&mut self, code: &str, span: Span, message: String, label: &str, note: String) {
         let full = bhc_span::FullSpan::new(bhc_span::FileId::new(0), span);
         self.warnings.push(
             bhc_diagnostics::Diagnostic::warning(message)
+                .with_code(code)
                 .with_label(full, label)
                 .with_note(note),
         );

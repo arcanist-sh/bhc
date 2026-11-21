@@ -1037,6 +1037,83 @@ pub(crate) fn pretty_ty(ty: &Ty) -> String {
     pretty_ty_named(&crate::context::rename_vars(ty, &names))
 }
 
+/// A scheme as a signature reads: `(Num a, Show b) => a -> b -> String`,
+/// with its type variables named `a`, `b`, ... and no parentheses around
+/// the whole type.
+pub(crate) fn pretty_signature(scheme: &bhc_types::Scheme) -> String {
+    let vars = scheme.ty.free_vars();
+    let names = crate::context::signature_variable_names(&vars);
+    let ty = crate::context::rename_vars(&scheme.ty, &names);
+    let shown = signature_ty(&ty, SigPrec::Top);
+    let constraints: Vec<String> = scheme
+        .constraints
+        .iter()
+        .map(|c| {
+            let args: Vec<String> = c
+                .args
+                .iter()
+                .map(|a| signature_ty(&crate::context::rename_vars(a, &names), SigPrec::Arg))
+                .collect();
+            format!("{} {}", c.class.as_str(), args.join(" "))
+        })
+        .collect();
+    match constraints.len() {
+        0 => shown,
+        1 => format!("{} => {shown}", constraints[0]),
+        _ => format!("({}) => {shown}", constraints.join(", ")),
+    }
+}
+
+/// Where a type appears in a signature, for its parentheses.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SigPrec {
+    /// The whole type: nothing needs parentheses.
+    Top,
+    /// Left of `->`: a function needs them.
+    FunArg,
+    /// An argument of a type application: any application or function does.
+    Arg,
+}
+
+/// A type in Haskell's own notation, with only the parentheses it needs:
+/// `Map k v -> IO ()`, where [`pretty_ty`] writes `((Map k) v) -> (IO ())`.
+fn signature_ty(ty: &Ty, prec: SigPrec) -> String {
+    let wrap = |s: String, needed: bool| if needed { format!("({s})") } else { s };
+    match ty {
+        Ty::Fun(from, to) => wrap(
+            format!(
+                "{} -> {}",
+                signature_ty(from, SigPrec::FunArg),
+                signature_ty(to, SigPrec::Top)
+            ),
+            prec != SigPrec::Top,
+        ),
+        Ty::App(..) => {
+            let mut args = Vec::new();
+            let mut head = ty;
+            while let Ty::App(f, a) = head {
+                args.push(a.as_ref());
+                head = f;
+            }
+            args.reverse();
+            let mut parts = vec![signature_ty(head, SigPrec::Arg)];
+            parts.extend(args.iter().map(|a| signature_ty(a, SigPrec::Arg)));
+            wrap(parts.join(" "), prec == SigPrec::Arg)
+        }
+        Ty::List(elem) => format!("[{}]", signature_ty(elem, SigPrec::Top)),
+        Ty::Tuple(elems) if elems.is_empty() => "()".to_string(),
+        Ty::Tuple(elems) => format!(
+            "({})",
+            elems
+                .iter()
+                .map(|e| signature_ty(e, SigPrec::Top))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => pretty_ty_named(other),
+    }
+}
+
 /// Pretty-print a type as it is, a type variable by its id.
 fn pretty_ty_named(ty: &Ty) -> String {
     match ty {

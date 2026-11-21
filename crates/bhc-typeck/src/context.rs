@@ -10739,7 +10739,75 @@ impl TyCtxt {
             def_schemes,
             binder_types,
             type_aliases: self.type_aliases.clone(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// `-Wmissing-signatures` (in `-Wall`): a top-level binding written
+    /// without a type signature, with the type inferred for it. Record field
+    /// selectors and bindings lowering generates (`$...`) are not written,
+    /// so they are skipped. The driver shows these only when the flag is on.
+    #[must_use]
+    pub fn missing_signature_warnings(&self, hir: &Module) -> Vec<Diagnostic> {
+        let mut warnings = Vec::new();
+        for item in &hir.items {
+            let bhc_hir::Item::Value(def) = item else {
+                continue;
+            };
+            let name = def.name.as_str();
+            if def.sig.is_some() || name.starts_with('$') {
+                continue;
+            }
+            let is_selector = self
+                .field_name_to_con
+                .get(&def.name)
+                .is_some_and(|fields| fields.iter().any(|(_, acc)| *acc == def.id));
+            if is_selector {
+                continue;
+            }
+            let Some(scheme) = self.def_schemes.get(&def.id) else {
+                continue;
+            };
+            // Through the substitution's chains, as the binding was
+            // compiled: printed as stored, `double x = x * 2` read
+            // `a -> Int`.
+            let resolved = Scheme {
+                vars: scheme.vars.clone(),
+                constraints: scheme
+                    .constraints
+                    .iter()
+                    .map(|c| {
+                        Constraint::new_multi(
+                            c.class,
+                            c.args
+                                .iter()
+                                .map(|a| self.subst.apply_resolved(a))
+                                .collect(),
+                            c.span,
+                        )
+                    })
+                    .collect(),
+                ty: self.subst.apply_resolved(&scheme.ty),
+            };
+            let signature = crate::diagnostics::pretty_signature(&resolved);
+            // The name at the start of the definition, not every equation.
+            let lo = def.span.lo.0;
+            let len = u32::try_from(name.len()).unwrap_or(0);
+            let at_name = if def.span.is_dummy() || def.span.len() < len {
+                def.span
+            } else {
+                Span::from_raw(lo, lo + len)
+            };
+            warnings.push(
+                Diagnostic::warning(format!(
+                    "top-level binding with no type signature: `{name} :: {signature}`"
+                ))
+                .with_code("W0002")
+                .with_label(self.full_span(at_name), "add a type signature")
+                .with_note(format!("inferred: {name} :: {signature}")),
+            );
+        }
+        warnings
     }
 }
 

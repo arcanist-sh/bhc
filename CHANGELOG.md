@@ -27,6 +27,11 @@ All notable changes to BHC are recorded here. The format follows
 - `succ` and `pred` at `Integer`, and `recip` at `Double`, crashed.
 - A fractional operation's operand defaults to `Double`: `(2 ** 3, n)` and
   `(fromIntegral n / 4, n)` showed the Double's bits as an `Int`.
+- `sqrt`, `exp`, `log`, the trigonometric and hyperbolic functions,
+  `atan2`, `logBase`, `isNaN` and `isInfinite` work at `Float`: they were
+  typed at `Double` only, so `sqrt (2 :: Float)` was a type error. At `Float`
+  the result has `Float` precision and prints as one, and at `Int` the call
+  is a `No instance for Floating Int` error.
 
 ## [0.2.30] - 2026-11-20
 

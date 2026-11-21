@@ -9,3 +9,4 @@ main = do
   print ((2 :: Int) / 3)
   print (div (2.5 :: Double) 2)
   print (round (4 :: Int) :: Integer)
+  print (isNaN (1 :: Integer))

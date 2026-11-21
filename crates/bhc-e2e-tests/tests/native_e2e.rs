@@ -258,6 +258,7 @@ fn test_rejected_standard_class_operations() {
     expect_rejected(file, "No instance for `Fractional Int`");
     expect_rejected(file, "No instance for `Integral Double`");
     expect_rejected(file, "No instance for `RealFrac Int`");
+    expect_rejected(file, "No instance for `RealFloat Integer`");
 }
 
 // =============================================================================
@@ -1128,6 +1129,12 @@ fn test_tier3_higher_kinds_native() {
 #[test]
 fn test_tier3_standard_enum_numeric_native() {
     run_native_test("tier3_io/standard_enum_numeric", Profile::Default);
+}
+
+// sqrt, exp and the other Floating functions at Float
+#[test]
+fn test_tier3_floating_at_float_native() {
+    run_native_test("tier3_io/floating_at_float", Profile::Default);
 }
 
 // Hand-written Show, Eq and Ord instances for a type with parameters

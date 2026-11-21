@@ -2651,27 +2651,45 @@ impl Builtins {
             ),
             (
                 "sqrt",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "exp",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "log",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "sin",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "cos",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "tan",
-                Scheme::mono(Ty::fun(self.double_ty.clone(), self.double_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             // Comparison
             ("compare", {

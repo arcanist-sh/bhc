@@ -8287,7 +8287,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
                 let x = self.lower_f64_operand(args[0], name)?;
                 let r = self.call_double_rts(&format!("bhc_{name}_double"), &[x])?;
-                Ok(Some(self.f64_to_ptr(r)?.into()))
+                Ok(Some(self.floating_result(args[0], r)?.into()))
             }
             // `x ** y`, and `x ^^ n` as the same power with the exponent
             // converted: both were stubs that aborted.
@@ -8305,7 +8305,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.lower_f64_operand(args[1], name)?
                 };
                 let r = self.call_double_rts("bhc_pow_double", &[x, y])?;
-                Ok(Some(self.f64_to_ptr(r)?.into()))
+                Ok(Some(self.floating_result(args[0], r)?.into()))
             }
             // logBase b x = log x / log b
             "logBase" => {
@@ -8317,7 +8317,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .builder()
                     .build_float_div(log_x, log_b, "log_base")
                     .map_err(|e| CodegenError::Internal(format!("logBase: {e:?}")))?;
-                Ok(Some(self.f64_to_ptr(r)?.into()))
+                Ok(Some(self.floating_result(args[0], r)?.into()))
             }
             "isNaN" | "isInfinite" => {
                 let x = self.lower_f64_operand(args[0], name)?;
@@ -18903,8 +18903,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // A Char prints as its `show` (`'B'`), not as its code point:
-        // `putStrLn (show x)` with `show` typed at Char.
-        if self.is_char_type(&expr_ty) {
+        // `putStrLn (show x)` with `show` typed at Char. A `Float` likewise,
+        // or it printed as a Double (`print (sqrt (2 :: Float))` was
+        // `1.4142135381698608`).
+        let single_float = self.is_single_float_type(&expr_ty)
+            || matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_single_float_type(a));
+        if self.is_char_type(&expr_ty) || single_float {
+            let expr_ty = if single_float {
+                Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Float"),
+                    bhc_types::Kind::Star,
+                ))
+            } else {
+                expr_ty.clone()
+            };
             let span = bhc_span::Span::default();
             let string_ty = Ty::List(Box::new(expr_ty.clone()));
             let show_var = Var {
@@ -20748,7 +20760,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 | "tanh"
                                 | "recip"
                         ) {
-                            return true;
+                            // At `Float` they return a `Float`.
+                            return !self.is_single_float_type(&arg.ty())
+                                && !matches!(&var.ty, Ty::Fun(a, _)
+                                    if self.is_single_float_type(a));
                         }
                         // Type-preserving `Num` ops: the result type equals the
                         // argument's, so a `Double` argument means a `Double`
@@ -20765,7 +20780,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             Expr::Var(var, _) => {
                                 let n = var.name.as_str();
                                 if matches!(n, "/" | "**") {
-                                    return true;
+                                    return !matches!(&var.ty, Ty::Fun(a, _)
+                                        if self.is_single_float_type(a));
                                 }
                                 // Type-based: check if the partially-applied function returns Double
                                 // For a binary function A -> B -> C, after one application we have B -> C
@@ -28569,6 +28585,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Call a runtime function of doubles to a double (`bhc_sinh_double`,
     /// `bhc_pow_double`), declaring it on first use.
+    /// Whether `ty` is `Float` (not `Double`).
+    fn is_single_float_type(&self, ty: &Ty) -> bool {
+        self.is_float_type(ty) && !self.is_double_type(ty)
+    }
+
+    /// Whether the floating builtin being lowered is used at `Float`: by its
+    /// resolved occurrence type, or by its first argument's type.
+    fn builtin_at_single_float(&self, first_arg: &Expr) -> bool {
+        matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_single_float_type(a))
+            || self.is_single_float_type(&first_arg.ty())
+    }
+
+    /// Box the `f64` result of a floating builtin. At `Float` it is rounded
+    /// to `Float` precision first: computed in `f64`, `sqrt x * sqrt x` at
+    /// `x = 2 :: Float` was `2.0`, where GHC's `Float` gives `1.9999999`.
+    fn floating_result(
+        &mut self,
+        first_arg: &Expr,
+        r: FloatValue<'ctx>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let r = if self.builtin_at_single_float(first_arg) {
+            let err = |e: inkwell::builder::BuilderError| {
+                CodegenError::Internal(format!("Float rounding: {e:?}"))
+            };
+            let single = self
+                .builder()
+                .build_float_trunc(r, self.type_mapper().f32_type(), "to_float")
+                .map_err(err)?;
+            self.builder()
+                .build_float_ext(single, self.type_mapper().f64_type(), "from_float")
+                .map_err(err)?
+        } else {
+            r
+        };
+        self.f64_to_ptr(r)
+    }
+
     fn call_double_rts(
         &mut self,
         symbol: &str,
@@ -28617,7 +28670,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
-        Ok(Some(self.f64_to_ptr(result.into_float_value())?.into()))
+        Ok(Some(
+            self.floating_result(expr, result.into_float_value())?
+                .into(),
+        ))
     }
 
     /// Lower a binary math function (atan2).
@@ -28647,7 +28703,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
-        Ok(Some(self.f64_to_ptr(result.into_float_value())?.into()))
+        Ok(Some(
+            self.floating_result(expr1, result.into_float_value())?
+                .into(),
+        ))
     }
 
     /// Lower float-to-int conversion (ceiling, floor, round, truncate).

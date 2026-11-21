@@ -51,7 +51,7 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 if let Some((class, of_result)) = ctx.class_op_defs.get(&def_ref.def_id).copied() {
                     if let Ty::Fun(argument, returned) = &result {
                         let operand = if of_result { returned } else { argument };
-                        if matches!(class, "Fractional" | "Floating" | "RealFrac") {
+                        if matches!(class, "Fractional" | "Floating" | "RealFrac" | "RealFloat") {
                             ctx.fractional_operands.push(operand.as_ref().clone());
                         }
                         ctx.class_op_uses

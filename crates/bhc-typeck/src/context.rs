@@ -814,7 +814,14 @@ impl TyCtxt {
     /// `class` (a numeric class or `Enum`), and the program declares none
     /// for it.
     fn is_plainly_not_numeric(&self, class: &str, ty: &Ty) -> bool {
-        const NUMERIC: [&str; 5] = ["Num", "Fractional", "Integral", "Floating", "RealFrac"];
+        const NUMERIC: [&str; 6] = [
+            "Num",
+            "Fractional",
+            "Integral",
+            "Floating",
+            "RealFrac",
+            "RealFloat",
+        ];
         let declared = |classes: &[&str]| {
             classes
                 .iter()
@@ -851,7 +858,7 @@ impl TyCtxt {
             "Integral" => matches!(con.name.as_str(), "Float" | "Double"),
             // An integral type is not a fractional one: `(2 :: Int) / 3`
             // compiled and divided as integers (#97).
-            "Fractional" | "Floating" | "RealFrac" => {
+            "Fractional" | "Floating" | "RealFrac" | "RealFloat" => {
                 is_integral_type_name(con.name.as_str()) && !declared(&[class])
             }
             _ => false,
@@ -2986,37 +2993,38 @@ impl TyCtxt {
         if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
             self.dollar_def = Some(*id);
         }
-        self.class_op_defs = defs
-            .iter()
-            // The Prelude's own: not a name this module defines, a pattern
-            // variable, or a value another module's interface gave a type.
-            .filter(|(id, d)| {
-                !local_value_ids.contains(id)
-                    && !matches!(d.kind, DefKind::PatVar | DefKind::ImportedValue)
-                    && d.type_scheme.is_none()
-            })
-            .filter_map(|(id, d)| {
-                let class = match d.name.as_str() {
-                    "show" | "print" => ("Show", false),
-                    "==" | "/=" => ("Eq", false),
-                    "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => ("Ord", false),
-                    "maximum" | "minimum" => ("Ord", true),
-                    "+" | "-" | "*" | "negate" | "abs" | "signum" => ("Num", false),
-                    "sum" | "product" => ("Num", true),
-                    "/" | "recip" => ("Fractional", false),
-                    "fromIntegral" | "toInteger" | "even" | "odd" | "div" | "mod" | "quot"
-                    | "rem" | "divMod" | "quotRem" | "gcd" | "lcm" => ("Integral", false),
-                    "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "logBase" | "**" => {
-                        ("Floating", false)
-                    }
-                    "truncate" | "round" | "floor" | "ceiling" => ("RealFrac", false),
-                    "succ" | "pred" | "fromEnum" => ("Enum", false),
-                    "toEnum" => ("Enum", true),
-                    _ => return None,
-                };
-                Some((*id, class))
-            })
-            .collect();
+        self.class_op_defs =
+            defs.iter()
+                // The Prelude's own: not a name this module defines, a pattern
+                // variable, or a value another module's interface gave a type.
+                .filter(|(id, d)| {
+                    !local_value_ids.contains(id)
+                        && !matches!(d.kind, DefKind::PatVar | DefKind::ImportedValue)
+                        && d.type_scheme.is_none()
+                })
+                .filter_map(|(id, d)| {
+                    let class = match d.name.as_str() {
+                        "show" | "print" => ("Show", false),
+                        "==" | "/=" => ("Eq", false),
+                        "<" | "<=" | ">" | ">=" | "compare" | "max" | "min" => ("Ord", false),
+                        "maximum" | "minimum" => ("Ord", true),
+                        "+" | "-" | "*" | "negate" | "abs" | "signum" => ("Num", false),
+                        "sum" | "product" => ("Num", true),
+                        "/" | "recip" => ("Fractional", false),
+                        "fromIntegral" | "toInteger" | "even" | "odd" | "div" | "mod" | "quot"
+                        | "rem" | "divMod" | "quotRem" | "gcd" | "lcm" => ("Integral", false),
+                        "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "asin" | "acos"
+                        | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
+                        | "logBase" | "**" => ("Floating", false),
+                        "atan2" | "isNaN" | "isInfinite" => ("RealFloat", false),
+                        "truncate" | "round" | "floor" | "ceiling" => ("RealFrac", false),
+                        "succ" | "pred" | "fromEnum" => ("Enum", false),
+                        "toEnum" => ("Enum", true),
+                        _ => return None,
+                    };
+                    Some((*id, class))
+                })
+                .collect();
         self.numeric_conversion_defs = defs
             .iter()
             .filter(|(_, d)| {
@@ -3498,23 +3506,26 @@ impl TyCtxt {
                 )),
                 // otherwise :: Bool
                 "otherwise" => Scheme::mono(self.builtins.bool_ty.clone()),
-                // The `Floating`/`RealFloat` functions at `Double`.
-                "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
-                | "atanh" => Scheme::mono(Ty::fun(
-                    self.builtins.double_ty.clone(),
-                    self.builtins.double_ty.clone(),
-                )),
-                "atan2" | "logBase" => Scheme::mono(Ty::fun(
-                    self.builtins.double_ty.clone(),
+                // The `Floating`/`RealFloat` functions, at any type: their
+                // class is checked after solving (`class_op_defs`), and an
+                // operand nothing fixes defaults to `Double`. At `Double`
+                // only, `sqrt (2 :: Float)` was a type error.
+                "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+                | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
+                "atan2" | "logBase" => Scheme::poly(
+                    vec![a.clone()],
                     Ty::fun(
-                        self.builtins.double_ty.clone(),
-                        self.builtins.double_ty.clone(),
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                     ),
-                )),
-                "isNaN" | "isInfinite" => Scheme::mono(Ty::fun(
-                    self.builtins.double_ty.clone(),
-                    self.builtins.bool_ty.clone(),
-                )),
+                ),
+                "isNaN" | "isInfinite" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                ),
                 // show :: a -> String
                 "show" => Scheme::poly(
                     vec![a.clone()],

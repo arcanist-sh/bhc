@@ -32,6 +32,11 @@ All notable changes to BHC are recorded here. The format follows
   typed at `Double` only, so `sqrt (2 :: Float)` was a type error. At `Float`
   the result has `Float` precision and prints as one, and at `Int` the call
   is a `No instance for Floating Int` error.
+- `<>`, `mappend` and `mconcat` at a number, `Bool` or `Char`, and a number
+  used as a container (`length 1` asks for `Num (t a)` at a container type
+  nothing determines) are type errors. They type-checked and then failed
+  in code generation with "`<>` is not implemented by bhc" or "length
+  expects a list".
 
 ## [0.2.30] - 2026-11-20
 

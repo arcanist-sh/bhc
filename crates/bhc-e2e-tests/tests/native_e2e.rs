@@ -251,6 +251,15 @@ fn test_rejected_signature_missing_constraint() {
 }
 
 #[test]
+fn test_rejected_semigroup_and_ambiguous() {
+    let file = "semigroup_and_ambiguous.hs";
+    expect_rejected(file, "No instance for `Semigroup Bool`");
+    expect_rejected(file, "No instance for `Semigroup Int`");
+    expect_rejected(file, "No instance for `Monoid Char`");
+    expect_rejected(file, "No instance for `Num (t a)` in `container`");
+}
+
+#[test]
 fn test_rejected_standard_class_operations() {
     let file = "standard_class_operations.hs";
     expect_rejected(file, "No instance for `Enum [Char]`");

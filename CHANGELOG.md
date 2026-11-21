@@ -18,6 +18,15 @@ All notable changes to BHC are recorded here. The format follows
   are checked against their class: `succ "x"`, `even 'c'`, `(2 :: Int) / 3`
   and `div 2.5 2` are `No instance` errors instead of running on the wrong
   representation (#97).
+- `fromEnum`, `succ`, `pred`, `minBound`, `maxBound` and ranges such as
+  `[LT ..]` at `Bool`, `Ordering` and `()`: `fromEnum True` and
+  `map fromEnum [LT, GT]` gave addresses, `pred GT` was `GT`, `[LT ..]` and
+  `[minBound .. maxBound :: Bool]` printed nothing, and `minBound :: Bool`
+  was `Int`'s bound. `minBound` and `maxBound` also pick the right type when
+  a program derives `Bounded` for more than one type.
+- `succ` and `pred` at `Integer`, and `recip` at `Double`, crashed.
+- A fractional operation's operand defaults to `Double`: `(2 ** 3, n)` and
+  `(fromIntegral n / 4, n)` showed the Double's bits as an `Int`.
 
 ## [0.2.30] - 2026-11-20
 

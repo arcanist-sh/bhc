@@ -246,6 +246,11 @@ pub struct TyCtxt {
     /// checked once the module is solved
     /// ([`Self::check_class_ops_not_at_functions`]).
     pub(crate) class_op_uses: Vec<(&'static str, Ty, bhc_span::Span)>,
+    /// The operands of the fractional operations among `class_op_uses`
+    /// (`/`, `**`, `sqrt`, `round`, ...). A `Num` variable that is one of
+    /// them defaults to `Double`: the builtin types carry no `Fractional`
+    /// constraint, so `(2 ** 3, n)` defaulted `2 ** 3` to `Int`.
+    pub(crate) fractional_operands: Vec<Ty>,
     /// The data types and newtypes this module declares, each with the
     /// classes a standalone `deriving instance` gives it. Their instances
     /// are all visible here, so a `Show`, `Eq` or `Ord` operation at one of
@@ -406,6 +411,7 @@ impl TyCtxt {
             numeric_conversion_defs: rustc_hash::FxHashSet::default(),
             class_op_defs: FxHashMap::default(),
             class_op_uses: Vec::new(),
+            fractional_operands: Vec::new(),
             local_types: FxHashMap::default(),
             local_class_methods: FxHashMap::default(),
             local_classes: rustc_hash::FxHashSet::default(),
@@ -1515,6 +1521,14 @@ impl TyCtxt {
         }
     }
 
+    /// Whether `var` is the operand of a fractional operation
+    /// ([`TyCtxt::fractional_operands`]).
+    fn is_fractional_operand(&self, var: &TyVar) -> bool {
+        self.fractional_operands
+            .iter()
+            .any(|t| matches!(self.subst.apply_resolved(t), Ty::Var(ref v) if v == var))
+    }
+
     /// Try to default a type variable to satisfy a constraint.
     ///
     /// Following Haskell's defaulting rules:
@@ -1533,6 +1547,7 @@ impl TyCtxt {
         let class_name = class.as_str();
 
         let default_ty = match class_name {
+            "Num" if self.is_fractional_operand(var) => Some(self.builtins.double_ty.clone()),
             "Num" | "Integral" | "Enum" | "Bounded" => {
                 // Default to Int
                 Some(self.builtins.int_ty.clone())
@@ -3655,6 +3670,17 @@ impl TyCtxt {
                 "succ" | "pred" => Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
+                // `fromEnum :: a -> Int`: without it `fromEnum` took a bare
+                // fresh variable, so as a value it had no argument type and
+                // `map fromEnum [LT, GT]` returned the constructors' addresses.
+                "fromEnum" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.builtins.int_ty.clone()),
+                ),
+                "toEnum" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.builtins.int_ty.clone(), Ty::Var(a.clone())),
                 ),
                 // (&) :: a -> (a -> b) -> b
                 "&" => Scheme::poly(

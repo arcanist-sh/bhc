@@ -8407,6 +8407,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "denominator" => self.lower_builtin_rational_unary(args[0], 1000902, "denominator"),
             "toRational" => self.lower_builtin_to_rational(args[0]),
             "fromRational" => self.lower_builtin_from_rational(args[0]),
+            // `recip` at a floating type is `1 / x`; it called the Rational
+            // runtime function on the Double and crashed.
+            "recip" if self.is_floating_operand(args[0]) => {
+                let val = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("recip: no value".to_string()))?;
+                let x = self.coerce_to_f64(val)?;
+                let one = self.type_mapper().f64_type().const_float(1.0);
+                let quotient = self
+                    .builder()
+                    .build_float_div(one, x, "recip")
+                    .map_err(|e| CodegenError::Internal(format!("recip: {e:?}")))?;
+                Ok(Some(quotient.into()))
+            }
             "recip" => self.lower_builtin_rational_unary(args[0], 1000914, "recip"),
 
             // Numeric conversions (identity for BHC's single Int type)
@@ -11301,6 +11315,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 && self.derived_to_enum_fns.contains_key(&type_name)
             {
                 return self.lower_enum_from_to_user_enum(from_expr, to_expr, &type_name);
+            }
+        }
+        // `[False .. True]`: by constructor tag, as `[False ..]` is.
+        if self.standard_enum_last_tag(from_expr).is_some() {
+            if let Some(list) = self.lower_user_enum_range(from_expr, None, Some(to_expr))? {
+                return Ok(Some(list));
             }
         }
         if self.builtin_at_integer(from_expr) {
@@ -28948,6 +28968,51 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             || self.expr_returns_double(first_arg)
     }
 
+    /// Whether the argument of `recip` is a `Double` or `Float`, not a
+    /// `Rational`.
+    fn is_floating_operand(&self, arg: &Expr) -> bool {
+        let ty = arg.ty();
+        !self.is_rational_expr(arg)
+            && (self.builtin_at_floating(arg)
+                || self.is_double_type(&ty)
+                || self.is_float_type(&ty))
+    }
+
+    /// `succ` (`step` 1) or `pred` (`step` -1) at `Integer`, with the
+    /// runtime's arbitrary-precision addition: the `Int` path added to the
+    /// number's pointer, and showing the result crashed.
+    fn integer_step(
+        &mut self,
+        expr: &Expr,
+        step: i64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("succ/pred: no value".to_string()))?;
+        let n = self.value_to_ptr(val)?;
+        let function = |this: &Self, id: usize| {
+            this.functions.get(&VarId::new(id)).copied().ok_or_else(|| {
+                CodegenError::Internal(format!("Integer RTS function {id} not declared"))
+            })
+        };
+        let from_i64 = function(self, 1000600)?;
+        let add = function(self, 1000603)?;
+        let delta = self.type_mapper().i64_type().const_int(step as u64, true);
+        let delta = self
+            .builder()
+            .build_call(from_i64, &[delta.into()], "step")
+            .map_err(|e| CodegenError::Internal(format!("succ/pred: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("succ/pred: no step".to_string()))?;
+        Ok(self
+            .builder()
+            .build_call(add, &[n.into(), delta.into()], "integer_step")
+            .map_err(|e| CodegenError::Internal(format!("succ/pred: {e:?}")))?
+            .try_as_basic_value()
+            .basic())
+    }
+
     fn builtin_at_integer(&self, first_arg: &Expr) -> bool {
         matches!(&self.current_builtin_ty, Ty::Fun(a, _) if self.is_integer_type(a))
             || self.is_integer_type(&first_arg.ty())
@@ -32195,6 +32260,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if Self::is_exception_object_ty(&expr.ty()) {
             return self.create_show_desc_global(20, None, None);
         }
+        // A defaulted fractional component with no type here
+        // (`(2 ** 3, 1 :: Int)`, `(fromIntegral n / 4, n)`) showed its
+        // Double's bits as an Int.
+        if matches!(expr.ty(), Ty::Var(_) | Ty::Error) && self.expr_returns_double(expr) {
+            return self.get_primitive_show_desc(1);
+        }
         // First determine the coerce type
         let coerce = if let Some((c, _, _)) = self.infer_show_from_expr(expr) {
             c
@@ -35320,6 +35391,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `succ` - successor function (n + 1), or user enum succ via fromEnum/toEnum.
     fn lower_builtin_succ(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.standard_enum_last_tag(expr).is_some() {
+            return self.standard_enum_step(expr, 1);
+        }
+        if self.builtin_at_integer(expr) {
+            return self.integer_step(expr, 1);
+        }
         // Check if argument is a user enum type
         if let Some(type_name) = self.infer_adt_type_from_expr(expr) {
             if self.derived_from_enum_fns.contains_key(&type_name)
@@ -35354,6 +35431,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `pred` - predecessor function (n - 1), or user enum pred via fromEnum/toEnum.
     fn lower_builtin_pred(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.standard_enum_last_tag(expr).is_some() {
+            return self.standard_enum_step(expr, -1);
+        }
+        if self.builtin_at_integer(expr) {
+            return self.integer_step(expr, -1);
+        }
         // Check if argument is a user enum type
         if let Some(type_name) = self.infer_adt_type_from_expr(expr) {
             if self.derived_from_enum_fns.contains_key(&type_name)
@@ -35421,8 +35504,144 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
         }
+        // A standard enumeration is its constructor's tag: `fromEnum True`
+        // returned the constructor's address.
+        if self.standard_enum_last_tag(expr).is_some() {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("fromEnum: no value".to_string()))?;
+            return Ok(Some(self.standard_enum_tag(val)?.into()));
+        }
         // Fallback: identity (fromEnum on Int = identity)
         self.lower_expr(expr)
+    }
+
+    /// The last constructor tag of `Bool` (1), `Ordering` (2) or `()` (0)
+    /// when `expr` is one of them, by its type or, when that is not known,
+    /// by the constructor it names.
+    fn standard_enum_last_tag(&self, expr: &Expr) -> Option<u32> {
+        // A builtin's Core type can be missing (`minBound` in
+        // `[minBound .. maxBound :: Bool]`); the type checker's is not.
+        let ty = match (expr.ty(), expr) {
+            (Ty::Error, Expr::Var(var, _)) => var.checked_ty.clone(),
+            (ty, _) => ty,
+        };
+        if self.is_bool_type(&ty) {
+            return Some(1);
+        }
+        if Self::is_ordering_type(&ty) {
+            return Some(2);
+        }
+        if self.is_unit_type(&ty) {
+            return Some(0);
+        }
+        match expr {
+            Expr::Var(var, _) => match var.name.as_str() {
+                "True" | "False" => Some(1),
+                "LT" | "EQ" | "GT" => Some(2),
+                "()" => Some(0),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `succ` (`step` 1) or `pred` (`step` -1) at `Bool`, `Ordering` or
+    /// `()`: the constructor whose tag is `step` from the argument's. They
+    /// took the `Int` path, adding to the constructor's address, so
+    /// `pred GT` printed `GT`. Stepping past the last or first constructor
+    /// is not checked.
+    fn standard_enum_step(
+        &mut self,
+        expr: &Expr,
+        step: i64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("succ/pred: no value".to_string()))?;
+        let tag = self.standard_enum_tag(val)?;
+        let delta = self.type_mapper().i64_type().const_int(step as u64, true);
+        let stepped = self
+            .builder()
+            .build_int_add(tag, delta, "enum_step")
+            .map_err(|e| CodegenError::Internal(format!("succ/pred: {e:?}")))?;
+        Ok(Some(self.alloc_nullary_con(stepped)?.into()))
+    }
+
+    /// A nullary constructor whose tag is computed at run time.
+    fn alloc_nullary_con(&self, tag: IntValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr = self.alloc_adt(0, 0)?;
+        let tag_ptr = self
+            .builder()
+            .build_struct_gep(self.adt_type(0), ptr, 0, "tag_ptr")
+            .map_err(|e| CodegenError::Internal(format!("nullary tag ptr: {e:?}")))?;
+        self.builder()
+            .build_store(tag_ptr, tag)
+            .map_err(|e| CodegenError::Internal(format!("nullary tag store: {e:?}")))?;
+        Ok(ptr)
+    }
+
+    /// `minBound` (`max` false) or `maxBound` (`max` true) at the type the
+    /// use was stamped with: a standard enumeration, `Char`, or a type with
+    /// a derived `Bounded`. `None` when the type is none of these.
+    fn typed_bound(&mut self, max: bool) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ty = self.current_builtin_ty.clone();
+        let i64_ty = self.type_mapper().i64_type();
+        let last = if self.is_bool_type(&ty) {
+            Some(1)
+        } else if Self::is_ordering_type(&ty) {
+            Some(2)
+        } else if self.is_unit_type(&ty) {
+            Some(0)
+        } else {
+            None
+        };
+        if let Some(last) = last {
+            let tag = i64_ty.const_int(if max { last } else { 0 }, false);
+            return Ok(Some(self.alloc_nullary_con(tag)?.into()));
+        }
+        if self.is_char_type(&ty) {
+            let code = i64_ty.const_int(if max { 0x10FFFF } else { 0 }, false);
+            return Ok(Some(self.int_to_ptr(code)?.into()));
+        }
+        let Ty::Con(con) = &ty else {
+            return Ok(None);
+        };
+        let fns = if max {
+            &self.derived_max_bound_fns
+        } else {
+            &self.derived_min_bound_fns
+        };
+        let Some(&var_id) = fns.get(con.name.as_str()) else {
+            return Ok(None);
+        };
+        let Some(fn_val) = self.functions.get(&var_id).copied() else {
+            return Ok(None);
+        };
+        let ptr_type = self.type_mapper().ptr_type();
+        let result = self
+            .builder()
+            .build_indirect_call(
+                ptr_type.fn_type(&[ptr_type.into()], false),
+                fn_val.as_global_value().as_pointer_value(),
+                &[ptr_type.const_null().into()],
+                "derived_bound",
+            )
+            .map_err(|e| CodegenError::Internal(format!("bound call: {e:?}")))?;
+        Ok(result.try_as_basic_value().basic())
+    }
+
+    /// The tag of a value of a standard enumeration, as an `i64`.
+    fn standard_enum_tag(&mut self, val: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        match val {
+            BasicValueEnum::PointerValue(ptr) => self.extract_adt_tag(ptr),
+            BasicValueEnum::IntValue(i) if i.get_type().get_bit_width() < 64 => self
+                .builder()
+                .build_int_z_extend(i, i64_ty, "enum_tag")
+                .map_err(|e| CodegenError::Internal(format!("enum tag: {e:?}"))),
+            other => self.to_int_value(other),
+        }
     }
 
     /// Lower `toEnum` - convert Int to enum value.
@@ -35469,6 +35688,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `minBound` - return the minimum value of a Bounded type.
     fn lower_builtin_min_bound(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(bound) = self.typed_bound(false)? {
+            return Ok(Some(bound));
+        }
         // If there's exactly one user enum with derived Bounded, use it
         if self.derived_min_bound_fns.len() == 1 {
             let (type_name, &var_id) = self.derived_min_bound_fns.iter().next().unwrap();
@@ -35499,6 +35721,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `maxBound` - return the maximum value of a Bounded type.
     fn lower_builtin_max_bound(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(bound) = self.typed_bound(true)? {
+            return Ok(Some(bound));
+        }
         // If there's exactly one user enum with derived Bounded, use it
         if self.derived_max_bound_fns.len() == 1 {
             let (type_name, &var_id) = self.derived_max_bound_fns.iter().next().unwrap();
@@ -35813,33 +36038,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// no end is given. The integer paths these took otherwise produced an
     /// empty list, `[x]`, or a crash. `None` when the type is not such an
     /// enumeration.
+    ///
+    /// The standard enumerations `Bool`, `Ordering` and `()` are handled the
+    /// same way, reading the tag directly: `[LT ..]` and `[False ..]` took the
+    /// `Int` path, which counted up from the constructor's address.
     fn lower_user_enum_range(
         &mut self,
         from_expr: &Expr,
         then_expr: Option<&Expr>,
         to_expr: Option<&Expr>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let Some(type_name) = self.infer_adt_type_from_expr(from_expr) else {
-            return Ok(None);
+        let (type_name, last_tag) = if let Some(last) = self.standard_enum_last_tag(from_expr) {
+            (None, last)
+        } else {
+            let Some(type_name) = self.infer_adt_type_from_expr(from_expr) else {
+                return Ok(None);
+            };
+            if !self.derived_from_enum_fns.contains_key(&type_name) {
+                return Ok(None);
+            }
+            let metas: Vec<&ConstructorMeta> = self
+                .constructor_metadata
+                .values()
+                .filter(|m| m.type_name.as_deref() == Some(type_name.as_str()))
+                .collect();
+            if metas.is_empty() || metas.iter().any(|m| m.arity != 0) {
+                return Ok(None);
+            }
+            let last_tag = metas.iter().map(|m| m.tag).max().unwrap_or(0);
+            (Some(type_name), last_tag)
         };
-        if !self.derived_from_enum_fns.contains_key(&type_name) {
-            return Ok(None);
-        }
-        let metas: Vec<&ConstructorMeta> = self
-            .constructor_metadata
-            .values()
-            .filter(|m| m.type_name.as_deref() == Some(type_name.as_str()))
-            .collect();
-        if metas.is_empty() || metas.iter().any(|m| m.arity != 0) {
-            return Ok(None);
-        }
-        let last_tag = metas.iter().map(|m| m.tag).max().unwrap_or(0);
         let i64_ty = self.type_mapper().i64_type();
         let tag_of = |this: &mut Self, e: &Expr| -> CodegenResult<IntValue<'ctx>> {
             let v = this
                 .lower_expr(e)?
                 .ok_or_else(|| CodegenError::Internal("enum range: no value".to_string()))?;
-            this.call_derived_from_enum(&type_name, v)
+            match &type_name {
+                Some(name) => this.call_derived_from_enum(name, v),
+                None => this.standard_enum_tag(v),
+            }
         };
         let from = tag_of(self, from_expr)?;
         let (then, has_then) = match then_expr {
@@ -54963,10 +55200,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         {
                             return Ok(Some(self.build_io_action(expr)?.into()));
                         }
-                        if name == "readLn" {
-                            // `readLn` parses at the type it is used at.
-                            let saved =
-                                std::mem::replace(&mut self.current_builtin_ty, var.ty.clone());
+                        if matches!(name, "readLn" | "minBound" | "maxBound") {
+                            // `readLn` parses at the type it is used at, and
+                            // a bound is the bound of that type.
+                            let stamp = if matches!(var.ty, Ty::Error) {
+                                var.checked_ty.clone()
+                            } else {
+                                var.ty.clone()
+                            };
+                            let saved = std::mem::replace(&mut self.current_builtin_ty, stamp);
                             let result = self.lower_builtin(name, &[]);
                             self.current_builtin_ty = saved;
                             return result;
@@ -55782,7 +56024,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | "isInfinite"
                 | "realToFrac"
         ) || (matches!(name, "floor" | "ceiling" | "round" | "truncate")
-            && matches!(var.ty, Ty::Fun(..)));
+            && matches!(var.ty, Ty::Fun(..)))
+            // `map fromEnum [LT, GT]`, `map succ [1 :: Integer ..]` and
+            // `map recip xs`: the generic wrapper sees an untyped value, and
+            // returned a constructor's address or crashed.
+            || (matches!(name, "fromEnum" | "succ" | "pred" | "recip")
+                && matches!(&var.ty, Ty::Fun(a, _)
+                    if !matches!(a.as_ref(), Ty::Var(_) | Ty::Error | Ty::Forall(..))));
         if !applies {
             return None;
         }

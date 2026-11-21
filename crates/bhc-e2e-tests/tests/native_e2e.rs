@@ -1123,6 +1123,13 @@ fn test_tier3_higher_kinds_native() {
     run_native_test("tier3_io/higher_kinds", Profile::Default);
 }
 
+// Enum and Bounded at Bool, Ordering, (), Char and Integer, and defaulted
+// fractional values inside tuples, lists and Maybe
+#[test]
+fn test_tier3_standard_enum_numeric_native() {
+    run_native_test("tier3_io/standard_enum_numeric", Profile::Default);
+}
+
 // Hand-written Show, Eq and Ord instances for a type with parameters
 #[test]
 fn test_tier3_instance_parameterized_type_native() {

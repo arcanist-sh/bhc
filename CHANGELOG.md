@@ -6,6 +6,14 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A definition that needs a standard class on one of its signature's type
+  variables is rejected unless the signature's context gives it:
+  `increment :: a -> a; increment x = x + 1` reports "No instance for
+  `Num a` in `increment`". The constraint used to be defaulted, so the
+  function silently worked only at `Int` or `Double` (#97).
+
 ## [0.2.30] - 2026-11-20
 
 A program bhc cannot run correctly no longer compiles: a function bhc does

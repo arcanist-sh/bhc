@@ -24,6 +24,34 @@ use crate::diagnostics;
 use crate::env::{ClassInfo, InstanceInfo, TypeEnv};
 use crate::TypedModule;
 
+/// A standard class and its superclasses, or `None` for any other class.
+fn standard_class_closure(class: &str) -> Option<&'static [&'static str]> {
+    Some(match class {
+        "Eq" => &["Eq"],
+        "Ord" => &["Ord", "Eq"],
+        "Show" => &["Show"],
+        "Enum" => &["Enum"],
+        "Bounded" => &["Bounded"],
+        "Num" => &["Num"],
+        "Real" => &["Real", "Num", "Ord", "Eq"],
+        "Integral" => &["Integral", "Real", "Enum", "Num", "Ord", "Eq"],
+        "Fractional" => &["Fractional", "Num"],
+        "Floating" => &["Floating", "Fractional", "Num"],
+        "RealFrac" => &["RealFrac", "Real", "Fractional", "Num", "Ord", "Eq"],
+        "RealFloat" => &[
+            "RealFloat",
+            "RealFrac",
+            "Floating",
+            "Real",
+            "Fractional",
+            "Num",
+            "Ord",
+            "Eq",
+        ],
+        _ => return None,
+    })
+}
+
 /// The type of `mask`'s `restore` argument, `forall a. IO a -> IO a`.
 pub(crate) fn rank2_restore(io_con: TyCon) -> Ty {
     let a = TyVar::new_star(0xFFFF_0010);
@@ -161,6 +189,11 @@ pub struct TyCtxt {
     /// defaulted: `let h x = x + 1` defaulted to `Int` there left `h`'s Core
     /// binder at `Int -> Int` though it is used at `Integer` (#57).
     pub(crate) local_generalized_vars: rustc_hash::FxHashSet<TyVar>,
+    /// The type variables of the signature being checked (their ids under
+    /// the current substitution). A constraint on one is not defaulted: it
+    /// must come from the signature's context
+    /// ([`TyCtxt::check_signature_context`]).
+    rigid_vars: rustc_hash::FxHashSet<u32>,
 
     /// Diagnostic handler for error collection.
     diag: DiagnosticHandler,
@@ -344,6 +377,7 @@ impl TyCtxt {
             env: TypeEnv::new(),
             generalizing: Vec::new(),
             local_generalized_vars: rustc_hash::FxHashSet::default(),
+            rigid_vars: rustc_hash::FxHashSet::default(),
             diag: DiagnosticHandler::new(),
             builtins: Builtins::default(),
             file_id,
@@ -951,6 +985,16 @@ impl TyCtxt {
 
             // If all args are type variables, try defaulting (single-arg only)
             if args.len() == 1 {
+                if let Ty::Var(v) = self.subst.apply_resolved(&args[0]) {
+                    if self.rigid_vars.contains(&v.id) {
+                        unsolved.push(Constraint::new_multi(
+                            constraint.class,
+                            args,
+                            constraint.span,
+                        ));
+                        continue;
+                    }
+                }
                 if let Ty::Var(ref v) = args[0] {
                     if self.local_generalized_vars.contains(v) {
                         continue;
@@ -9905,17 +9949,21 @@ impl TyCtxt {
     fn check_value_def(&mut self, value_def: &ValueDef) {
         // Save constraint count for per-binding scoping
         let constraint_start = self.constraints.len();
+        let errors_at_start = self.diag.error_count();
 
         // If ScopedTypeVariables is enabled and the sig has forall-bound vars,
         // instantiate the scheme and register scoped type variables so that
         // body annotations can reference the same type variables.
         let scoped_var_ids: Vec<u32>;
+        // The signature's variables, by id, as the copy checked here has them.
+        let mut sig_instance: FxHashMap<u32, Ty> = FxHashMap::default();
         let declared_ty = if self.scoped_type_variables {
             if let Some(sig) = &value_def.sig {
                 if !sig.vars.is_empty() {
                     let (instantiated, subst) = crate::instantiate::instantiate_scoped(self, sig);
                     scoped_var_ids = sig.vars.iter().map(|v| v.id).collect();
                     self.push_scoped_type_vars(&subst);
+                    sig_instance = subst;
                     Some(instantiated)
                 } else {
                     scoped_var_ids = Vec::new();
@@ -9938,7 +9986,9 @@ impl TyCtxt {
                     sig.vars.clone()
                 };
                 let scheme = Scheme::poly(vars, sig.ty.clone());
-                crate::instantiate::instantiate_scoped(self, &scheme).0
+                let (instantiated, subst) = crate::instantiate::instantiate_scoped(self, &scheme);
+                sig_instance = subst;
+                instantiated
             })
         };
 
@@ -9984,7 +10034,26 @@ impl TyCtxt {
 
         // Solve constraints accumulated during this binding's inference.
         // Unsolved constraints (involving type variables) become part of the scheme.
+        // A signature's own variables are not defaulted: their constraints
+        // must come from the signature (#97).
+        let check_context = value_def.sig.is_some()
+            && !self.checking_instance_methods
+            && self.diag.error_count() == errors_at_start;
+        let outer_rigid = std::mem::take(&mut self.rigid_vars);
+        if check_context {
+            for ty in sig_instance.values() {
+                if let Ty::Var(v) = self.subst.apply_resolved(ty) {
+                    self.rigid_vars.insert(v.id);
+                }
+            }
+        }
         let unsolved = self.solve_constraints_partition(constraint_start);
+        self.rigid_vars = outer_rigid;
+        if check_context {
+            if let Some(sig) = &value_def.sig {
+                self.check_signature_context(value_def, sig, &sig_instance, &unsolved);
+            }
+        }
 
         // Generalize and store the scheme
         let final_ty = self.apply_subst(&inferred_ty);
@@ -10020,6 +10089,110 @@ impl TyCtxt {
 
         self.def_schemes.insert(value_def.id, scheme.clone());
         self.env.insert_global(value_def.id, scheme);
+    }
+
+    /// Report a constraint the definition needs on one of its signature's
+    /// type variables that the signature's context does not provide:
+    /// `g :: a -> a; g x = x + 1` compiled, and its `Num a` was defaulted to
+    /// `Int` (#97).
+    ///
+    /// Only the standard classes, whose superclasses are known here, are
+    /// checked; a variable the context gives any other class is skipped,
+    /// since that class may have the needed one as a superclass.
+    fn check_signature_context(
+        &mut self,
+        value_def: &ValueDef,
+        sig: &Scheme,
+        sig_instance: &FxHashMap<u32, Ty>,
+        needed: &[Constraint],
+    ) {
+        // What the context gives each signature variable.
+        let mut given: FxHashMap<u32, Vec<&'static str>> = FxHashMap::default();
+        let mut opaque: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+        for constraint in &sig.constraints {
+            let [Ty::Var(v)] = constraint.args.as_slice() else {
+                // A context on a compound type (`Show (f a)`) may provide
+                // anything for its variables.
+                for arg in &constraint.args {
+                    for v in arg.free_vars() {
+                        if let Some(Ty::Var(w)) = sig_instance
+                            .get(&v.id)
+                            .map(|t| self.subst.apply_resolved(t))
+                        {
+                            opaque.insert(w.id);
+                        }
+                    }
+                }
+                continue;
+            };
+            let Some(Ty::Var(w)) = sig_instance
+                .get(&v.id)
+                .map(|t| self.subst.apply_resolved(t))
+            else {
+                continue;
+            };
+            match standard_class_closure(constraint.class.as_str()) {
+                Some(classes) => given.entry(w.id).or_default().extend(classes),
+                None => {
+                    opaque.insert(w.id);
+                }
+            }
+        }
+        let names: FxHashMap<u32, String> = {
+            let declared: Vec<TyVar> = sig_instance
+                .values()
+                .filter_map(|t| match self.subst.apply_resolved(t) {
+                    Ty::Var(v) => Some(v),
+                    _ => None,
+                })
+                .collect();
+            signature_variable_names(&declared)
+        };
+        for constraint in needed {
+            let class = constraint.class.as_str();
+            if standard_class_closure(class).is_none() {
+                continue;
+            }
+            let [arg] = constraint.args.as_slice() else {
+                continue;
+            };
+            let Ty::Var(v) = self.subst.apply_resolved(arg) else {
+                continue;
+            };
+            if !self.rigid_vars_of(sig_instance).contains(&v.id) || opaque.contains(&v.id) {
+                continue;
+            }
+            if given.get(&v.id).is_some_and(|g| g.contains(&class)) {
+                continue;
+            }
+            let var = names.get(&v.id).map_or("a", String::as_str);
+            let diag = Diagnostic::error(format!(
+                "No instance for `{class} {var}` in `{}`",
+                value_def.name.as_str()
+            ))
+            .with_label(
+                self.full_span(value_def.span),
+                format!("the definition needs `{class} {var}`"),
+            )
+            .with_note(format!(
+                "add `{class} {var}` to the context of `{}`'s signature",
+                value_def.name.as_str()
+            ));
+            self.emit_error(diag);
+            return;
+        }
+    }
+
+    /// The ids the signature's variables have under the current
+    /// substitution.
+    fn rigid_vars_of(&self, sig_instance: &FxHashMap<u32, Ty>) -> rustc_hash::FxHashSet<u32> {
+        sig_instance
+            .values()
+            .filter_map(|t| match self.subst.apply_resolved(t) {
+                Ty::Var(v) => Some(v.id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A signature's type variables are rigid: the definition must work for

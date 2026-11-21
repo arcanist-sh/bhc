@@ -243,6 +243,13 @@ fn test_rejected_instance_errors() {
     expect_rejected(file, "No instance for `Box []`");
 }
 
+#[test]
+fn test_rejected_signature_missing_constraint() {
+    let file = "signature_missing_constraint.hs";
+    expect_rejected(file, "No instance for `Num a` in `increment`");
+    expect_rejected(file, "No instance for `Fractional a` in `half`");
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================

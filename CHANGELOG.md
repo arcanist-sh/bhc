@@ -13,6 +13,11 @@ All notable changes to BHC are recorded here. The format follows
   `increment :: a -> a; increment x = x + 1` reports "No instance for
   `Num a` in `increment`". The constraint used to be defaulted, so the
   function silently worked only at `Int` or `Double` (#97).
+- `succ`, `pred`, `toEnum` and `fromEnum`, `even`, `odd`, `div`, `mod` and the
+  other `Integral` operations, and `round`, `truncate`, `floor` and `ceiling`
+  are checked against their class: `succ "x"`, `even 'c'`, `(2 :: Int) / 3`
+  and `div 2.5 2` are `No instance` errors instead of running on the wrong
+  representation (#97).
 
 ## [0.2.30] - 2026-11-20
 

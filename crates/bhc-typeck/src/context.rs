@@ -24,6 +24,25 @@ use crate::diagnostics;
 use crate::env::{ClassInfo, InstanceInfo, TypeEnv};
 use crate::TypedModule;
 
+/// Whether `name` is one of the standard integral types.
+fn is_integral_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Int"
+            | "Integer"
+            | "Word"
+            | "Natural"
+            | "Int8"
+            | "Int16"
+            | "Int32"
+            | "Int64"
+            | "Word8"
+            | "Word16"
+            | "Word32"
+            | "Word64"
+    )
+}
+
 /// A standard class and its superclasses, or `None` for any other class.
 fn standard_class_closure(class: &str) -> Option<&'static [&'static str]> {
     Some(match class {
@@ -704,8 +723,15 @@ impl TyCtxt {
             } else {
                 (
                     format!("used here at the type `{shown}`"),
-                    if matches!(shown.as_str(), "Float" | "Double") {
+                    if class == "Enum" {
+                        format!("`{shown}` is not an enumeration: it has no `Enum` instance")
+                    } else if matches!(shown.as_str(), "Float" | "Double") {
                         format!("`{shown}` is not an integral type: it has no `{class}` instance")
+                    } else if is_integral_type_name(&shown) {
+                        format!(
+                            "`{shown}` is an integral type: it has no `{class}` instance; \
+                             convert it with `fromIntegral` first"
+                        )
                     } else {
                         format!("`{shown}` is not a number: it has no `{class}` instance")
                     },
@@ -778,10 +804,26 @@ impl TyCtxt {
         !declared
     }
 
-    /// Whether `ty` is a builtin type with no instance of the numeric class
-    /// `class`, and the program declares none for it.
+    /// Whether `ty` is a builtin type with no instance of the standard class
+    /// `class` (a numeric class or `Enum`), and the program declares none
+    /// for it.
     fn is_plainly_not_numeric(&self, class: &str, ty: &Ty) -> bool {
-        if !matches!(class, "Num" | "Fractional" | "Integral") {
+        const NUMERIC: [&str; 5] = ["Num", "Fractional", "Integral", "Floating", "RealFrac"];
+        let declared = |classes: &[&str]| {
+            classes
+                .iter()
+                .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
+        };
+        if class == "Enum" {
+            // `()` is the empty tuple, and it is an enumeration.
+            let not_enum = match ty {
+                Ty::Tuple(elems) => !elems.is_empty(),
+                Ty::List(_) => true,
+                _ => false,
+            };
+            return not_enum && !declared(&["Enum"]);
+        }
+        if !NUMERIC.contains(&class) {
             return false;
         }
         let not_a_number = match ty {
@@ -789,19 +831,25 @@ impl TyCtxt {
             Ty::Con(con) => matches!(con.name.as_str(), "Char" | "Bool" | "()"),
             _ => false,
         };
-        // `Integral` and `Fractional` operations are also `Num` ones; an
+        // The other numeric classes' operations are also `Num` ones; an
         // instance of any of them is the program saying the type is a number.
-        if not_a_number
-            && !["Num", "Fractional", "Integral"]
-                .iter()
-                .any(|c| self.env.resolve_instance(Symbol::intern(c), ty).is_some())
-        {
+        if not_a_number && !declared(&NUMERIC) {
             return true;
         }
-        // A floating-point type is a number but not an integral one:
-        // `fromIntegral (1.5 :: Double)` printed 1.5.
-        class == "Integral"
-            && matches!(ty, Ty::Con(con) if matches!(con.name.as_str(), "Float" | "Double"))
+        let Ty::Con(con) = ty else {
+            return false;
+        };
+        match class {
+            // A floating-point type is a number but not an integral one:
+            // `fromIntegral (1.5 :: Double)` printed 1.5.
+            "Integral" => matches!(con.name.as_str(), "Float" | "Double"),
+            // An integral type is not a fractional one: `(2 :: Int) / 3`
+            // compiled and divided as integers (#97).
+            "Fractional" | "Floating" | "RealFrac" => {
+                is_integral_type_name(con.name.as_str()) && !declared(&[class])
+            }
+            _ => false,
+        }
     }
 
     /// A string literal under OverloadedStrings that is used as a list is a
@@ -2941,7 +2989,14 @@ impl TyCtxt {
                     "+" | "-" | "*" | "negate" | "abs" | "signum" => ("Num", false),
                     "sum" | "product" => ("Num", true),
                     "/" | "recip" => ("Fractional", false),
-                    "fromIntegral" | "toInteger" => ("Integral", false),
+                    "fromIntegral" | "toInteger" | "even" | "odd" | "div" | "mod" | "quot"
+                    | "rem" | "divMod" | "quotRem" | "gcd" | "lcm" => ("Integral", false),
+                    "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "logBase" | "**" => {
+                        ("Floating", false)
+                    }
+                    "truncate" | "round" | "floor" | "ceiling" => ("RealFrac", false),
+                    "succ" | "pred" | "fromEnum" => ("Enum", false),
+                    "toEnum" => ("Enum", true),
                     _ => return None,
                 };
                 Some((*id, class))

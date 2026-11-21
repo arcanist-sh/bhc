@@ -250,6 +250,16 @@ fn test_rejected_signature_missing_constraint() {
     expect_rejected(file, "No instance for `Fractional a` in `half`");
 }
 
+#[test]
+fn test_rejected_standard_class_operations() {
+    let file = "standard_class_operations.hs";
+    expect_rejected(file, "No instance for `Enum [Char]`");
+    expect_rejected(file, "No instance for `Integral Char`");
+    expect_rejected(file, "No instance for `Fractional Int`");
+    expect_rejected(file, "No instance for `Integral Double`");
+    expect_rejected(file, "No instance for `RealFrac Int`");
+}
+
 // =============================================================================
 // Tier 1: Simple Tests
 // =============================================================================

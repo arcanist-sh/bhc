@@ -18,6 +18,10 @@ All notable changes to BHC are recorded here. The format follows
 - The non-exhaustive and redundant pattern warnings are printed the same
   way, pointing at the definition or at the equation that is never reached.
   They were plain text with no location.
+- Errors carry a stable code (`error[E0040]: No instance for ...`), and
+  `bhc explain E0040` explains it with an example and its fix; `bhc explain`
+  lists the codes. Every code the type checker uses is explained, and a
+  test keeps it so.
 - `bhc check` ends with "`<file>` failed to check" instead of "Type checking
   failed", which it also said for a parse error, and error counts read
   "1 error".
@@ -53,6 +57,9 @@ All notable changes to BHC are recorded here. The format follows
   nothing determines) are type errors. They type-checked and then failed
   in code generation with "`<>` is not implemented by bhc" or "length
   expects a list".
+- A class operation at a type that reaches it through a chain of type
+  variables is checked: `half :: Int -> Int; half n = n / 2` compiled, as
+  the check looked only one step down the chain.
 
 ## [0.2.30] - 2026-11-20
 

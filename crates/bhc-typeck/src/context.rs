@@ -674,6 +674,7 @@ impl TyCtxt {
                 shown
             };
             let diag = Diagnostic::error(format!("No instance for `{} {shown}`", class.as_str()))
+                .with_code("E0040")
                 .with_label(self.full_span(span), format!("used here at `{shown}`"))
                 .with_note(format!(
                     "the class `{}` has no instance for `{shown}`",
@@ -700,10 +701,17 @@ impl TyCtxt {
     /// no numeric instance unless the program declares one.
     pub fn check_class_ops_not_at_functions(&mut self) {
         for (class, operand, span) in std::mem::take(&mut self.class_op_uses) {
-            let operand = self.subst.apply(&operand);
-            let is_function = matches!(operand, Ty::Fun(..));
+            // Through chains of variables: `apply` resolves one step, and
+            // `half n = n / 2` at `n :: Int` was checked at a variable.
+            let operand = self.subst.apply_resolved(&operand);
+            // A function is a `Semigroup` and a `Monoid` when its result is
+            // (`comparing fst <> compare`, as pandoc's Ipynb writer does), so
+            // only the other classes have no instance at a function.
+            let is_function =
+                matches!(operand, Ty::Fun(..)) && !matches!(class, "Semigroup" | "Monoid");
             if let Some(name) = self.local_type_without_instance(class, &operand) {
                 let diag = Diagnostic::error(format!("No instance for `{class} {name}`"))
+                    .with_code("E0040")
                     .with_label(
                         self.full_span(span),
                         format!("used here at the type `{name}`"),
@@ -757,6 +765,7 @@ impl TyCtxt {
                 )
             };
             let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                .with_code("E0040")
                 .with_label(self.full_span(span), label)
                 .with_note(note);
             self.emit_error(diag);
@@ -1105,6 +1114,7 @@ impl TyCtxt {
                     };
                     let class = constraint.class.as_str();
                     let diag = Diagnostic::error(format!("No instance for `{class} {shown}`"))
+                        .with_code("E0040")
                         .with_label(
                             self.full_span(constraint.span),
                             format!("this needs `{shown}` to be a number"),
@@ -1153,11 +1163,17 @@ impl TyCtxt {
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
-                    self.diag.emit(Diagnostic::error(format!(
+                    let diag = Diagnostic::error(format!(
                         "No instance for `{} {}`",
                         constraint.class.as_str(),
                         args_str
-                    )));
+                    ))
+                    .with_code("E0040")
+                    .with_label(
+                        self.full_span(constraint.span),
+                        "no instance matches these types",
+                    );
+                    self.diag.emit(diag);
                     continue;
                 }
                 // Untracked (imported) class: fall through and defer to
@@ -9388,6 +9404,7 @@ impl TyCtxt {
                         method.name.as_str(),
                         instance.class.as_str()
                     ))
+                    .with_code("E0045")
                     .with_label(self.full_span(method.span), "defined in this instance")
                     .with_note("an instance can only define the methods its class declares");
                     self.emit_error(diag);
@@ -9699,6 +9716,7 @@ impl TyCtxt {
                 instance.class.as_str(),
                 first.message
             ))
+            .with_code("E0045")
             .with_label(self.full_span(method.span), "in this method")
             .with_note(format!(
                 "the class declares `{}`; at this instance its class variable is `{head}`",
@@ -10262,6 +10280,7 @@ impl TyCtxt {
                 "No instance for `{class} {shown}` in `{}`",
                 value_def.name.as_str()
             ))
+            .with_code("E0006")
             .with_label(
                 self.full_span(constraint.span),
                 "a number is used here where a container is expected",
@@ -10354,6 +10373,7 @@ impl TyCtxt {
                 "No instance for `{class} {var}` in `{}`",
                 value_def.name.as_str()
             ))
+            .with_code("E0040")
             .with_label(
                 self.full_span(value_def.span),
                 format!("the definition needs `{class} {var}`"),
@@ -10431,6 +10451,7 @@ impl TyCtxt {
                     ),
                 };
                 let diag = Diagnostic::error(message)
+                    .with_code("E0010")
                     .with_label(self.full_span(value_def.span), label)
                     .with_note(format!(
                         "a type variable in a signature stands for every type: \

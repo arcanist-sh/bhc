@@ -1122,6 +1122,33 @@ fn pretty_tyvar(var: &TyVar) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every code the checker attaches to a diagnostic has an explanation
+    /// for `bhc explain` (#146).
+    #[test]
+    fn every_error_code_is_explained() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut codes = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("source directory") {
+            let path = entry.expect("source file").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source text");
+            for piece in text.split("with_code(\"").skip(1) {
+                if let Some(code) = piece.split('"').next() {
+                    codes.push(code.to_string());
+                }
+            }
+        }
+        assert!(codes.len() > 20, "found only {} codes", codes.len());
+        for code in codes {
+            assert!(
+                bhc_diagnostics::explain::get_explanation(&code).is_some(),
+                "`{code}` has no explanation in bhc-diagnostics/src/explain.rs"
+            );
+        }
+    }
     use bhc_intern::Symbol;
     use bhc_types::{Kind, TyCon};
 

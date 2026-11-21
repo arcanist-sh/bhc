@@ -362,6 +362,16 @@ fn report_diagnostics(module: &str, diagnostics: &[bhc_diagnostics::Diagnostic])
         bhc_diagnostics::render::CargoRenderer::with_config(&map, config).render_all(diagnostics);
         true
     });
+    // As rustc does: point at `bhc explain` for the codes just shown.
+    let mut codes: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(|d| d.code.as_deref())
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    if let (Some(first), true) = (codes.first(), rendered) {
+        eprintln!("For more information about an error, try `bhc explain {first}`.");
+    }
     if !rendered {
         for diag in diagnostics {
             eprintln!("{}: {}", diag.severity.label(), diag.message);

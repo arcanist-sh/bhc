@@ -202,6 +202,12 @@ enum Commands {
     /// Start the interactive REPL
     Repl,
 
+    /// Explain an error code (`bhc explain E0040`), or list the codes
+    Explain {
+        /// The code, as printed in an error (`E0040`); omit it to list all
+        code: Option<String>,
+    },
+
     /// Show version information
     Version,
 
@@ -211,6 +217,28 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+/// `bhc explain [CODE]`: print the explanation of an error code, or list
+/// the codes with their titles. An unknown code is an error.
+fn explain_code(code: Option<&str>) -> Result<()> {
+    use bhc_diagnostics::explain;
+    let Some(code) = code else {
+        for code in explain::all_error_codes() {
+            if let Some(entry) = explain::get_explanation(code) {
+                println!("{code}  {}", entry.title);
+            }
+        }
+        return Ok(());
+    };
+    let code = code.trim().to_ascii_uppercase();
+    match explain::get_explanation(&code) {
+        Some(entry) => {
+            println!("{}", explain::format_explanation(entry).trim_end());
+            Ok(())
+        }
+        None => anyhow::bail!("no explanation for `{code}`; `bhc explain` lists the codes"),
+    }
 }
 
 /// Install a panic hook that reports internal compiler errors with a
@@ -337,6 +365,9 @@ fn real_main() -> Result<()> {
         }
         Some(Commands::Repl) => {
             start_repl(&cli)?;
+        }
+        Some(Commands::Explain { ref code }) => {
+            explain_code(code.as_deref())?;
         }
         Some(Commands::Version) => {
             print_version();

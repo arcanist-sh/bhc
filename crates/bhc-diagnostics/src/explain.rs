@@ -9,7 +9,8 @@
 //! - `E00xx`: Basic type mismatches (E0001-E0019)
 //! - `E002x`: Shape/dimension errors (E0020-E0039)
 //! - `E003x`: Tensor operation errors (E0030-E0039)
-//! - `E004x`: Pattern matching errors (E0040-E0049)
+//! - `E001x`: Signatures (E0010)
+//! - `E004x`: Classes, instances and type families (E0040-E0049)
 //! - `E005x`: Module/import errors (E0050-E0059)
 //! - `W0xxx`: Warnings
 //! - `W001x`: Unused bindings (W0010-W0019)
@@ -89,7 +90,7 @@ foo :: Int -> Int
 foo x = x + 1
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/type-system"),
+            doc_link: None,
             related_codes: &["E0007", "E0009"],
             common_mistakes: &[
                 CommonMistake {
@@ -137,7 +138,7 @@ foo :: a -> Tree a
 foo x = Node [Leaf x, foo x]
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/type-inference"),
+            doc_link: None,
             related_codes: &["E0001", "E0022"],
             common_mistakes: &[CommonMistake {
                 pattern: "Building a list containing the result of a recursive call",
@@ -173,7 +174,7 @@ foo = x + 1  -- Error: x is not defined
 foo x = x + 1  -- x is now a parameter
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/scoping"),
+            doc_link: None,
             related_codes: &["E0004"],
             common_mistakes: &[
                 CommonMistake {
@@ -221,7 +222,7 @@ foo = Jus 42  -- Error: typo, should be Just
 foo = Just 42  -- Correct constructor name
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/data-types"),
+            doc_link: None,
             related_codes: &["E0003", "E0005"],
             common_mistakes: &[
                 CommonMistake {
@@ -264,7 +265,7 @@ foo (Point x y) = x + y  -- Correct: matches both fields
 foo (Point x _) = x      -- Ignore second field
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/pattern-matching"),
+            doc_link: None,
             related_codes: &["E0004", "E0008"],
             common_mistakes: &[CommonMistake {
                 pattern: "Missing pattern variables",
@@ -300,7 +301,7 @@ foo = show (read "42")  -- Error: ambiguous type for read
 foo = show (read "42" :: Int)  -- Explicit type annotation
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/type-inference"),
+            doc_link: None,
             related_codes: &["E0001"],
             common_mistakes: &[
                 CommonMistake {
@@ -342,7 +343,7 @@ foo :: Int Maybe  -- Error: Int has kind *, not * -> *
 foo :: Maybe Int  -- Correct: Maybe :: * -> *, Int :: *
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/kinds"),
+            doc_link: None,
             related_codes: &["E0001"],
             common_mistakes: &[CommonMistake {
                 pattern: "Type arguments in wrong order",
@@ -382,7 +383,7 @@ add x y = x + y
 result = add 1 2  -- Correct: 2 arguments
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/functions"),
+            doc_link: None,
             related_codes: &["E0005", "E0009"],
             common_mistakes: &[CommonMistake {
                 pattern: "Passing extra arguments",
@@ -418,7 +419,7 @@ f x = x + 1
 result = f 10  -- Correct: f is a function
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/functions"),
+            doc_link: None,
             related_codes: &["E0001", "E0008"],
             common_mistakes: &[
                 CommonMistake {
@@ -466,7 +467,7 @@ result = matmul a b  -- Error: dimension mismatch
 result = matmul a b  -- OK: produces [3, 4]
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/tensors/shapes"),
+            doc_link: None,
             related_codes: &["E0023", "E0030", "E0031"],
             common_mistakes: &[
                 CommonMistake {
@@ -512,7 +513,7 @@ b :: Tensor '[10, 5] Float   -- rank 2 (matrix)
 result = matmul a b  -- OK: produces [1, 5]
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/tensors/ranks"),
+            doc_link: None,
             related_codes: &["E0020", "E0030"],
             common_mistakes: &[
                 CommonMistake {
@@ -573,7 +574,7 @@ result = matmul (transpose weights) input  -- [512, 1024]
 result = matmul input weights  -- Depends on what you want
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/tensors/matmul"),
+            doc_link: None,
             related_codes: &["E0020", "E0023", "E0038"],
             common_mistakes: &[
                 CommonMistake {
@@ -625,7 +626,7 @@ b :: Tensor '[1, 4] Float
 result = a + b  -- OK: b broadcasts to [3, 4]
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/tensors/broadcasting"),
+            doc_link: None,
             related_codes: &["E0020", "E0023"],
             common_mistakes: &[
                 CommonMistake {
@@ -674,7 +675,7 @@ processTensor dyn = case fromDynamic witness dyn of
     Nothing     -> Nothing  -- Handle shape mismatch
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/tensors/dynamic"),
+            doc_link: None,
             related_codes: &["E0020", "E0023"],
             common_mistakes: &[
                 CommonMistake {
@@ -686,6 +687,383 @@ processTensor dyn = case fromDynamic witness dyn of
                     fix: "Check shape at boundaries using fromDynamic safely",
                 },
             ],
+        },
+    );
+
+    // === Codes added for #146: each code an error carries is explained ===
+
+    map.insert(
+        "E0010",
+        ErrorExplanation {
+            code: "E0010",
+            title: "Definition less polymorphic than its signature",
+            explanation: r#"
+A type variable in a type signature stands for every type. The definition
+must work for all of them, so it may not pick one: when the body only works
+at `Bool`, the signature `a -> a` promises more than the definition gives.
+
+Either make the signature say the type the definition uses, or make the
+definition work for every type.
+"#,
+            example: Some(
+                r#"
+constant :: a -> a
+constant _ = True     -- E0010: the result is always a Bool
+"#,
+            ),
+            correct_example: Some(
+                r#"
+constant :: a -> Bool
+constant _ = True
+"#,
+            ),
+            doc_link: None,
+            related_codes: &["E0001", "E0040"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0040",
+        ErrorExplanation {
+            code: "E0040",
+            title: "No instance for a class",
+            explanation: r#"
+An operation needs a class instance that the type does not have: `show` needs
+`Show`, `+` and numeric literals need `Num`, `<>` needs `Semigroup`, and so on.
+
+Common causes:
+- the type is missing a `deriving` clause or an `instance` declaration;
+- a numeric literal is used where a list, tuple or IO action is expected
+  (`head 1` asks for `Num [a]`);
+- two numeric types are mixed: `Int` is not fractional, `Double` not integral;
+- a signature leaves out a class its definition uses: `f :: a -> a` with
+  `f x = x + 1` needs `Num a` in the context.
+"#,
+            example: Some(
+                r#"
+data Colour = Red | Green
+main = print Red          -- E0040: No instance for `Show Colour`
+
+half :: Int -> Int
+half n = n / 2            -- E0040: No instance for `Fractional Int`
+"#,
+            ),
+            correct_example: Some(
+                r#"
+data Colour = Red | Green deriving Show
+main = print Red
+
+half :: Int -> Int
+half n = n `div` 2
+"#,
+            ),
+            doc_link: None,
+            related_codes: &["E0001", "E0006", "E0010"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0045",
+        ErrorExplanation {
+            code: "E0045",
+            title: "Instance does not match its class",
+            explanation: r#"
+An instance must implement the class it names: each method it defines must
+be a method of the class, and must have the type the class gives it, with the
+class variable replaced by the instance's type.
+"#,
+            example: Some(
+                r#"
+class Size a where
+  size :: a -> Int
+
+instance Size Bool where
+  size _ = True           -- E0045: `size` must return Int
+  weight _ = 1            -- E0045: `weight` is not a method of `Size`
+"#,
+            ),
+            correct_example: Some(
+                r#"
+instance Size Bool where
+  size _ = 1
+"#,
+            ),
+            doc_link: None,
+            related_codes: &["E0001", "E0040"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0021",
+        ErrorExplanation {
+            code: "E0021",
+            title: "Type-level naturals differ",
+            explanation: r#"
+Two type-level natural numbers that must be equal are not, for example the
+lengths of two vectors that an operation requires to match.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0022", "E0026"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0022",
+        ErrorExplanation {
+            code: "E0022",
+            title: "Infinite dimension",
+            explanation: r#"
+A dimension variable would have to contain itself (`n = n + 1`), which no
+finite natural number satisfies.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0021", "E0002"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0024",
+        ErrorExplanation {
+            code: "E0024",
+            title: "Shape mismatch",
+            explanation: r#"
+Two type-level shapes (lists of dimensions) that must be equal are not: the
+tensors have different ranks or differ in some dimension.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0023", "E0036"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0025",
+        ErrorExplanation {
+            code: "E0025",
+            title: "Infinite shape",
+            explanation: r#"
+A shape variable would have to contain itself, which no finite shape
+satisfies.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0024", "E0002"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0026",
+        ErrorExplanation {
+            code: "E0026",
+            title: "Dimension constraint cannot be proved",
+            explanation: r#"
+The checker could not prove that two dimension expressions are equal. Annotate
+the tensor types, or make the dimensions match.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0021", "E0024"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0032",
+        ErrorExplanation {
+            code: "E0032",
+            title: "Transpose axis out of bounds",
+            explanation: r#"
+A transpose names an axis the tensor does not have: a tensor of rank `r` has
+axes `0` to `r - 1`.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0035"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0033",
+        ErrorExplanation {
+            code: "E0033",
+            title: "Concatenation shape mismatch",
+            explanation: r#"
+Tensors concatenated along an axis must agree in every other dimension.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0024", "E0036"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0034",
+        ErrorExplanation {
+            code: "E0034",
+            title: "Dimension has the wrong size",
+            explanation: r#"
+An operation requires one dimension of its argument to have a particular
+size, and the argument's dimension differs.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0036"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0035",
+        ErrorExplanation {
+            code: "E0035",
+            title: "Wrong tensor rank",
+            explanation: r#"
+An operation expects a tensor of one rank (a scalar, vector, matrix, ...) and
+was given one of another rank.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0023", "E0032"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0036",
+        ErrorExplanation {
+            code: "E0036",
+            title: "Shape mismatch at an axis",
+            explanation: r#"
+Two shapes agree in rank but differ in the size of one axis, which the error
+names.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0024", "E0034"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0038",
+        ErrorExplanation {
+            code: "E0038",
+            title: "Shapes appear transposed",
+            explanation: r#"
+A shape does not match the expected one, but its transpose would. A
+`transpose` of the argument is the likely fix.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0030", "E0036"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0039",
+        ErrorExplanation {
+            code: "E0039",
+            title: "Matrix multiplication arguments swapped",
+            explanation: r#"
+The inner dimensions of a matrix multiplication do not match, but would with
+the arguments swapped: `matmul b a` instead of `matmul a b`.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0030"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0041",
+        ErrorExplanation {
+            code: "E0041",
+            title: "Type family does not reduce",
+            explanation: r#"
+A type family application has no equation that matches its arguments, so it
+does not reduce to a type. Add an instance for these arguments, or check the
+argument types.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0042", "E0044"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0042",
+        ErrorExplanation {
+            code: "E0042",
+            title: "Type family not found",
+            explanation: r#"
+A type family is used that is neither declared in the module nor imported.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0041"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0043",
+        ErrorExplanation {
+            code: "E0043",
+            title: "Missing associated type",
+            explanation: r#"
+A class declares an associated type, and an instance of the class does not
+define it (`type Elem T = ...` inside the instance).
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0041", "E0045"],
+            common_mistakes: &[],
+        },
+    );
+
+    map.insert(
+        "E0044",
+        ErrorExplanation {
+            code: "E0044",
+            title: "Overlapping type family instances",
+            explanation: r#"
+Two instances of an open type family match the same arguments. Instances of
+an open type family must not overlap.
+"#,
+            example: None,
+            correct_example: None,
+            doc_link: None,
+            related_codes: &["E0041"],
+            common_mistakes: &[],
         },
     );
 
@@ -719,7 +1097,7 @@ foo x _y = x + 1  -- No warning: _y is intentionally unused
 foo x y = x + y
 "#,
             ),
-            doc_link: Some("https://bhc.dev/docs/warnings"),
+            doc_link: None,
             related_codes: &[],
             common_mistakes: &[
                 CommonMistake {

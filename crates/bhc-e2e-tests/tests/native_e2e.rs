@@ -319,6 +319,55 @@ fn test_rejected_messages_are_readable() {
     );
 }
 
+/// Programs under `fixtures/accepted/` type-check: guards against a class
+/// check rejecting correct code.
+#[test]
+fn test_accepted_programs_check() {
+    let dir = bhc_e2e_tests::fixtures_dir().join("accepted");
+    for entry in std::fs::read_dir(&dir).expect("accepted fixtures") {
+        let path = entry.expect("fixture").path();
+        let output = std::process::Command::new("cargo")
+            .args(["run", "--quiet", "-p", "bhc", "--", "check"])
+            .arg(&path)
+            .output()
+            .expect("failed to run the compiler");
+        assert!(
+            output.status.success(),
+            "{} was rejected:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn test_rejected_class_op_in_signature() {
+    expect_rejected(
+        "class_op_in_signature.hs",
+        "error[E0040]: No instance for `Fractional Int`",
+    );
+}
+
+/// `bhc explain` prints a code's explanation, lists the codes without one,
+/// and fails for an unknown code (#146).
+#[test]
+fn test_explain_error_codes() {
+    let explain = |args: &[&str]| {
+        std::process::Command::new("cargo")
+            .args(["run", "--quiet", "-p", "bhc", "--", "explain"])
+            .args(args)
+            .output()
+            .expect("failed to run the compiler")
+    };
+    let one = explain(&["E0040"]);
+    let text = String::from_utf8_lossy(&one.stdout);
+    assert!(one.status.success() && text.contains("# E0040 - No instance for a class"));
+    let all = explain(&[]);
+    let text = String::from_utf8_lossy(&all.stdout);
+    assert!(all.status.success() && text.contains("E0010  Definition less polymorphic"));
+    assert!(!explain(&["E9999"]).status.success());
+}
+
 #[test]
 fn test_rejected_semigroup_and_ambiguous() {
     let file = "semigroup_and_ambiguous.hs";
